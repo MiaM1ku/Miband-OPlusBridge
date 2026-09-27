@@ -479,6 +479,10 @@ public final class SppDiagnosticClient implements AutoCloseable {
         try {
             if (closed) throw new Failure("CANCELLED");
             writeCommand(sequence, command);
+            // SPP V1 and BLE have no transport ACK. Gadgetbridge completes the write
+            // itself; request() still waits for the matching protobuf response.
+            // sentSequence is the handshake cursor and is not advanced by live writes.
+            if (framing != 0 && liveCommands != null) liveCommands.onAck(sequence);
         } catch (Exception failure) {
             linkStop = failure instanceof Failure typed ? typed.code : failure.getClass().getSimpleName();
             close();
@@ -761,7 +765,7 @@ public final class SppDiagnosticClient implements AutoCloseable {
                 } else {
                     XiaomiProto.Command command = nextCommand();
                     if (command != null) {
-                        if (liveCommands != null) liveCommands.onAck(sentSequence);
+                        // Transport ack already happened in writeLiveCommand. sentSequence is stale here.
                         if (onLiveCommand != null) onLiveCommand.accept(command);
                         liveCommands.onCommand(command);
                     }

@@ -79,6 +79,7 @@ public final class MainActivity extends AppCompatActivity {
     private Button restore;
     private Button advancedRestore;
     private boolean changingOwnership;
+    private boolean versionPromptShown;
     private boolean launchHostAfterOpen;
     private boolean profileAfterRestore;
     private boolean rootGranted;
@@ -231,6 +232,7 @@ public final class MainActivity extends AppCompatActivity {
 
     @Override protected void onResume() {
         super.onResume();
+        promptHostVersions();
         if (!rootGranted) requestRoot();
         else continueInit();
     }
@@ -252,6 +254,34 @@ public final class MainActivity extends AppCompatActivity {
         });
         ensureCallPermissions();
     }
+
+    private void promptHostVersions() {
+        if (isDestroyed() || versionPromptShown) return;
+        java.util.ArrayList<HostVersionNotice.Installed> installed = new java.util.ArrayList<>();
+        for (HostVersionNotice.Expectation expect : HostVersionNotice.EXPECTATIONS) {
+            try {
+                var info = getPackageManager().getPackageInfo(expect.packageName(), 0);
+                installed.add(new HostVersionNotice.Installed(expect.packageName(), info.versionName,
+                        info.getLongVersionCode(), true));
+            } catch (PackageManager.NameNotFoundException missing) {
+                installed.add(new HostVersionNotice.Installed(expect.packageName(), "", 0, false));
+            }
+        }
+        String finger = HostVersionNotice.fingerprint(installed);
+        if (finger.isEmpty()) return;
+        SharedPreferences prefs = getSharedPreferences("host-version-notice", MODE_PRIVATE);
+        if (finger.equals(prefs.getString("dismissed", ""))) return;
+        versionPromptShown = true;
+        String message = HostVersionNotice.message(installed);
+        new MaterialAlertDialogBuilder(this)
+                .setTitle("建议对齐已验证版本")
+                .setMessage(message)
+                .setCancelable(true)
+                .setPositiveButton("我知道了", (dialog, which) -> prefs.edit().putString("dismissed", finger).apply())
+                .setOnCancelListener(dialog -> prefs.edit().putString("dismissed", finger).apply())
+                .show();
+    }
+
 
     private void requestRoot() {
         if (worker.isShutdown() || probingRoot || changingOwnership) return;

@@ -492,9 +492,9 @@ public final class BandLiveService extends Service {
                 healthHostStatus("UNAVAILABLE");
                 return;
             }
-            var pkg = getPackageManager().getPackageInfo(HEALTH_PACKAGE, 0);
             var service = getPackageManager().getServiceInfo(HEALTH_SERVICE, 0);
-            if (pkg.getLongVersionCode() != 6093700L || !service.enabled || !service.exported
+            // Version drift is a one-time home-screen hint, not a reason to refuse the import bind.
+            if (!service.enabled || !service.exported
                     || !service.applicationInfo.enabled || !HEALTH_PACKAGE.equals(service.processName)
                     || (service.permission != null && !service.permission.isBlank())) {
                 healthHostStatus("UNAVAILABLE");

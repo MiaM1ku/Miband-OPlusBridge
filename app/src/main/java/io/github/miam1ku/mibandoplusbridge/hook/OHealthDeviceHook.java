@@ -1147,13 +1147,18 @@ public final class OHealthDeviceHook {
             Object holder = XposedHelpers.getStaticObjectField(bean.getClass().getClassLoader()
                     .loadClass("com.heytap.health.watch.notification.impl.whitelist.NotificationRoomHolder"),
                     "INSTANCE");
-            if (!Boolean.TRUE.equals(XposedHelpers.callMethod(holder, "getPackageSwitchStatus", "main_switch"))) {
+            if (!io.github.miam1ku.mibandoplusbridge.notify.NotifySwitch.on(
+                    XposedHelpers.callMethod(holder, "getPackageSwitchStatus", "main_switch"))) {
                 return false;
             }
             String pkg = text(bean, "getPackageName");
-            return Boolean.TRUE.equals(XposedHelpers.callMethod(holder, "getPackageSwitchStatus", pkg));
+            return io.github.miam1ku.mibandoplusbridge.notify.NotifySwitch.on(
+                    XposedHelpers.callMethod(holder, "getPackageSwitchStatus", pkg));
         } catch (Throwable unavailable) {
-            return false;
+            // RegisterCenter already accepted this notification. A changed whitelist API must not drop it.
+            android.util.Log.i("OplusBandBridge", "OHEALTH_NOTIFY_ALLOWLIST_UNAVAILABLE "
+                    + unavailable.getClass().getSimpleName());
+            return true;
         }
     }
 
