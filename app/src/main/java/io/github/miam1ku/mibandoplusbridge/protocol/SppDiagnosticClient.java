@@ -36,10 +36,6 @@ import org.json.JSONObject;
 public final class SppDiagnosticClient implements AutoCloseable {
     private static final AtomicReference<SppDiagnosticClient> ACTIVE = new AtomicReference<>();
     private static volatile CountDownLatch activeCompletion;
-    private static final String MODEL = "miwear.watch.q66cn";
-    private static final String HARDWARE = "M2616B1";
-    private static final String FIRMWARE = "4.100.139";
-    private static final String VERSION = "3.2.15";
     private static final String SERVICE = "00001101-0000-1000-8000-00805f9b34fb";
     private final Context context;
     private final Consumer<String> progress;
@@ -170,12 +166,15 @@ public final class SppDiagnosticClient implements AutoCloseable {
             input = created.getInputStream();
             output = created.getOutputStream();
             output.write(SppNegotiation.versionRequest(0));
-            var version = SppNegotiation.decodeVersionResponse(readExactly(SppNegotiation.VERSION_RESPONSE_LENGTH));
-            if (!VERSION.equals(version.versionName())) throw new Failure("PROTOCOL_VERSION_UNSUPPORTED");
+            try {
+                SppNegotiation.decodeVersionResponse(readExactly(SppNegotiation.VERSION_RESPONSE_LENGTH));
+            } catch (IllegalArgumentException unsupported) {
+                throw new Failure("PROTOCOL_VERSION_UNSUPPORTED");
+            }
             sendFrame(SppNegotiation.startSessionRequest());
             SppV2Codec.Frame configuration = readFrame();
             var config = SppV2Codec.parseSessionConfig(configuration);
-            if (config.opcode() != 2 || !Arrays.equals(config.version(), new byte[]{3, 2, 15})
+            if (config.opcode() != 2 || config.version() == null || config.version().length != 3
                     || config.maxPacketSize() == null || config.maxPacketSize() < 128
                     || config.txWindow() == null || config.txWindow() < 1) {
                 throw new Failure("SESSION_CONFIGURATION_UNSUPPORTED");
@@ -218,7 +217,9 @@ public final class SppDiagnosticClient implements AutoCloseable {
             var infoResponse = awaitCommand(2, 2);
             if (!infoResponse.hasSystem() || !infoResponse.getSystem().hasDeviceInfo()) throw new Failure("DEVICE_INFO_MISSING");
             var info = infoResponse.getSystem().getDeviceInfo();
-            if (!HARDWARE.equals(info.getModel()) || !FIRMWARE.equals(info.getFirmware())) throw new Failure("FIRMWARE_OR_MODEL_UNSUPPORTED");
+            if (info.getModel().isBlank() || info.getFirmware().isBlank()) {
+                throw new Failure("FIRMWARE_OR_MODEL_UNSUPPORTED");
+            }
             progress.accept("DEVICE_INFO_MATCHED");
             sendCommand(XiaomiProto.Command.newBuilder().setType(2).setSubtype(1).build());
             var batteryResponse = awaitCommand(2, 1);

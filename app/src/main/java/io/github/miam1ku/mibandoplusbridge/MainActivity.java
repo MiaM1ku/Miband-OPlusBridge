@@ -633,7 +633,9 @@ public final class MainActivity extends AppCompatActivity {
             case "USER_LOCKED" -> "请先解锁手机。";
             case "UNPROVISIONED", "BINDING_INCOMPLETE", "TOKEN_ENCODING_UNSUPPORTED" -> "绑定信息不完整或不可用，请在高级设置中重新导入。";
             case "OBSERVED_PROFILE_REQUIRED" -> "连接参数丢失。请点「采集连接参数」，在小米运动健康中重连一次手环。";
-            case "FIRMWARE_OR_MODEL_UNSUPPORTED" -> "导入的型号或已知固件尚未受支持，无法添加。";
+            case "FIRMWARE_OR_MODEL_UNSUPPORTED" -> "手环未返回可用的型号或固件。";
+            case "OOB_BRANCH_UNSUPPORTED" -> "这只设备使用了不受支持的配对认证。";
+            case "PROTOCOL_VERSION_UNSUPPORTED", "SESSION_CONFIGURATION_UNSUPPORTED" -> "官方连接不是可接管的 SPP 会话。蓝牙或 GATT-only 设备无法添加。";
             case "DEVICE_IDENTITY_CHANGED" -> "导入设备与已保存的设备身份不一致，不能替换。请重新导入原手环。";
             case "BAND_STATE_STORAGE_FAILED", "OWNERSHIP_STORAGE_FAILED" -> "设备状态未能保存，请检查可用存储空间后重试。";
             case "ROOT_REQUIRED", "ROOT_ACTION_FAILED", "ROOT_ACTION_TIMEOUT" -> "请确认已授予桥接应用 KernelSU root 权限后重试。";

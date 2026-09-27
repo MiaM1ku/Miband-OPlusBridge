@@ -7,11 +7,11 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 public final class TransportObservationTest {
-    private static JSONObject verified() throws Exception {
+    private static JSONObject verified(String model, String versionName) throws Exception {
         return new JSONObject()
-                .put("model", "miwear.watch.q66cn")
+                .put("model", model)
                 .put("transport", "SPP")
-                .put("versionName", "3.2.15")
+                .put("versionName", versionName)
                 .put("rfcommUuid", "00001101-0000-1000-8000-00805f9b34fb")
                 .put("rfcommSecure", true)
                 .put("officialAuthConnected", true)
@@ -20,15 +20,25 @@ public final class TransportObservationTest {
                 .put("authAppDeviceIdPresent", false);
     }
 
-    @Test public void verifiedProfileAllowsLiveSession() throws Exception {
-        assertTrue(TransportObservation.supportsLive(verified(), "miwear.watch.q66cn"));
+    @Test public void capturedSppWearAuthAllowsLiveSession() throws Exception {
+        assertTrue(TransportObservation.supportsLive(
+                verified("miwear.watch.q66cn", "3.2.15"), "miwear.watch.q66cn"));
+        assertTrue(TransportObservation.supportsLive(
+                verified("lchz.watch.m67", "1.0.50"), "lchz.watch.m67"));
     }
 
-    @Test public void emptyOrPartialProfileBlocksLiveSession() throws Exception {
+    @Test public void emptyMismatchedOrOobProfileBlocksLiveSession() throws Exception {
+        JSONObject band11 = verified("miwear.watch.q66cn", "3.2.15");
         assertFalse(TransportObservation.supportsLive(new JSONObject(), "miwear.watch.q66cn"));
-        assertFalse(TransportObservation.supportsLive(verified().put("officialAuthConnected", false),
+        assertFalse(TransportObservation.supportsLive(band11.put("officialAuthConnected", false),
                 "miwear.watch.q66cn"));
-        assertFalse(TransportObservation.supportsLive(verified(), "other.model"));
+        assertFalse(TransportObservation.supportsLive(verified("miwear.watch.q66cn", "3.2.15"), "other.model"));
         assertFalse(TransportObservation.supportsLive(null, "miwear.watch.q66cn"));
+        assertFalse(TransportObservation.supportsLive(
+                verified("lchz.watch.m67", "1.0.50").put("authOobPresent", true), "lchz.watch.m67"));
+        assertFalse(TransportObservation.supportsLive(
+                verified("lchz.watch.m67", "1.0.50").put("authAppDeviceIdPresent", true), "lchz.watch.m67"));
+        assertFalse(TransportObservation.supportsLive(
+                verified("lchz.watch.m67", "1.0.50").put("appCapability", 0), "lchz.watch.m67"));
     }
 }

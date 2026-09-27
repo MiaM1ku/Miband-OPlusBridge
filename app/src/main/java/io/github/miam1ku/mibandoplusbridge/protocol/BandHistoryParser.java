@@ -15,7 +15,7 @@ import java.util.Set;
 import org.json.JSONException;
 import org.json.JSONObject;
 
-/** Decoder for complete Xiaomi fitness files observed from M2616B1 firmware 4.100.139. */
+/** Decoder for complete Xiaomi fitness files on the SPP V2 activity channel. */
 public final class BandHistoryParser {
     private static final int MAX_FRAGMENTS = 256;
     private static final int MAX_FILE_BYTES = 1024 * 1024;
@@ -42,7 +42,7 @@ public final class BandHistoryParser {
 
     /** Identity material is the confirmed did or the same normalized MAC used for deviceId. */
     public BandHistoryParser(String firmware, String deviceId, String identityMaterial) {
-        if (!"4.100.139".equals(firmware) || identityMaterial == null || identityMaterial.isBlank()) {
+        if (firmware == null || firmware.isBlank() || identityMaterial == null || identityMaterial.isBlank()) {
             throw new IllegalArgumentException("UNSUPPORTED_HISTORY_SOURCE");
         }
         try {

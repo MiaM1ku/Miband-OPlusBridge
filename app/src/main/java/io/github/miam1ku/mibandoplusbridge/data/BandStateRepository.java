@@ -36,10 +36,9 @@ public final class BandStateRepository {
             JSONObject binding = new BindingStore(context).read();
             if (binding == null) throw new IllegalStateException("UNPROVISIONED");
             String model = binding.optString("model", "");
-            String firmware = binding.optString("firmware", "");
-            if (!"miwear.watch.q66cn".equals(model)
-                    || (!firmware.isBlank() && !"4.100.139".equals(firmware))) {
-                throw new IllegalStateException("FIRMWARE_OR_MODEL_UNSUPPORTED");
+            if (model.isBlank()
+                    || !TransportObservation.supportsLive(TransportObservation.read(context), model)) {
+                throw new IllegalStateException("OBSERVED_PROFILE_REQUIRED");
             }
             String mac = binding.optString("address", "");
             if (!mac.matches("[0-9A-F]{2}(:[0-9A-F]{2}){5}")
@@ -110,8 +109,7 @@ public final class BandStateRepository {
                     || !state.getString("modelId", "").equals(binding.model())) {
                 throw new IllegalStateException("DEVICE_IDENTITY_CHANGED");
             }
-            if (!"miwear.watch.q66cn".equals(binding.model())
-                    || !"4.100.139".equals(firmware) || !"M2616B1".equals(hardware)) {
+            if (firmware == null || firmware.isBlank() || hardware == null || hardware.isBlank()) {
                 throw new IllegalStateException("FIRMWARE_OR_MODEL_UNSUPPORTED");
             }
             if (!state.edit().putBoolean("connected", connected).putInt("battery", battery)

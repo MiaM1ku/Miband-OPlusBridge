@@ -2,9 +2,9 @@
 
 <img src="icon.png" width="96" alt="Miband-OPlusBridge">
 
-把 **小米手环 11** 接到 ColorOS **设备空间** 和 **OPPO 健康**。
+把小米运动健康能用 **SPP** 连上的手环接到 ColorOS **设备空间** 和 **OPPO 健康**。
 
-在设备空间里管理这只手环，查看连接与电量，并把步数、心率、睡眠写入 OPPO 健康；手机通知和来电可以转到手环。日常不必再打开小米运动健康。
+在设备空间里管理这只手环，查看连接与电量，并把步数、心率、睡眠写入 OPPO 健康；手机通知和来电可以转到手环。日常不必再打开小米运动健康。小米手环 11 已实机验证；手环 8 Pro 等只要官方重连是 SPP + WearAuthV2、且没有 OOB 额外认证，即可导入接管。仅 BLE / GATT 的设备不能添加。
 
 
 包名：`io.github.miam1ku.mibandoplusbridge`

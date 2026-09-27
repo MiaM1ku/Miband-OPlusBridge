@@ -162,9 +162,10 @@ public final class BandHistoryParserTest {
 
     @Test public void unsupportedFilesRemainArchivableButBadFramingFails() throws Exception {
         assertThrows(IllegalArgumentException.class,
-                () -> new BandHistoryParser("4.100.138", stableId(), DID));
+                () -> new BandHistoryParser("", stableId(), DID));
         assertThrows(IllegalArgumentException.class,
                 () -> new BandHistoryParser("4.100.139", stableId(), "different-did"));
+        new BandHistoryParser("1.0.50", stableId(), DID);
         BandHistoryParser parser = parser();
         for (int type : new int[] {0, 2 << 2, 3 << 2, 7 << 2}) {
             byte[] raw = file(99, type, new byte[] {0});

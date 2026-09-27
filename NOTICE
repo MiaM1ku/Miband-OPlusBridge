@@ -3,6 +3,6 @@ Original bridge source: SPDX-License-Identifier: AGPL-3.0-or-later
 Gadgetbridge reference sources retain their upstream copyright and license notices.
 See compat/upstream.json for immutable revision and file hashes.
 SPP V2 framing, session cryptography and the protobuf schema are adapted for diagnostics.
-Selection is grounded in observed Band 11 traffic; independent authentication is not yet verified.
+Selection is grounded in observed Xiaomi SPP V2 + WearAuthV2 traffic.
 Vendor APK, DEX, native libraries and decompiled sources are research inputs only.
 They must not be included in a bridge APK, source distribution, or KernelSU ZIP.
