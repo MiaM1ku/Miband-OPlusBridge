@@ -28,18 +28,46 @@ public final class BleV1Codec {
     private BleV1Codec() {}
 
     public static List<byte[]> encodeOutgoing(byte[] payload, int maxWrite, boolean encrypted) {
+        return encodeOutgoing(payload, maxWrite, encrypted, encrypted ? 1 : 0);
+    }
+
+    /**
+     * Encrypted commands follow XiaomiCharacteristicV1: a single frame carries the counter in the
+     * header; a chunked frame prepends it to the ciphertext. Plaintext frames stay unprefixed.
+     */
+    public static List<byte[]> encodeOutgoing(byte[] payload, int maxWrite, boolean encrypted, int counter) {
         if (payload == null) throw new IllegalArgumentException("BLE payload required");
         if (maxWrite < 8) throw new IllegalArgumentException("BLE write size too small");
+        if (encrypted && (counter < 1 || counter > 0xffff)) {
+            throw new IllegalArgumentException("BLE V1 counter out of range");
+        }
         int chunkPayload = maxWrite - 2;
         List<byte[]> frames = new ArrayList<>();
-        if (payload.length <= chunkPayload) {
-            byte[] single = new byte[3 + payload.length];
+        if (encrypted && 6 + payload.length <= maxWrite) {
+            byte[] single = new byte[6 + payload.length];
             single[2] = TYPE_SINGLE;
-            System.arraycopy(payload, 0, single, 3, payload.length);
+            single[3] = 1;
+            single[4] = (byte) counter;
+            single[5] = (byte) (counter >> 8);
+            System.arraycopy(payload, 0, single, 6, payload.length);
             frames.add(single);
             return frames;
         }
-        int chunks = (payload.length + chunkPayload - 1) / chunkPayload;
+        byte[] body = payload;
+        if (encrypted) {
+            body = new byte[2 + payload.length];
+            body[0] = (byte) counter;
+            body[1] = (byte) (counter >> 8);
+            System.arraycopy(payload, 0, body, 2, payload.length);
+        }
+        if (!encrypted && body.length <= chunkPayload) {
+            byte[] single = new byte[3 + body.length];
+            single[2] = TYPE_SINGLE;
+            System.arraycopy(body, 0, single, 3, body.length);
+            frames.add(single);
+            return frames;
+        }
+        int chunks = (body.length + chunkPayload - 1) / chunkPayload;
         byte[] start = new byte[6];
         start[2] = TYPE_CHUNK_START;
         start[3] = (byte) (encrypted ? 1 : 0);
@@ -48,12 +76,12 @@ public final class BleV1Codec {
         frames.add(start);
         for (int index = 0; index < chunks; index++) {
             int from = index * chunkPayload;
-            int to = Math.min(from + chunkPayload, payload.length);
+            int to = Math.min(from + chunkPayload, body.length);
             byte[] chunk = new byte[2 + (to - from)];
             int id = index + 1;
             chunk[0] = (byte) id;
             chunk[1] = (byte) (id >> 8);
-            System.arraycopy(payload, from, chunk, 2, to - from);
+            System.arraycopy(body, from, chunk, 2, to - from);
             frames.add(chunk);
         }
         return frames;

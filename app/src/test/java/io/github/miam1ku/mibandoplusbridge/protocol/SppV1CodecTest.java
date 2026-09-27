@@ -34,6 +34,12 @@ public final class SppV1CodecTest {
         assertArrayEquals(V1_VERSION, SppV1Codec.encode(packet));
     }
 
+    @Test public void encryptedProtobufCarriesLittleEndianCounter() {
+        byte[] cipher = new byte[]{10, 11, 12};
+        assertArrayEquals(new byte[]{1, 0, 10, 11, 12}, SppV1Codec.sealEncrypted(1, cipher));
+        assertArrayEquals(new byte[]{0x34, 0x12, 10, 11, 12}, SppV1Codec.sealEncrypted(0x1234, cipher));
+    }
+
     @Test public void protobufPacketsSurviveByteSplits() {
         byte[] payload = new byte[]{8, 1, 16, 26};
         byte[] encoded = SppV1Codec.encode(SppV1Codec.protobuf(4, SppV1Codec.DATA_AUTH, payload));

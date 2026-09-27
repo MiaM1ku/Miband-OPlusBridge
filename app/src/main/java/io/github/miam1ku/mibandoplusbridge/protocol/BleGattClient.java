@@ -60,11 +60,11 @@ final class BleGattClient implements AutoCloseable {
         if (error != null) throw new SppDiagnosticClient.Failure(error);
     }
 
-    void write(byte[] payload, boolean encrypted) throws Exception {
+    void write(byte[] payload, boolean encrypted, int counter) throws Exception {
         BluetoothGattCharacteristic target = writer;
         BluetoothGatt link = gatt;
         if (target == null || link == null) throw new SppDiagnosticClient.Failure("BLE_DISCONNECTED");
-        List<byte[]> frames = BleV1Codec.encodeOutgoing(payload, BleV1Codec.DEFAULT_MTU_PAYLOAD, encrypted);
+        List<byte[]> frames = BleV1Codec.encodeOutgoing(payload, BleV1Codec.DEFAULT_MTU_PAYLOAD, encrypted, counter);
         synchronized (writeLock) {
             for (byte[] frame : frames) {
                 target.setValue(frame);

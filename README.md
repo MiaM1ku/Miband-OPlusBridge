@@ -34,6 +34,8 @@
 
 手环需已连接。
 
+首页「常用」→ **发送调试日志到 QQ**：生成本机连接日志并交给 QQ。日志只有阶段、型号、队列和帧类型，不含 token、MAC 或 nonce。
+
 ## 发布
 
 打 tag 后 GitHub Actions 会构建并创建 Release：

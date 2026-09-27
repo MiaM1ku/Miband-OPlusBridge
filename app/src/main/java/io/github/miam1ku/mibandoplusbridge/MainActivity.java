@@ -136,6 +136,7 @@ public final class MainActivity extends AppCompatActivity {
         screen.navRow(shortcuts, "协议测试", () -> startActivity(new Intent(this, LabActivity.class)));
         screen.navRow(shortcuts, "天气同步", () -> startActivity(new Intent(this, WeatherActivity.class)));
         screen.navRow(shortcuts, "OHealth 账号", () -> startActivity(new Intent(this, HealthAccountActivity.class)));
+        screen.navRow(shortcuts, "发送调试日志到 QQ", this::shareDebugLog);
         screen.setLastChildMargin(shortcuts, 0);
         screen.textButton("系统权限设置", () -> startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
                 Uri.parse("package:" + getPackageName()))));
@@ -199,6 +200,33 @@ public final class MainActivity extends AppCompatActivity {
         getContentResolver().registerContentObserver(HealthQueueProvider.URI, false, deviceObserver);
         refreshDevice();
         requestRoot();
+    }
+
+    private void shareDebugLog() {
+        worker.execute(() -> {
+            try {
+                java.io.File file = io.github.miam1ku.mibandoplusbridge.data.SessionLog.export(this);
+                Uri uri = androidx.core.content.FileProvider.getUriForFile(this,
+                        "io.github.miam1ku.mibandoplusbridge.debuglog", file);
+                Intent send = new Intent(Intent.ACTION_SEND);
+                send.setType("text/plain");
+                send.putExtra(Intent.EXTRA_STREAM, uri);
+                send.putExtra(Intent.EXTRA_SUBJECT, "小米手环桥接调试日志");
+                send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                Intent qq = new Intent(send);
+                qq.setPackage("com.tencent.mobileqq");
+                main.post(() -> {
+                    if (isDestroyed()) return;
+                    if (qq.resolveActivity(getPackageManager()) != null) startActivity(qq);
+                    else startActivity(Intent.createChooser(send, "发送调试日志"));
+                });
+            } catch (Exception failure) {
+                main.post(() -> {
+                    if (!isDestroyed()) android.widget.Toast.makeText(this,
+                            "调试日志未能生成", android.widget.Toast.LENGTH_SHORT).show();
+                });
+            }
+        });
     }
 
     @Override protected void onResume() {

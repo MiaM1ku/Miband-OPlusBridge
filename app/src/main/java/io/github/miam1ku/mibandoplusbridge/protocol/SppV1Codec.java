@@ -64,6 +64,17 @@ public final class SppV1Codec {
         return new Packet(CHANNEL_PROTO_TX, true, false, OPCODE_SEND, serial, dataType, payload);
     }
 
+    /** Phone-to-watch encrypted protobuf: little-endian counter, then CCM ciphertext. */
+    public static byte[] sealEncrypted(int counter, byte[] ciphertext) {
+        if (counter < 1 || counter > 0xffff) throw new IllegalArgumentException("SPP V1 counter out of range");
+        Objects.requireNonNull(ciphertext, "ciphertext");
+        byte[] sealed = new byte[2 + ciphertext.length];
+        sealed[0] = (byte) counter;
+        sealed[1] = (byte) (counter >> 8);
+        System.arraycopy(ciphertext, 0, sealed, 2, ciphertext.length);
+        return sealed;
+    }
+
     public static Packet decode(byte[] bytes) {
         if (bytes.length < HEADER
                 || bytes[0] != PREAMBLE[0] || bytes[1] != PREAMBLE[1] || bytes[2] != PREAMBLE[2]

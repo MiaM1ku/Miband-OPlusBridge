@@ -12,6 +12,7 @@ import android.os.Build;
 import android.text.format.DateFormat;
 import com.google.protobuf.ByteString;
 import io.github.miam1ku.mibandoplusbridge.data.AuthToken;
+import io.github.miam1ku.mibandoplusbridge.data.SessionLog;
 import io.github.miam1ku.mibandoplusbridge.data.BindingStore;
 import io.github.miam1ku.mibandoplusbridge.data.TransportObservation;
 import io.github.miam1ku.mibandoplusbridge.service.OwnershipController;
@@ -173,6 +174,9 @@ public final class SppDiagnosticClient implements AutoCloseable {
                     ble = client;
                 }
                 client.connect();
+                SessionLog.line(context, "version framing=2 transport=GATT sdk="
+                        + safe(binding.observation().optString("versionName"))
+                        + " queue=" + safe(binding.observation().optString("queueClass")));
             } else {
                 BluetoothSocket created = device.createRfcommSocketToServiceRecord(UUID.fromString(SERVICE));
                 synchronized (this) {
@@ -207,6 +211,11 @@ public final class SppDiagnosticClient implements AutoCloseable {
                     }
                     peerPayloadLimit = config.maxPacketSize() - SppV2Codec.HEADER_LENGTH;
                 }
+                SessionLog.line(context, "version framing=" + framing
+                        + " major=" + (version.payload()[0] & 0xff)
+                        + " bytes=" + version.payload().length
+                        + " queue=" + safe(binding.observation().optString("queueClass"))
+                        + " sdk=" + safe(binding.observation().optString("versionName")));
             }
             new SecureRandom().nextBytes(phoneNonce);
             progress.accept("AUTHENTICATING");
@@ -282,6 +291,8 @@ public final class SppDiagnosticClient implements AutoCloseable {
             }
             return result;
         } catch (Exception error) {
+            SessionLog.line(context, "session failed " + (error instanceof Failure typed ? typed.code
+                    : error.getClass().getSimpleName()));
             if (timedOut) throw new Failure("DIAGNOSTIC_TIMEOUT");
             throw error;
         } finally {
@@ -393,7 +404,15 @@ public final class SppDiagnosticClient implements AutoCloseable {
         if (packet.channel() != SppV1Codec.CHANNEL_PROTO_RX && packet.channel() != SppV1Codec.CHANNEL_PROTO_TX) {
             return null;
         }
-        if (packet.dataType() == SppV1Codec.DATA_ENCRYPTED) payload = session.decryptV1(payload);
+        if (packet.dataType() == SppV1Codec.DATA_ENCRYPTED) {
+            try {
+                payload = session.decryptV1(payload);
+            } catch (RuntimeException rejected) {
+                SessionLog.line(context, "rx decrypt failed channel=" + packet.channel()
+                        + " dataType=" + packet.dataType() + " len=" + packet.payload().length);
+                throw new Failure("V1_DECRYPT_FAILED");
+            }
+        }
         return publishParsed(payload);
     }
 
@@ -401,11 +420,29 @@ public final class SppDiagnosticClient implements AutoCloseable {
         if (payload == null || payload.length == 0) return null;
         byte[] plain = payload;
         try {
-            if (authenticated) plain = session.decryptV1(payload);
+            if (authenticated) plain = decryptBle(payload);
             return publishParsed(plain);
         } catch (Exception ignored) {
             acceptV1Activity(payload);
             return null;
+        }
+    }
+
+    /** Watch single-frame replies put an encryption flag in front of ciphertext. Nonce counter stays 0. */
+    private byte[] decryptBle(byte[] payload) throws Exception {
+        try {
+            return session.decryptV1(payload);
+        } catch (RuntimeException first) {
+            if (payload.length > 5 && payload[0] == 1) {
+                try {
+                    return session.decryptV1(Arrays.copyOfRange(payload, 1, payload.length));
+                } catch (RuntimeException ignored) {
+                    SessionLog.line(context, "rx ble decrypt failed len=" + payload.length);
+                    throw new Failure("V1_DECRYPT_FAILED");
+                }
+            }
+            SessionLog.line(context, "rx ble decrypt failed len=" + payload.length);
+            throw new Failure("V1_DECRYPT_FAILED");
         }
     }
 
@@ -451,24 +488,37 @@ public final class SppDiagnosticClient implements AutoCloseable {
 
     private void writeCommand(int sequence, XiaomiProto.Command command) throws Exception {
         byte[] bytes = command.toByteArray();
+        int plainLength = bytes.length;
         OwnershipController.beginNativeSession();
         try {
             if (!new OwnershipController(context).nativeReady()) throw new Failure("NATIVE_OWNERSHIP_LOST");
             if (framing == 2) {
-                if (authenticated) bytes = session.encryptV1(bytes, v1EncryptCounter++);
+                int counter = 0;
+                if (authenticated) {
+                    counter = v1EncryptCounter++;
+                    bytes = session.encryptV1(bytes, counter);
+                }
                 if (bytes.length > peerPayloadLimit) throw new Failure("COMMAND_EXCEEDS_NEGOTIATED_SIZE");
-                ble.write(bytes, authenticated);
+                SessionLog.line(context, "tx ble type=" + command.getType() + " subtype=" + command.getSubtype()
+                        + " auth=" + authenticated + " counter=" + counter
+                        + " plain=" + plainLength + " cipher=" + bytes.length);
+                ble.write(bytes, authenticated, counter);
                 return;
             }
             if (framing == 1) {
                 int dataType = SppV1Codec.DATA_PLAIN;
+                int counter = 0;
                 if (!authenticated && command.getType() == 1 && command.getSubtype() >= 17) {
                     dataType = SppV1Codec.DATA_AUTH;
                 } else if (authenticated) {
                     dataType = SppV1Codec.DATA_ENCRYPTED;
-                    bytes = session.encryptV1(bytes, v1EncryptCounter++);
+                    counter = v1EncryptCounter++;
+                    bytes = SppV1Codec.sealEncrypted(counter, session.encryptV1(bytes, counter));
                 }
                 if (bytes.length > peerPayloadLimit) throw new Failure("COMMAND_EXCEEDS_NEGOTIATED_SIZE");
+                SessionLog.line(context, "tx spp1 type=" + command.getType() + " subtype=" + command.getSubtype()
+                        + " dataType=" + dataType + " counter=" + counter
+                        + " plain=" + plainLength + " wire=" + bytes.length);
                 synchronized (writeLock) {
                     output.write(SppV1Codec.encode(SppV1Codec.protobuf(sequence, dataType, bytes)));
                     output.flush();
@@ -477,6 +527,8 @@ public final class SppDiagnosticClient implements AutoCloseable {
             }
             if (authenticated) bytes = session.encryptV2(bytes);
             if (bytes.length + 2 > peerPayloadLimit) throw new Failure("COMMAND_EXCEEDS_NEGOTIATED_SIZE");
+            SessionLog.line(context, "tx spp2 type=" + command.getType() + " subtype=" + command.getSubtype()
+                    + " auth=" + authenticated + " plain=" + plainLength + " wire=" + bytes.length);
             synchronized (writeLock) {
                 sendFrame(SppV2Codec.dataFrame(sequence, SppV2Codec.CHANNEL_PROTOBUF,
                         authenticated ? SppV2Codec.OPCODE_ENCRYPTED : SppV2Codec.OPCODE_PLAINTEXT, bytes));
@@ -484,6 +536,12 @@ public final class SppDiagnosticClient implements AutoCloseable {
         } finally {
             OwnershipController.endNativeSession();
         }
+    }
+
+    private static String safe(String value) {
+        if (value == null) return "";
+        String clean = value.replaceAll("[\\p{Cntrl}]", "");
+        return clean.length() > 120 ? clean.substring(0, 120) : clean;
     }
 
     private XiaomiProto.Command awaitCommand(int type, int subtype) throws Exception {

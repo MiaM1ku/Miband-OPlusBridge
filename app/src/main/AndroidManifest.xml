@@ -13,6 +13,7 @@
         <package android:name="com.heytap.mydevices" />
         <package android:name="com.heytap.health" />
         <package android:name="me.weishu.kernelsu" />
+        <package android:name="com.tencent.mobileqq" />
         <intent>
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LAUNCHER" />
@@ -84,5 +85,11 @@
             android:authorities="io.github.miam1ku.mibandoplusbridge.notify"
             android:exported="true" android:directBootAware="false"
             android:grantUriPermissions="false" />
+        <provider android:name="androidx.core.content.FileProvider"
+            android:authorities="io.github.miam1ku.mibandoplusbridge.debuglog"
+            android:exported="false" android:grantUriPermissions="true">
+            <meta-data android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/debug_log_paths" />
+        </provider>
     </application>
 </manifest>
