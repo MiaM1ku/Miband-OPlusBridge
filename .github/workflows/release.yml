@@ -15,6 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       ANDROID_HOME: /usr/local/lib/android/sdk
+      TZ: Asia/Shanghai
       KEYSTORE_BASE64: ${{ secrets.OPLUSBAND_KEYSTORE_BASE64 }}
       OPLUSBAND_STORE_PASSWORD: ${{ secrets.OPLUSBAND_STORE_PASSWORD }}
       OPLUSBAND_KEY_ALIAS: ${{ secrets.OPLUSBAND_KEY_ALIAS }}
