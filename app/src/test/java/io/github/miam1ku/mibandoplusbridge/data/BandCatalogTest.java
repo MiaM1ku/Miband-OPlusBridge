@@ -16,8 +16,10 @@ public final class BandCatalogTest {
         assertEquals("小米手环9 NFC", BandCatalog.displayName("miwear.watch.n66nfc", ""));
         assertEquals("小米手环9 Pro", BandCatalog.displayName("miwear.watch.n67cn", ""));
         assertEquals("小米手环9 活力版", BandCatalog.displayName("miwear.watch.n69gl", ""));
+        assertEquals("小米手环9 活力版", BandCatalog.displayName("miwear.watch.n69cn", ""));
         assertEquals("小米手环10", BandCatalog.displayName("miwear.watch.o66cn", ""));
         assertEquals("小米手环10 NFC", BandCatalog.displayName("miwear.watch.o66gln", ""));
+        assertEquals("小米手环10 Pro", BandCatalog.displayName("miwear.watch.p67cn", "Xiaomi Smart Band 10 Pro 9C00"));
         assertEquals("小米手环11", BandCatalog.displayName("miwear.watch.q66cn", "Xiaomi Smart Band 11 F488"));
     }
 
@@ -29,6 +31,8 @@ public final class BandCatalogTest {
         assertEquals("小米手环10 Pro", BandCatalog.displayName(null, "Xiaomi Smart Band 10 Pro 9C00"));
         assertEquals("小米手环11", BandCatalog.displayName(null, "小米手环11"));
         assertTrue(BandCatalog.looksLikeBand("Xiaomi Smart Band 8 ABCD"));
+        assertTrue(BandCatalog.looksLikeBand("Redmi Smart Band 3"));
+        assertEquals("红米手环 Pro", BandCatalog.displayName(null, "Redmi Band Pro"));
         assertTrue(BandCatalog.looksLikeBand("Xiaomi Smart Band 10 1111"));
         assertFalse(BandCatalog.looksLikeBand("WH-1000XM5"));
         assertFalse(BandCatalog.looksLikeBand("OPPO Watch 2"));

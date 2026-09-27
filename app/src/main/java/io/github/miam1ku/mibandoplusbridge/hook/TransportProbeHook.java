@@ -9,6 +9,7 @@ import android.util.Log;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
+import io.github.miam1ku.mibandoplusbridge.data.AuthToken;
 import io.github.miam1ku.mibandoplusbridge.integration.CredentialProvider;
 import java.util.Locale;
 import java.util.Collections;
@@ -67,6 +68,7 @@ public final class TransportProbeHook {
                 metadata.putBoolean("authAppDeviceIdPresent", param.args[2] != null && !((String) param.args[2]).isEmpty());
                 metadata.putBoolean("authOobPresent", param.args[3] != null && !((String) param.args[3]).isEmpty());
                 observe(context, writer, param.args[5], metadata);
+                if (param.args[1] instanceof byte[] key) supplementToken(context, writer, param.args[5], key);
             }
         });
         installSocketProbe(context, writer);
@@ -167,6 +169,33 @@ public final class TransportProbeHook {
             });
         } catch (Throwable failure) {
             Log.i("OplusBandBridge", "TRANSPORT_OBSERVATION_FAILED");
+        }
+    }
+
+    private static void supplementToken(Context context, ThreadPoolExecutor writer, Object api, byte[] key) {
+        String token = AuthToken.fromKeyBytes(key);
+        if (!AuthToken.hex32(token)) return;
+        try {
+            Bundle request = context.getContentResolver().call(CredentialProvider.URI, "getDiagnosticRequest", null, null);
+            if (request == null || !"DIAGNOSTIC_WINDOW_OPEN".equals(request.getString("status"))) return;
+            Object info = XposedHelpers.callMethod(api, "getDeviceInfo");
+            String address = (String) XposedHelpers.callMethod(info, "getAddress");
+            if (address == null || !address.toUpperCase(Locale.ROOT).equals(request.getString("address"))) return;
+            Bundle payload = new Bundle();
+            payload.putString("token", token);
+            payload.putString("address", request.getString("address"));
+            payload.putString("nonce", request.getString("nonce"));
+            writer.execute(() -> {
+                try {
+                    context.getContentResolver().call(CredentialProvider.URI, "supplementToken", null, payload);
+                } catch (RuntimeException rejected) {
+                    Log.i("OplusBandBridge", "TOKEN_SUPPLEMENT_REJECTED");
+                } finally {
+                    payload.clear();
+                }
+            });
+        } catch (Throwable failure) {
+            Log.i("OplusBandBridge", "TOKEN_SUPPLEMENT_REJECTED");
         }
     }
 }

@@ -73,4 +73,30 @@ public final class TransportObservationTest {
         assertEquals("", TransportObservation.missingForLive(binding, observation));
         assertTrue(TransportObservation.supportsLive(observation, "lchz.watch.m67"));
     }
+
+    @Test public void band10ProV2ObservationCompletesImportWithoutFirmware() throws Exception {
+        JSONObject observation = verified("miwear.watch.p67cn", "3.2.7")
+                .put("queueClass", "com.xiaomi.wearable.transport.queue.SppTaskQueueV2")
+                .put("authImplementation", "WearAuthV2");
+        JSONObject binding = new JSONObject()
+                .put("address", "AA:BB:CC:DD:EE:FF")
+                .put("model", "miwear.watch.p67cn")
+                .put("userId", "u")
+                .put("region", "CN")
+                .put("token", "0123456789abcdef0123456789abcdef");
+        TransportObservation.applyToBinding(binding, observation);
+        assertEquals("2", binding.getString("framingVersion"));
+        assertEquals("", TransportObservation.missingForLive(binding, observation));
+        assertTrue(TransportObservation.supportsLive(observation, "miwear.watch.p67cn"));
+    }
+
+    @Test public void capturedQueueWinsOverVersionPacketMajor() throws Exception {
+        JSONObject v1 = verified("lchz.watch.m67", "1.0.50")
+                .put("queueClass", "com.xiaomi.wearable.transport.queue.SppTaskQueueV1");
+        assertTrue(TransportObservation.useV1Framing(v1, 3));
+        JSONObject v2 = verified("miwear.watch.p67cn", "3.2.7")
+                .put("queueClass", "com.xiaomi.wearable.transport.queue.SppTaskQueueV2");
+        assertFalse(TransportObservation.useV1Framing(v2, 1));
+        assertTrue(TransportObservation.useV1Framing(new JSONObject(), 1));
+    }
 }

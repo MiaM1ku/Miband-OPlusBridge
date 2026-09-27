@@ -10,6 +10,7 @@ import android.os.SystemClock;
 import android.os.UserManager;
 import io.github.miam1ku.mibandoplusbridge.BuildConfig;
 import io.github.miam1ku.mibandoplusbridge.HostIdentity;
+import io.github.miam1ku.mibandoplusbridge.data.AuthToken;
 import io.github.miam1ku.mibandoplusbridge.data.BindingStore;
 import io.github.miam1ku.mibandoplusbridge.data.ImportWindow;
 import io.github.miam1ku.mibandoplusbridge.data.ProtocolCaptureStore;
@@ -30,6 +31,7 @@ public final class CredentialProvider extends ContentProvider {
     private final ImportWindow captureWindow = new ImportWindow();
     private ProtocolCaptureStore captureStore;
     private String captureError = "";
+    private String pendingToken = "";
 
     @Override public boolean onCreate() {
         store = new BindingStore(getContext());
@@ -46,6 +48,7 @@ public final class CredentialProvider extends ContentProvider {
             window.close();
             diagnosticWindow.close();
             closeCapture();
+            pendingToken = "";
             return result("USER_LOCKED");
         }
         boolean open = window.isOpen(SystemClock.elapsedRealtime());
@@ -69,6 +72,7 @@ public final class CredentialProvider extends ContentProvider {
                     window.close();
                     diagnosticWindow.close();
                     closeCapture();
+                    pendingToken = "";
                     yield result("IMPORT_WINDOW_CLOSED");
                 }
                 case "getImportRequest" -> {
@@ -107,6 +111,10 @@ public final class CredentialProvider extends ContentProvider {
                 case "observeTransport" -> {
                     if (self) throw new SecurityException("MI_CALLER_REQUIRED");
                     yield observeTransport(extras);
+                }
+                case "supplementToken" -> {
+                    if (self) throw new SecurityException("MI_CALLER_REQUIRED");
+                    yield supplementToken(extras);
                 }
                 case "openCapture" -> {
                     requireSelf(self);
@@ -178,6 +186,7 @@ public final class CredentialProvider extends ContentProvider {
         } catch (Exception unavailable) {
             window.close();
             diagnosticWindow.close();
+            pendingToken = "";
             if (captureOpen) captureError = "CAPTURE_STORAGE_FAILED";
             closeCapture();
             return result("CREDENTIAL_STORAGE_FAILED");
@@ -236,6 +245,38 @@ public final class CredentialProvider extends ContentProvider {
         return result("TRANSPORT_OBSERVED");
     }
 
+    private Bundle supplementToken(Bundle input) throws Exception {
+        if (input == null) throw new SecurityException("DIAGNOSTIC_WINDOW_CLOSED");
+        String nonce = input.getString("nonce");
+        String address = input.getString("address");
+        long now = SystemClock.elapsedRealtime();
+        try {
+            diagnosticWindow.authorize(nonce, address, now);
+        } catch (SecurityException rejected) {
+            window.authorize(nonce, address, now);
+        }
+        String token = input.getString("token");
+        if (!AuthToken.hex32(token)) throw new IllegalArgumentException("TOKEN_ENCODING_UNSUPPORTED");
+        JSONObject saved = store.read();
+        if (saved == null) {
+            pendingToken = token;
+            return result("TOKEN_PENDING");
+        }
+        if (AuthToken.hex32(saved.optString("token"))) {
+            return result("TOKEN_ALREADY_PRESENT");
+        }
+        saved.put("token", token);
+        JSONObject observation = TransportObservation.read(getContext());
+        TransportObservation.applyToBinding(saved, observation);
+        saved.put("missing", TransportObservation.missingForLive(saved, observation));
+        store.save(saved);
+        pendingToken = "";
+        getContext().getContentResolver().notifyChange(URI, null);
+        boolean ready = saved.optString("missing").isBlank()
+                && TransportObservation.supportsLive(observation, saved.optString("model", ""));
+        return result(ready ? "BINDING_SAVED" : "BINDING_INCOMPLETE");
+    }
+
     private Bundle importBinding(Bundle input) throws Exception {
         if (input == null) throw new SecurityException("IMPORT_WINDOW_CLOSED");
         window.authorize(input.getString("nonce"), input.getString("address"), SystemClock.elapsedRealtime());
@@ -246,6 +287,10 @@ public final class CredentialProvider extends ContentProvider {
                 if (value.length() > 4096) throw new IllegalArgumentException("FIELD_TOO_LARGE");
                 record.put(key, value);
             }
+        }
+        if (!AuthToken.hex32(record.optString("token")) && AuthToken.hex32(pendingToken)) {
+            record.put("token", pendingToken);
+            pendingToken = "";
         }
         for (String key : new String[]{"type", "accessType"}) {
             if (input.containsKey(key)) record.put(key, input.getInt(key));

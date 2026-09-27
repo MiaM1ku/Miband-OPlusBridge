@@ -84,6 +84,13 @@ public final class TransportObservation {
         return "";
     }
 
+    public static boolean useV1Framing(JSONObject observation, int versionMajor) {
+        String framed = framingVersion(observation);
+        if ("1".equals(framed)) return true;
+        if ("2".equals(framed)) return false;
+        return versionMajor < 2;
+    }
+
     public static String missingForLive(JSONObject binding, JSONObject observation) {
         StringBuilder missing = new StringBuilder();
         if (binding == null) return "address,model,userId,region,token";

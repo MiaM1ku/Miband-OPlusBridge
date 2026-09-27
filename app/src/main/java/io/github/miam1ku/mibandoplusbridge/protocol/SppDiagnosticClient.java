@@ -11,6 +11,7 @@ import android.content.pm.PackageManager;
 import android.os.Build;
 import android.text.format.DateFormat;
 import com.google.protobuf.ByteString;
+import io.github.miam1ku.mibandoplusbridge.data.AuthToken;
 import io.github.miam1ku.mibandoplusbridge.data.BindingStore;
 import io.github.miam1ku.mibandoplusbridge.data.TransportObservation;
 import io.github.miam1ku.mibandoplusbridge.service.OwnershipController;
@@ -85,7 +86,7 @@ public final class SppDiagnosticClient implements AutoCloseable {
         public Failure(String code) { super(code); this.code = code; }
     }
     private record Inputs(String address, String region, byte[] key, int capability,
-            String transport, JSONObject binding) {}
+            String transport, JSONObject binding, JSONObject observation) {}
 
     public SppDiagnosticClient(Context context, Consumer<String> progress) {
         this.context = context.getApplicationContext();
@@ -191,7 +192,10 @@ public final class SppDiagnosticClient implements AutoCloseable {
                 if (version.channel() != SppV1Codec.CHANNEL_VERSION || version.payload().length < 1) {
                     throw new Failure("PROTOCOL_VERSION_UNSUPPORTED");
                 }
-                if ((version.payload()[0] & 0xff) >= 2) {
+                if (TransportObservation.useV1Framing(binding.observation(), version.payload()[0] & 0xff)) {
+                    framing = 1;
+                    peerPayloadLimit = 2048;
+                } else {
                     framing = 0;
                     sendFrame(SppNegotiation.startSessionRequest());
                     SppV2Codec.Frame configuration = readFrame();
@@ -202,9 +206,6 @@ public final class SppDiagnosticClient implements AutoCloseable {
                         throw new Failure("SESSION_CONFIGURATION_UNSUPPORTED");
                     }
                     peerPayloadLimit = config.maxPacketSize() - SppV2Codec.HEADER_LENGTH;
-                } else {
-                    framing = 1;
-                    peerPayloadLimit = 2048;
                 }
             }
             new SecureRandom().nextBytes(phoneNonce);
@@ -318,13 +319,13 @@ public final class SppDiagnosticClient implements AutoCloseable {
         if (!address.matches("[0-9A-F]{2}(:[0-9A-F]{2}){5}") || region.isBlank()
                 || binding.getString("userId").isBlank()) throw new Failure("BINDING_INCOMPLETE");
         String token = binding.getString("token");
-        if (!token.matches("[0-9A-Fa-f]{32}")) throw new Failure("TOKEN_ENCODING_UNSUPPORTED");
+        if (!AuthToken.hex32(token)) throw new Failure("TOKEN_ENCODING_UNSUPPORTED");
         byte[] key = new byte[16];
         for (int i = 0; i < token.length(); i += 2) {
             key[i / 2] = (byte) Integer.parseInt(token.substring(i, i + 2), 16);
         }
         return new Inputs(address, region, key, observation.getInt("appCapability"),
-                observation.optString("transport"), binding);
+                observation.optString("transport"), binding, observation);
     }
 
     private byte[] readExactly(int size) throws Exception {

@@ -6,6 +6,7 @@ import android.os.Bundle;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
+import io.github.miam1ku.mibandoplusbridge.data.AuthToken;
 import io.github.miam1ku.mibandoplusbridge.integration.CredentialProvider;
 import java.lang.reflect.Method;
 import java.util.Locale;
@@ -52,6 +53,7 @@ public final class MiFitnessImportHook {
                             {"oob", "getOob"}, {"deviceName", "getDeviceName"}};
                     for (String[] field : strings) binding.putString(field[0],
                             (String) XposedHelpers.callMethod(info, field[1]));
+                    fillTokenFromSource(binding, param.args[0], info);
                     binding.putInt("type", (Integer) XposedHelpers.callMethod(info, "getType"));
                     binding.putInt("accessType", (Integer) XposedHelpers.callMethod(info, "getAccessType"));
                     Object privateUUID = XposedHelpers.callMethod(info, "getPrivateUUID");
@@ -83,4 +85,37 @@ public final class MiFitnessImportHook {
             }
         });
     }
+
+    /** convert() picks one of authKey/token/appToken/encryptKey; 10 Pro often leaves getToken() empty. */
+    private static void fillTokenFromSource(Bundle binding, Object source, Object converted) {
+        if (AuthToken.hex32(binding.getString("token"))) return;
+        Object device = call(source, "getDevice");
+        if (device == null) device = field(source, "device");
+        Object detail = call(device, "getDetail");
+        String token = AuthToken.firstHex32(
+                binding.getString("token"),
+                (String) call(converted, "getToken"),
+                (String) call(detail, "getEncryptKey"),
+                (String) call(detail, "getToken"),
+                (String) call(detail, "getAuthKey"),
+                (String) call(detail, "getAppToken"));
+        if (AuthToken.hex32(token)) binding.putString("token", token);
+    }
+
+    private static Object call(Object target, String getter) {
+        try {
+            return XposedHelpers.callMethod(target, getter);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static Object field(Object target, String name) {
+        try {
+            return XposedHelpers.getObjectField(target, name);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
 }
