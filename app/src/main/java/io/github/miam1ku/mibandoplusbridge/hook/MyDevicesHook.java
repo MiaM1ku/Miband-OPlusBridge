@@ -222,7 +222,7 @@ public final class MyDevicesHook {
 
     private static String bandIconUri() {
         return "android.resource://" + PACKAGE + "/"
-                + io.github.miam1ku.mibandoplusbridge.R.drawable.oppo_band;
+                + io.github.miam1ku.mibandoplusbridge.R.drawable.band_card;
     }
 
     private static boolean ourDevice(Object device) {
@@ -275,7 +275,7 @@ public final class MyDevicesHook {
         try {
             Context ours = context.createPackageContext(PACKAGE, Context.CONTEXT_IGNORE_SECURITY);
             band = ours.getResources().getDrawable(
-                    io.github.miam1ku.mibandoplusbridge.R.drawable.oppo_band, ours.getTheme());
+                    io.github.miam1ku.mibandoplusbridge.R.drawable.band_card, ours.getTheme());
         } catch (Exception unavailable) {
             Log.i(TAG, "DEVICE_ICON_DRAWABLE_UNAVAILABLE");
             return;

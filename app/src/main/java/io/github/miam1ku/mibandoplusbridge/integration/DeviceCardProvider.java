@@ -144,7 +144,7 @@ public final class DeviceCardProvider extends ContentProvider {
                 .put("lastConnectTime", connected ? state.getLong("lastUpdateMs", 0) : 0)
                 .put("lastDisconnectTime", connected ? 0 : state.getLong("lastUpdateMs", 0));
         String icon = "android.resource://" + context.getPackageName() + "/"
-                + io.github.miam1ku.mibandoplusbridge.R.drawable.oppo_band;
+                + io.github.miam1ku.mibandoplusbridge.R.drawable.band_card;
         JSONObject data = new JSONObject()
                 .put("mDeviceId", deviceId)
                 .put("mDeviceName", BandCatalog.displayName(
