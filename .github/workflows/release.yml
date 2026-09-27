@@ -44,7 +44,7 @@ jobs:
           PY
       - name: Test and assemble
         env:
-          OPLUSBAND_KEYSTORE: ${{ runner.temp }}/release.jks
+        run: chmod +x ./gradlew && ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleRelease
         run: ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleRelease
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2

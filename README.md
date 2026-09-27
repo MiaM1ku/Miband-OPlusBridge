@@ -6,6 +6,8 @@
 
 包名：`io.github.miam1ku.mibandoplusbridge`
 
+点击链接加入群聊【Miband-OPlusBridge】：https://qm.qq.com/q/eEk3EsgSH0
+
 ## 安装
 
 1. 安装 [LSPosed](https://github.com/LSPosed/LSPosed)（Zygisk）。
