@@ -23,4 +23,4 @@ jobs:
           yes | "$SDKMANAGER" --licenses >/dev/null || true
           "$SDKMANAGER" --install "platforms;android-36" "build-tools;35.0.0"
       - name: Unit tests
-        run: ./gradlew --no-daemon :app:testDebugUnitTest
+        run: chmod +x ./gradlew && ./gradlew --no-daemon :app:testDebugUnitTest

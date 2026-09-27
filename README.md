@@ -1,8 +1,11 @@
 # Miband-OPlusBridge
 
+<img src="icon.png" width="96" alt="Miband-OPlusBridge">
+
 把 **小米手环 11** 接到 ColorOS **设备空间** 和 **OPPO 健康**。
 
 在设备空间里管理这只手环，查看连接与电量，并把步数、心率、睡眠写入 OPPO 健康；手机通知和来电可以转到手环。日常不必再打开小米运动健康。
+
 
 包名：`io.github.miam1ku.mibandoplusbridge`
 
