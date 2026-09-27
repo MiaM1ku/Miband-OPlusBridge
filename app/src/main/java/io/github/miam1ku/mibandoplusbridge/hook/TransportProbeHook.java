@@ -9,7 +9,6 @@ import android.util.Log;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
-import io.github.miam1ku.mibandoplusbridge.BuildConfig;
 import io.github.miam1ku.mibandoplusbridge.integration.CredentialProvider;
 import java.util.Locale;
 import java.util.Collections;
@@ -20,12 +19,11 @@ import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
-/** Explicit debug window; records transport metadata, never key or payload bytes. */
+/** Records SPP metadata during the setup import/profile window. Never key or payload bytes. */
 public final class TransportProbeHook {
     private TransportProbeHook() {}
 
     public static void install(Context context, ClassLoader loader) throws Exception {
-        if (!BuildConfig.DEBUG) return;
         var writer = new ThreadPoolExecutor(1, 1, 0, TimeUnit.MILLISECONDS,
                 new ArrayBlockingQueue<>(16), runnable -> {
                     Thread thread = new Thread(runnable, "OplusBandTransportProbe");

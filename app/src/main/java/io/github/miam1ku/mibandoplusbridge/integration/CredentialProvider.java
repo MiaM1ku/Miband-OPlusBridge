@@ -57,8 +57,10 @@ public final class CredentialProvider extends ContentProvider {
                 case "openWindow" -> {
                     requireSelf(self);
                     if (extras == null) throw new IllegalArgumentException("DEVICE_SELECTION_REQUIRED");
-                    window.open(extras.getString("address", ""), SystemClock.elapsedRealtime());
-                    diagnosticWindow.close();
+                    String address = extras.getString("address", "");
+                    window.open(address, SystemClock.elapsedRealtime());
+                    diagnosticWindow.open(address, SystemClock.elapsedRealtime());
+                    diagnosticWrites = 0;
                     closeCapture();
                     yield result("IMPORT_WINDOW_OPEN");
                 }
@@ -83,7 +85,6 @@ public final class CredentialProvider extends ContentProvider {
                 }
                 case "openDiagnostics" -> {
                     requireSelf(self);
-                    if (!BuildConfig.DEBUG) throw new SecurityException("ANALYSIS_BUILD_REQUIRED");
                     JSONObject binding = store.read();
                     if (binding == null) yield result("UNPROVISIONED");
                     window.close();
@@ -93,16 +94,18 @@ public final class CredentialProvider extends ContentProvider {
                     yield result("DIAGNOSTIC_WINDOW_OPEN");
                 }
                 case "getDiagnosticRequest" -> {
-                    Bundle request = result(BuildConfig.DEBUG && diagnosticOpen
-                            ? "DIAGNOSTIC_WINDOW_OPEN" : "DIAGNOSTIC_WINDOW_CLOSED");
-                    if (BuildConfig.DEBUG && diagnosticOpen) {
-                        request.putString("address", diagnosticWindow.address());
-                        request.putString("nonce", diagnosticWindow.nonce());
+                    ImportWindow active = diagnosticWindow.isOpen(SystemClock.elapsedRealtime())
+                            ? diagnosticWindow
+                            : (open ? window : null);
+                    Bundle request = result(active != null ? "DIAGNOSTIC_WINDOW_OPEN" : "DIAGNOSTIC_WINDOW_CLOSED");
+                    if (active != null) {
+                        request.putString("address", active.address());
+                        request.putString("nonce", active.nonce());
                     }
                     yield request;
                 }
                 case "observeTransport" -> {
-                    if (self || !BuildConfig.DEBUG) throw new SecurityException("MI_ANALYSIS_CALLER_REQUIRED");
+                    if (self) throw new SecurityException("MI_CALLER_REQUIRED");
                     yield observeTransport(extras);
                 }
                 case "openCapture" -> {
@@ -188,7 +191,14 @@ public final class CredentialProvider extends ContentProvider {
 
     private Bundle observeTransport(Bundle input) throws Exception {
         if (input == null) throw new SecurityException("DIAGNOSTIC_WINDOW_CLOSED");
-        diagnosticWindow.authorize(input.getString("nonce"), input.getString("address"), SystemClock.elapsedRealtime());
+        String nonce = input.getString("nonce");
+        String address = input.getString("address");
+        long now = SystemClock.elapsedRealtime();
+        try {
+            diagnosticWindow.authorize(nonce, address, now);
+        } catch (SecurityException rejected) {
+            window.authorize(nonce, address, now);
+        }
         if (diagnosticWrites >= 32) {
             diagnosticWindow.close();
             throw new SecurityException("DIAGNOSTIC_LIMIT_REACHED");
@@ -248,7 +258,6 @@ public final class CredentialProvider extends ContentProvider {
         }
         record.put("missing", missing.toString());
         store.save(record);
-        diagnosticWindow.close();
         closeCapture();
         window.close();
         getContext().getContentResolver().notifyChange(URI, null);
