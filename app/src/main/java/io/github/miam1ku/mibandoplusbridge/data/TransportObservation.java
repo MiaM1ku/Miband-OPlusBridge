@@ -29,25 +29,28 @@ public final class TransportObservation {
     }
 
     /**
-     * Official Mi Health SPP + WearAuthV2 reconnect, without OOB or app-device-id extras.
-     * Model comes from the captured session; SDK versionName is recorded but not pinned.
+     * Official reconnect: WearAuthV2, no OOB. SPP uses secure RFCOMM; GATT uses the captured BLE path.
      */
     public static boolean supportsLive(JSONObject observation, String bindingModel) {
         if (observation == null || bindingModel == null || bindingModel.isBlank()) return false;
         String model = observation.optString("model", "");
+        if (!observation.has("model") || !observation.has("transport")
+                || !observation.has("officialAuthConnected") || !observation.has("appCapability")
+                || !observation.has("authOobPresent") || !observation.has("authAppDeviceIdPresent")
+                || !bindingModel.equals(model)
+                || !observation.optBoolean("officialAuthConnected")
+                || observation.optInt("appCapability") <= 0
+                || observation.optBoolean("authOobPresent")
+                || observation.optBoolean("authAppDeviceIdPresent")) {
+            return false;
+        }
+        String transport = observation.optString("transport");
+        if ("GATT".equals(transport)) return true;
         String versionName = observation.optString("versionName", "");
-        return observation.has("model") && observation.has("transport") && observation.has("versionName")
-                && observation.has("rfcommUuid") && observation.has("rfcommSecure")
-                && observation.has("officialAuthConnected") && observation.has("appCapability")
-                && observation.has("authOobPresent") && observation.has("authAppDeviceIdPresent")
-                && bindingModel.equals(model)
-                && "SPP".equals(observation.optString("transport"))
+        return "SPP".equals(transport)
+                && observation.has("versionName") && observation.has("rfcommUuid") && observation.has("rfcommSecure")
                 && !versionName.isBlank()
                 && SERVICE.equals(observation.optString("rfcommUuid"))
-                && observation.optBoolean("rfcommSecure")
-                && observation.optBoolean("officialAuthConnected")
-                && observation.optInt("appCapability") > 0
-                && !observation.optBoolean("authOobPresent")
-                && !observation.optBoolean("authAppDeviceIdPresent");
+                && observation.optBoolean("rfcommSecure");
     }
 }

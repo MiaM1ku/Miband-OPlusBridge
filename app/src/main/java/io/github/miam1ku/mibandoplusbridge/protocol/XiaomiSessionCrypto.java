@@ -113,16 +113,24 @@ public final class XiaomiSessionCrypto {
     }
 
     static byte[] ccmEncrypt(byte[] key, byte[] nonce, byte[] plaintext) {
+        return ccm(true, key, nonce, plaintext);
+    }
+
+    static byte[] ccmDecrypt(byte[] key, byte[] nonce, byte[] ciphertext) {
+        return ccm(false, key, nonce, ciphertext);
+    }
+
+    private static byte[] ccm(boolean encrypt, byte[] key, byte[] nonce, byte[] input) {
         CCMModeCipher cipher = CCMBlockCipher.newInstance(AESEngine.newInstance());
-        cipher.init(true, new AEADParameters(new KeyParameter(key), 32, nonce, null));
-        byte[] output = new byte[cipher.getOutputSize(plaintext.length)];
+        cipher.init(encrypt, new AEADParameters(new KeyParameter(key), 32, nonce, null));
+        byte[] output = new byte[cipher.getOutputSize(input.length)];
         try {
-            int written = cipher.processBytes(plaintext, 0, plaintext.length, output, 0);
+            int written = cipher.processBytes(input, 0, input.length, output, 0);
             cipher.doFinal(output, written);
             return output;
         } catch (InvalidCipherTextException e) {
             Arrays.fill(output, (byte) 0);
-            throw new IllegalStateException("Cannot encrypt phone information", e);
+            throw new IllegalStateException(encrypt ? "Cannot encrypt phone information" : "Cannot decrypt V1 payload", e);
         }
     }
 
@@ -142,6 +150,7 @@ public final class XiaomiSessionCrypto {
         private final byte[] watchKey;
         private final byte[] phoneKey;
         private final byte[] phoneInfoNonce = new byte[12];
+        private final byte[] watchIv = new byte[4];
         private final byte[] nonces;
         private State state = State.DERIVED;
         private boolean phoneInfoEncrypted;
@@ -149,7 +158,7 @@ public final class XiaomiSessionCrypto {
         private Session(byte[] material, byte[] nonces) {
             watchKey = Arrays.copyOfRange(material, 0, 16);
             phoneKey = Arrays.copyOfRange(material, 16, 32);
-            // Bytes 32..35 are the watch CCM IV, which SPP V2 does not use.
+            System.arraycopy(material, 32, watchIv, 0, 4);
             System.arraycopy(material, 36, phoneInfoNonce, 0, 4);
             this.nonces = nonces;
         }
@@ -215,6 +224,30 @@ public final class XiaomiSessionCrypto {
             return ctrCrypt(Cipher.DECRYPT_MODE, watchKey, watchKey, ciphertext);
         }
 
+        /** SPP V1 / BLE V1 encrypt with CCM. Counter 0 is the phone-info nonce. */
+        public synchronized byte[] encryptV1(byte[] plaintext, int counter) {
+            requireState(counter == 0 ? State.WATCH_VERIFIED : State.ACTIVE);
+            Objects.requireNonNull(plaintext, "plaintext");
+            return ccmEncrypt(phoneKey, v1Nonce(phoneInfoNonce, counter), plaintext);
+        }
+
+        /** SPP V1 / BLE V1 decrypt with the watch CCM IV and counter 0. */
+        public synchronized byte[] decryptV1(byte[] ciphertext) {
+            requireState(State.ACTIVE);
+            Objects.requireNonNull(ciphertext, "ciphertext");
+            return ccmDecrypt(watchKey, v1Nonce(watchIv, 0), ciphertext);
+        }
+
+        private static byte[] v1Nonce(byte[] iv, int counter) {
+            byte[] nonce = new byte[12];
+            System.arraycopy(iv, 0, nonce, 0, 4);
+            nonce[8] = (byte) counter;
+            nonce[9] = (byte) (counter >> 8);
+            nonce[10] = (byte) (counter >> 16);
+            nonce[11] = (byte) (counter >> 24);
+            return nonce;
+        }
+
         private void requireState(State required) {
             if (state != required) {
                 throw new IllegalStateException("Session is " + state + "; required " + required);
@@ -226,6 +259,7 @@ public final class XiaomiSessionCrypto {
             Arrays.fill(watchKey, (byte) 0);
             Arrays.fill(phoneKey, (byte) 0);
             Arrays.fill(phoneInfoNonce, (byte) 0);
+            Arrays.fill(watchIv, (byte) 0);
             Arrays.fill(nonces, (byte) 0);
             state = State.CLOSED;
         }

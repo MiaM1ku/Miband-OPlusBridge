@@ -710,6 +710,22 @@ public final class OHealthDeviceHook {
         } catch (Throwable ignored) { }
         try {
             XposedHelpers.findAndHookMethod(
+                    "com.heytap.health.linkage.ui.DeviceDetailsActivity", loader,
+                    "actionClick", Integer.class, new XC_MethodHook() {
+                        @Override protected void beforeHookedMethod(MethodHookParam param) {
+                            if (!(param.thisObject instanceof android.app.Activity activity)) return;
+                            if (!panelIsBand(activity)) return;
+                            if (!(param.args[0] instanceof Integer action) || action != 4) return;
+                            if (!openHealthApp(activity)) return;
+                            param.setResult(null);
+                        }
+                    });
+        } catch (Throwable failure) {
+            Log.i("OplusBandBridge", "OHEALTH_PANEL_APP_UNAVAILABLE "
+                    + failure.getClass().getSimpleName());
+        }
+        try {
+            XposedHelpers.findAndHookMethod(
                     "com.heytap.health.linkage.ui.DeviceDetailsPanelActivity", loader,
                     "notifyDeviceInfoBeans", List.class, new XC_MethodHook() {
                         @Override protected void afterHookedMethod(MethodHookParam param) {
@@ -765,6 +781,29 @@ public final class OHealthDeviceHook {
             return ourBand(XposedHelpers.getObjectField(panel, "mMac"),
                     XposedHelpers.getObjectField(panel, "mDeviceId"));
         } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private static boolean openHealthApp(android.app.Activity activity) {
+        try {
+            Object mac = XposedHelpers.getObjectField(activity, "mMac");
+            Intent intent = new Intent();
+            intent.setClassName(HOST, "com.heytap.health.main.MainActivity");
+            if (mac != null) {
+                String address = String.valueOf(mac);
+                if (!address.isBlank() && !"null".equals(address)) intent.putExtra("currentMac", address);
+            }
+            intent.putExtra("tab", "3");
+            intent.putExtra("from_internal", false);
+            intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+            activity.startActivity(intent);
+            activity.finish();
+            Log.i("OplusBandBridge", "OHEALTH_PANEL_OPEN_APP");
+            return true;
+        } catch (RuntimeException failure) {
+            Log.i("OplusBandBridge", "OHEALTH_PANEL_OPEN_APP_UNAVAILABLE "
+                    + failure.getClass().getSimpleName());
             return false;
         }
     }

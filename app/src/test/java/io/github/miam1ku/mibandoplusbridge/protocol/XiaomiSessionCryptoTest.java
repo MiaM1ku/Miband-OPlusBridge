@@ -9,6 +9,7 @@ import javax.crypto.Cipher;
 import org.junit.Test;
 
 import static org.junit.Assert.assertArrayEquals;
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
@@ -86,6 +87,8 @@ public final class XiaomiSessionCryptoTest {
             assertArrayEquals(PLAINTEXT, session.decryptV2(WATCH_CIPHERTEXT));
             // The observed V2 contract resets key-as-IV CTR for every complete message.
             assertArrayEquals(PHONE_CIPHERTEXT, session.encryptV2(PLAINTEXT));
+            byte[] v1 = session.encryptV1(PLAINTEXT, 1);
+            assertEquals(PLAINTEXT.length + 4, v1.length);
         }
     }
 

@@ -24,6 +24,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import io.github.miam1ku.mibandoplusbridge.data.BandCatalog;
 import io.github.miam1ku.mibandoplusbridge.data.BandStateRepository;
 import io.github.miam1ku.mibandoplusbridge.data.BindingStore;
 import io.github.miam1ku.mibandoplusbridge.data.HealthRecord;
@@ -134,8 +135,8 @@ public final class BandDetailsActivity extends AppCompatActivity {
     private void refresh() {
         var state = io.github.miam1ku.mibandoplusbridge.data.LocalPrefs.open(this, "band-state");
         String id = state.getString("deviceId", "");
-        String deviceName = state.getString("name", "");
-        name.setText(deviceName == null || deviceName.isBlank() ? "手环状态" : deviceName);
+        String deviceName = BandCatalog.displayName(state.getString("modelId", ""), state.getString("name", ""));
+        name.setText(deviceName);
         if (id == null || id.isBlank()) {
             connection.setText("尚未获得设备标识");
             connection.setTextColor(0xff475569);
@@ -251,6 +252,7 @@ public final class BandDetailsActivity extends AppCompatActivity {
             return false;
         }
         String deviceId = incoming.getStringExtra("device_id");
+        if (deviceId == null) deviceId = incoming.getStringExtra("key_device_id");
         if (deviceId == null || !deviceId.matches("miband11_[0-9a-f]{64}")) return false;
         String mac = "";
         String name = "";

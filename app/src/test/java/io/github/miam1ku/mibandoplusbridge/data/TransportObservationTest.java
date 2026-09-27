@@ -25,6 +25,19 @@ public final class TransportObservationTest {
                 verified("miwear.watch.q66cn", "3.2.15"), "miwear.watch.q66cn"));
         assertTrue(TransportObservation.supportsLive(
                 verified("lchz.watch.m67", "1.0.50"), "lchz.watch.m67"));
+        assertTrue(TransportObservation.supportsLive(
+                verified("miwear.watch.n66cn", "2.0.0"), "miwear.watch.n66cn"));
+        assertTrue(TransportObservation.supportsLive(
+                verified("miwear.watch.o66cn", "3.0.0"), "miwear.watch.o66cn"));
+        assertTrue(TransportObservation.supportsLive(
+                new JSONObject()
+                        .put("model", "miwear.watch.m66")
+                        .put("transport", "GATT")
+                        .put("officialAuthConnected", true)
+                        .put("appCapability", TransportObservation.APP_CAPABILITY)
+                        .put("authOobPresent", false)
+                        .put("authAppDeviceIdPresent", false),
+                "miwear.watch.m66"));
     }
 
     @Test public void emptyMismatchedOrOobProfileBlocksLiveSession() throws Exception {

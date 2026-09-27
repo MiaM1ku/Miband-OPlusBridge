@@ -59,8 +59,7 @@ public final class BandStateRepository {
                 requireMatchingBinding(state, binding);
                 return;
             }
-            String name = binding.optString("deviceName", "").trim();
-            if (name.isBlank() || name.length() > 80) name = model;
+            String name = BandCatalog.displayName(model, binding.optString("deviceName", ""));
             long now = System.currentTimeMillis();
             if (!state.edit().putString("deviceId", deviceId)
                     .putString("identitySource", binding.optString("did", "").isBlank() ? "verifiedMac" : "did")

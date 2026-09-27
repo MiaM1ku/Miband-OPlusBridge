@@ -13,6 +13,7 @@ import android.os.Bundle;
 import android.os.Process;
 import android.os.UserManager;
 import io.github.miam1ku.mibandoplusbridge.HostIdentity;
+import io.github.miam1ku.mibandoplusbridge.data.BandCatalog;
 import io.github.miam1ku.mibandoplusbridge.service.BandLiveService;
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -104,7 +105,7 @@ public final class DeviceCardProvider extends ContentProvider {
             if (!actual.equals(selectionArgs[0])) return result;
         }
         try {
-            JSONObject data = deviceData(state, deviceId, mac);
+            JSONObject data = deviceData(getContext(), state, deviceId, mac);
             MatrixCursor.RowBuilder row = result.newRow();
             for (String column : requested) {
                 row.add(switch (column) {
@@ -126,8 +127,8 @@ public final class DeviceCardProvider extends ContentProvider {
         return false;
     }
 
-    private static JSONObject deviceData(io.github.miam1ku.mibandoplusbridge.data.LocalPrefs state, String deviceId, String mac)
-            throws JSONException {
+    private static JSONObject deviceData(Context context, io.github.miam1ku.mibandoplusbridge.data.LocalPrefs state,
+            String deviceId, String mac) throws JSONException {
         boolean connected = state.getBoolean("registered", false) && state.getBoolean("connected", false);
         String connectState = connected ? "CONNECTED" : "DISCONNECTED";
         int battery = state.getInt("battery", -1);
@@ -142,9 +143,12 @@ public final class DeviceCardProvider extends ContentProvider {
                 .put("coordinationState", "DEFAULT")
                 .put("lastConnectTime", connected ? state.getLong("lastUpdateMs", 0) : 0)
                 .put("lastDisconnectTime", connected ? 0 : state.getLong("lastUpdateMs", 0));
+        String icon = "android.resource://" + context.getPackageName() + "/"
+                + io.github.miam1ku.mibandoplusbridge.R.drawable.oppo_band;
         JSONObject data = new JSONObject()
                 .put("mDeviceId", deviceId)
-                .put("mDeviceName", state.getString("name", ""))
+                .put("mDeviceName", BandCatalog.displayName(
+                        state.getString("modelId", ""), state.getString("name", "")))
                 .put("mMacAddress", mac)
                 .put("modelId", state.getString("modelId", ""))
                 .put("mDeviceType", "WRISTBAND")
@@ -155,6 +159,8 @@ public final class DeviceCardProvider extends ContentProvider {
                 .put("mAuthority", AUTHORITY)
                 .put("isActive", connected)
                 .put("cardStyle", 1)
+                .put("mIconUrl", icon)
+                .put("iconUrl", icon)
                 .put("timestamp", state.getLong("lastUpdateMs", 0))
                 .put("versionCode", 1L)
                 .put("feature", 0)
@@ -204,7 +210,8 @@ public final class DeviceCardProvider extends ContentProvider {
         Bundle display = new Bundle();
         boolean registered = state.getBoolean("registered", false);
         display.putBoolean("registered", registered);
-        display.putString("name", state.getString("name", ""));
+        display.putString("name", BandCatalog.displayName(
+                state.getString("modelId", ""), state.getString("name", "")));
         display.putString("deviceId", state.getString("deviceId", ""));
         display.putString("mac", state.getString("mac", ""));
         display.putString("modelId", state.getString("modelId", ""));

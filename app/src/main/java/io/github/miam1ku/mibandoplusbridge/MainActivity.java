@@ -14,6 +14,7 @@ import android.os.UserManager;
 import android.provider.Settings;
 import io.github.miam1ku.mibandoplusbridge.data.BindingStore;
 import io.github.miam1ku.mibandoplusbridge.data.HealthRecordStore;
+import io.github.miam1ku.mibandoplusbridge.data.BandCatalog;
 import io.github.miam1ku.mibandoplusbridge.data.TransportObservation;
 import io.github.miam1ku.mibandoplusbridge.integration.DeviceCardProvider;
 import org.json.JSONObject;
@@ -40,6 +41,8 @@ import io.github.miam1ku.mibandoplusbridge.protocol.BandNotificationCommand;
 import io.github.miam1ku.mibandoplusbridge.protocol.SppDiagnosticClient;
 import java.time.Instant;
 import java.time.ZoneId;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -545,7 +548,9 @@ public final class MainActivity extends AppCompatActivity {
         connectionLine.setVisibility(View.VISIBLE);
         var state = io.github.miam1ku.mibandoplusbridge.data.LocalPrefs.open(this, "band-state");
         if (new BandStateRepository(this).isRegistered()) {
-            deviceName.setText(safeIdentity(state.getString("name", ""), "已登记手环"));
+            deviceName.setText(safeIdentity(
+                    BandCatalog.displayName(state.getString("modelId", ""), state.getString("name", "")),
+                    "已登记手环"));
             connectionLine.setText(state.getBoolean("connected", false) ? "已连接" : offlineHint());
             setOptionalCaption(metricsLine, metricsText(state));
             setOptionalCaption(healthLine, healthExtras());
@@ -739,13 +744,11 @@ public final class MainActivity extends AppCompatActivity {
             screen.caption(bonded, "没有已配对设备。请先在系统蓝牙设置中配对手环。");
             return;
         }
-        if (selectedAddress.isBlank() && devices.size() == 1) {
-            String only = devices.iterator().next().getAddress();
-            if (only != null) selectedAddress = only.toUpperCase(java.util.Locale.ROOT);
-        }
-        for (BluetoothDevice device : devices) {
+        java.util.List<BluetoothDevice> listed = sortedBonded(devices);
+        preferXiaomiBand(listed);
+        for (BluetoothDevice device : listed) {
             String mac = device.getAddress() == null ? "" : device.getAddress().toUpperCase(java.util.Locale.ROOT);
-            String name = safeIdentity(device.getName(), "已配对设备");
+            String name = BandCatalog.displayName(null, device.getName());
             boolean chosen = !mac.isBlank() && mac.equals(selectedAddress);
             Button choice = screen.outlined(bonded, (chosen ? "已选择 · " : "") + name, () -> {
                 selectedAddress = mac;
@@ -819,13 +822,14 @@ public final class MainActivity extends AppCompatActivity {
                     .show();
             return;
         }
-        String[] names = new String[devices.size()];
-        String[] macs = new String[devices.size()];
-        int index = 0;
-        for (BluetoothDevice device : devices) {
+        java.util.List<BluetoothDevice> listed = sortedBonded(devices);
+        preferXiaomiBand(listed);
+        String[] names = new String[listed.size()];
+        String[] macs = new String[listed.size()];
+        for (int index = 0; index < listed.size(); index++) {
+            BluetoothDevice device = listed.get(index);
             macs[index] = device.getAddress() == null ? "" : device.getAddress().toUpperCase(java.util.Locale.ROOT);
-            names[index] = safeIdentity(device.getName(), "已配对设备");
-            index++;
+            names[index] = BandCatalog.displayName(null, device.getName());
         }
         new MaterialAlertDialogBuilder(this)
                 .setTitle("选择已配对设备")
@@ -835,6 +839,34 @@ public final class MainActivity extends AppCompatActivity {
                     confirmBindingImport();
                 })
                 .show();
+    }
+
+    private static java.util.List<BluetoothDevice> sortedBonded(java.util.Set<BluetoothDevice> devices) {
+        ArrayList<BluetoothDevice> listed = new ArrayList<>(devices);
+        listed.sort(Comparator.comparing((BluetoothDevice device) -> !BandCatalog.looksLikeBand(device.getName()))
+                .thenComparing(device -> BandCatalog.displayName(null, device.getName()),
+                        String.CASE_INSENSITIVE_ORDER));
+        return listed;
+    }
+
+    private void preferXiaomiBand(java.util.List<BluetoothDevice> devices) {
+        if (!selectedAddress.isBlank()) return;
+        String onlyBand = null;
+        int bands = 0;
+        for (BluetoothDevice device : devices) {
+            if (!BandCatalog.looksLikeBand(device.getName())) continue;
+            String mac = device.getAddress();
+            if (mac == null || mac.isBlank()) continue;
+            bands++;
+            onlyBand = mac.toUpperCase(java.util.Locale.ROOT);
+        }
+        if (bands == 1) {
+            selectedAddress = onlyBand;
+            return;
+        }
+        if (devices.size() != 1) return;
+        String only = devices.get(0).getAddress();
+        if (only != null) selectedAddress = only.toUpperCase(java.util.Locale.ROOT);
     }
 
     private void confirmBindingImport() {

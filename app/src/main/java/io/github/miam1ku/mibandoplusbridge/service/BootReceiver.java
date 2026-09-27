@@ -19,6 +19,8 @@ public final class BootReceiver extends BroadcastReceiver {
         PendingResult pending = goAsync();
         Thread restore = new Thread(() -> {
             try {
+                context.getContentResolver().notifyChange(
+                        io.github.miam1ku.mibandoplusbridge.integration.DeviceCardProvider.URI, null);
                 OwnershipController owner = new OwnershipController(context);
                 BandStateRepository repository = new BandStateRepository(context);
                 if (repository.isRegistered() && owner.nativeReady()) {

@@ -40,11 +40,16 @@ public final class SppDiagnosticClient implements AutoCloseable {
     private final Context context;
     private final Consumer<String> progress;
     private final SppV2Codec.Decoder decoder = new SppV2Codec.Decoder();
+    private final SppV1Codec.Decoder v1Decoder = new SppV1Codec.Decoder();
     private final ArrayDeque<SppV2Codec.Frame> pending = new ArrayDeque<>();
+    private final ArrayDeque<SppV1Codec.Packet> v1Pending = new ArrayDeque<>();
     private final byte[] readBuffer = new byte[4096];
     private final byte[][] receivedPayloads = new byte[256][];
     private final int[] receivedAt = new int[256];
     private BluetoothSocket socket;
+    private BleGattClient ble;
+    private int framing;
+    private int v1EncryptCounter = 1;
     private volatile boolean closed;
     private volatile boolean timedOut;
     private volatile String linkStop;
@@ -79,7 +84,8 @@ public final class SppDiagnosticClient implements AutoCloseable {
         public final String code;
         public Failure(String code) { super(code); this.code = code; }
     }
-    private record Inputs(String address, String region, byte[] key, int capability) {}
+    private record Inputs(String address, String region, byte[] key, int capability,
+            String transport, JSONObject binding) {}
 
     public SppDiagnosticClient(Context context, Consumer<String> progress) {
         this.context = context.getApplicationContext();
@@ -156,31 +162,51 @@ public final class SppDiagnosticClient implements AutoCloseable {
             if (adapter == null || !adapter.isEnabled()) throw new Failure("BLUETOOTH_DISABLED");
             BluetoothDevice device = adapter.getRemoteDevice(binding.address());
             if (device.getBondState() != BluetoothDevice.BOND_BONDED) throw new Failure("OFFICIAL_PAIRING_REQUIRED");
-            BluetoothSocket created = device.createRfcommSocketToServiceRecord(UUID.fromString(SERVICE));
-            synchronized (this) {
-                if (closed) { created.close(); throw new Failure("CANCELLED"); }
-                socket = created;
-            }
             progress.accept("CONNECTING");
-            created.connect();
-            input = created.getInputStream();
-            output = created.getOutputStream();
-            output.write(SppNegotiation.versionRequest(0));
-            try {
-                SppNegotiation.decodeVersionResponse(readExactly(SppNegotiation.VERSION_RESPONSE_LENGTH));
-            } catch (IllegalArgumentException unsupported) {
-                throw new Failure("PROTOCOL_VERSION_UNSUPPORTED");
+            if ("GATT".equals(binding.transport())) {
+                framing = 2;
+                peerPayloadLimit = 512;
+                BleGattClient client = new BleGattClient(context, device, binding.binding());
+                synchronized (this) {
+                    if (closed) throw new Failure("CANCELLED");
+                    ble = client;
+                }
+                client.connect();
+            } else {
+                BluetoothSocket created = device.createRfcommSocketToServiceRecord(UUID.fromString(SERVICE));
+                synchronized (this) {
+                    if (closed) { created.close(); throw new Failure("CANCELLED"); }
+                    socket = created;
+                }
+                created.connect();
+                input = created.getInputStream();
+                output = created.getOutputStream();
+                output.write(SppNegotiation.versionRequest(0));
+                SppV1Codec.Packet version;
+                try {
+                    version = readV1Packet();
+                } catch (IllegalArgumentException unsupported) {
+                    throw new Failure("PROTOCOL_VERSION_UNSUPPORTED");
+                }
+                if (version.channel() != SppV1Codec.CHANNEL_VERSION || version.payload().length < 1) {
+                    throw new Failure("PROTOCOL_VERSION_UNSUPPORTED");
+                }
+                if ((version.payload()[0] & 0xff) >= 2) {
+                    framing = 0;
+                    sendFrame(SppNegotiation.startSessionRequest());
+                    SppV2Codec.Frame configuration = readFrame();
+                    var config = SppV2Codec.parseSessionConfig(configuration);
+                    if (config.opcode() != 2 || config.version() == null || config.version().length != 3
+                            || config.maxPacketSize() == null || config.maxPacketSize() < 128
+                            || config.txWindow() == null || config.txWindow() < 1) {
+                        throw new Failure("SESSION_CONFIGURATION_UNSUPPORTED");
+                    }
+                    peerPayloadLimit = config.maxPacketSize() - SppV2Codec.HEADER_LENGTH;
+                } else {
+                    framing = 1;
+                    peerPayloadLimit = 2048;
+                }
             }
-            sendFrame(SppNegotiation.startSessionRequest());
-            SppV2Codec.Frame configuration = readFrame();
-            var config = SppV2Codec.parseSessionConfig(configuration);
-            if (config.opcode() != 2 || config.version() == null || config.version().length != 3
-                    || config.maxPacketSize() == null || config.maxPacketSize() < 128
-                    || config.txWindow() == null || config.txWindow() < 1) {
-                throw new Failure("SESSION_CONFIGURATION_UNSUPPORTED");
-            }
-            // Conservative bound; diagnostics are well below both interpretations of this negotiated size.
-            peerPayloadLimit = config.maxPacketSize() - SppV2Codec.HEADER_LENGTH;
             new SecureRandom().nextBytes(phoneNonce);
             progress.accept("AUTHENTICATING");
             sendCommand(XiaomiProto.Command.newBuilder().setType(1).setSubtype(26)
@@ -245,7 +271,7 @@ public final class SppDiagnosticClient implements AutoCloseable {
                 onState.accept(result);
                 prepareHistory();
                 liveHold = true;
-                long timeout = config.sendTimeoutMillis() == null ? 10_000L : config.sendTimeoutMillis();
+                long timeout = 10_000L;
                 liveCommands = new LiveCommandQueue(sentSequence, timeout, this::writeLiveCommand);
                 onLiveReady.accept(liveCommands);
                 progress.accept("LIVE_SESSION_OPEN");
@@ -265,6 +291,7 @@ public final class SppDiagnosticClient implements AutoCloseable {
             Arrays.fill(binding.key(), (byte) 0);
             Arrays.fill(phoneNonce, (byte) 0);
             decoder.reset();
+            v1Decoder.reset();
             for (byte[] payload : receivedPayloads) {
                 if (payload != null) Arrays.fill(payload, (byte) 0);
             }
@@ -296,7 +323,8 @@ public final class SppDiagnosticClient implements AutoCloseable {
         for (int i = 0; i < token.length(); i += 2) {
             key[i / 2] = (byte) Integer.parseInt(token.substring(i, i + 2), 16);
         }
-        return new Inputs(address, region, key, observation.getInt("appCapability"));
+        return new Inputs(address, region, key, observation.getInt("appCapability"),
+                observation.optString("transport"), binding);
     }
 
     private byte[] readExactly(int size) throws Exception {
@@ -328,6 +356,82 @@ public final class SppDiagnosticClient implements AutoCloseable {
         }
     }
 
+    private XiaomiProto.Command nextCommand() throws Exception {
+        if (framing == 0) {
+            while (true) {
+                SppV2Codec.Frame frame = readFrame();
+                if (frame.type() == SppV2Codec.TYPE_ACK) {
+                    if (liveCommands != null) liveCommands.onAck(frame.sequence());
+                    continue;
+                }
+                return decodeAndAck(frame);
+            }
+        }
+        if (framing == 2) return decodeBle(ble.take(liveHold ? 30_000L : 15_000L));
+        return decodeV1(readV1Packet());
+    }
+
+    private SppV1Codec.Packet readV1Packet() throws Exception {
+        while (v1Pending.isEmpty()) {
+            int count = input.read(readBuffer);
+            if (count < 0) throw new EOFException();
+            if (count == 0) throw new Failure("EMPTY_SOCKET_READ");
+            v1Pending.addAll(v1Decoder.feed(readBuffer, 0, count));
+        }
+        if (!liveHold && ++frameCount > 512) throw new Failure("UNEXPECTED_FRAME_VOLUME");
+        return v1Pending.removeFirst();
+    }
+
+    private XiaomiProto.Command decodeV1(SppV1Codec.Packet packet) throws Exception {
+        if (packet.channel() == SppV1Codec.CHANNEL_VERSION) return null;
+        byte[] payload = packet.payload();
+        if (packet.channel() == SppV1Codec.CHANNEL_FITNESS) {
+            acceptV1Activity(payload);
+            return null;
+        }
+        if (packet.channel() != SppV1Codec.CHANNEL_PROTO_RX && packet.channel() != SppV1Codec.CHANNEL_PROTO_TX) {
+            return null;
+        }
+        if (packet.dataType() == SppV1Codec.DATA_ENCRYPTED) payload = session.decryptV1(payload);
+        return publishParsed(payload);
+    }
+
+    private XiaomiProto.Command decodeBle(byte[] payload) throws Exception {
+        if (payload == null || payload.length == 0) return null;
+        byte[] plain = payload;
+        try {
+            if (authenticated) plain = session.decryptV1(payload);
+            return publishParsed(plain);
+        } catch (Exception ignored) {
+            acceptV1Activity(payload);
+            return null;
+        }
+    }
+
+    private XiaomiProto.Command publishParsed(byte[] plaintext) throws Exception {
+        var command = XiaomiProto.Command.parseFrom(plaintext);
+        if (command.getType() == 10 && command.hasSubtype() && command.getSubtype() == 5
+                && command.hasWeather() && command.getWeather().hasLocations()) {
+            observedLocations = command.getWeather().getLocations();
+        }
+        publishBattery(command);
+        return command;
+    }
+
+    private void acceptV1Activity(byte[] payload) throws Exception {
+        if (history == null) return;
+        try {
+            var result = history.acceptFragment(payload);
+            if (result != null && onFileStored != null) {
+                rawHistory.persist(result, historyDeviceId, verifiedDevice.firmware(), System.currentTimeMillis());
+                if ("PARSED".equals(result.parseStatus)) summarizeSport(result.measurements);
+                onFileStored.accept(result.copyFileId());
+            }
+        } catch (Exception ignored) {
+            if (history != null) history.reset();
+        }
+    }
+
     private void sendCommand(XiaomiProto.Command command) throws Exception {
         writeCommand(sentSequence, command);
         sentSequence = (sentSequence + 1) & 255;
@@ -346,11 +450,32 @@ public final class SppDiagnosticClient implements AutoCloseable {
 
     private void writeCommand(int sequence, XiaomiProto.Command command) throws Exception {
         byte[] bytes = command.toByteArray();
-        if (authenticated) bytes = session.encryptV2(bytes);
-        if (bytes.length + 2 > peerPayloadLimit) throw new Failure("COMMAND_EXCEEDS_NEGOTIATED_SIZE");
         OwnershipController.beginNativeSession();
         try {
             if (!new OwnershipController(context).nativeReady()) throw new Failure("NATIVE_OWNERSHIP_LOST");
+            if (framing == 2) {
+                if (authenticated) bytes = session.encryptV1(bytes, v1EncryptCounter++);
+                if (bytes.length > peerPayloadLimit) throw new Failure("COMMAND_EXCEEDS_NEGOTIATED_SIZE");
+                ble.write(bytes, authenticated);
+                return;
+            }
+            if (framing == 1) {
+                int dataType = SppV1Codec.DATA_PLAIN;
+                if (!authenticated && command.getType() == 1 && command.getSubtype() >= 17) {
+                    dataType = SppV1Codec.DATA_AUTH;
+                } else if (authenticated) {
+                    dataType = SppV1Codec.DATA_ENCRYPTED;
+                    bytes = session.encryptV1(bytes, v1EncryptCounter++);
+                }
+                if (bytes.length > peerPayloadLimit) throw new Failure("COMMAND_EXCEEDS_NEGOTIATED_SIZE");
+                synchronized (writeLock) {
+                    output.write(SppV1Codec.encode(SppV1Codec.protobuf(sequence, dataType, bytes)));
+                    output.flush();
+                }
+                return;
+            }
+            if (authenticated) bytes = session.encryptV2(bytes);
+            if (bytes.length + 2 > peerPayloadLimit) throw new Failure("COMMAND_EXCEEDS_NEGOTIATED_SIZE");
             synchronized (writeLock) {
                 sendFrame(SppV2Codec.dataFrame(sequence, SppV2Codec.CHANNEL_PROTOBUF,
                         authenticated ? SppV2Codec.OPCODE_ENCRYPTED : SppV2Codec.OPCODE_PLAINTEXT, bytes));
@@ -362,9 +487,7 @@ public final class SppDiagnosticClient implements AutoCloseable {
 
     private XiaomiProto.Command awaitCommand(int type, int subtype) throws Exception {
         while (true) {
-            SppV2Codec.Frame frame = readFrame();
-            if (frame.type() == SppV2Codec.TYPE_ACK) continue;
-            XiaomiProto.Command command = decodeAndAck(frame);
+            XiaomiProto.Command command = nextCommand();
             if (command != null && command.getType() == type
                     && command.hasSubtype() && command.getSubtype() == subtype) return command;
         }
@@ -547,6 +670,7 @@ public final class SppDiagnosticClient implements AutoCloseable {
     }
 
     private void awaitTransportAck(int sequence) throws Exception {
+        if (framing != 0) return;
         while (true) {
             SppV2Codec.Frame frame = readFrame();
             if (frame.type() == SppV2Codec.TYPE_ACK) {
@@ -561,16 +685,24 @@ public final class SppDiagnosticClient implements AutoCloseable {
     private void holdOpen() throws Exception {
         liveHold = true;
         linkStop = null;
-        // The read lock would otherwise block official restore for the whole connection.
         OwnershipController.endNativeSession();
         try {
             while (!closed) {
-                SppV2Codec.Frame frame = readFrame();
-                if (frame.type() == SppV2Codec.TYPE_ACK) {
-                    liveCommands.onAck(frame.sequence());
+                if (framing == 0) {
+                    SppV2Codec.Frame frame = readFrame();
+                    if (frame.type() == SppV2Codec.TYPE_ACK) {
+                        liveCommands.onAck(frame.sequence());
+                    } else {
+                        XiaomiProto.Command command = decodeAndAck(frame);
+                        if (command != null) {
+                            if (onLiveCommand != null) onLiveCommand.accept(command);
+                            liveCommands.onCommand(command);
+                        }
+                    }
                 } else {
-                    XiaomiProto.Command command = decodeAndAck(frame);
+                    XiaomiProto.Command command = nextCommand();
                     if (command != null) {
+                        if (liveCommands != null) liveCommands.onAck(sentSequence);
                         if (onLiveCommand != null) onLiveCommand.accept(command);
                         liveCommands.onCommand(command);
                     }
@@ -603,13 +735,17 @@ public final class SppDiagnosticClient implements AutoCloseable {
         LiveCommandQueue commands = liveCommands;
         if (commands != null) commands.close(new IllegalStateException("SESSION_CLOSED"));
         BluetoothSocket closing;
+        BleGattClient gatt;
         synchronized (this) {
             closed = true;
             closing = socket;
             socket = null;
+            gatt = ble;
+            ble = null;
         }
         if (closing != null) {
             try { closing.close(); } catch (Exception ignored) { /* Socket closure cannot expose credentials. */ }
         }
+        if (gatt != null) gatt.close();
     }
 }
