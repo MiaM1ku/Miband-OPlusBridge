@@ -3,6 +3,7 @@ package io.github.miam1ku.mibandoplusbridge.data;
 
 import org.json.JSONObject;
 import org.junit.Test;
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
@@ -53,5 +54,23 @@ public final class TransportObservationTest {
                 verified("lchz.watch.m67", "1.0.50").put("authAppDeviceIdPresent", true), "lchz.watch.m67"));
         assertFalse(TransportObservation.supportsLive(
                 verified("lchz.watch.m67", "1.0.50").put("appCapability", 0), "lchz.watch.m67"));
+    }
+
+    @Test public void band8ProV1ObservationCompletesImportWithoutFirmware() throws Exception {
+        JSONObject observation = verified("lchz.watch.m67", "1.0.50")
+                .put("queueClass", "com.xiaomi.wearable.transport.queue.SppTaskQueueV1")
+                .put("authImplementation", "WearAuthV2");
+        JSONObject binding = new JSONObject()
+                .put("address", "AA:BB:CC:DD:EE:FF")
+                .put("model", "lchz.watch.m67")
+                .put("userId", "u")
+                .put("region", "CN")
+                .put("token", "0123456789abcdef0123456789abcdef");
+        TransportObservation.applyToBinding(binding, observation);
+        assertEquals("SPP", binding.getString("observedTransport"));
+        assertEquals("1", binding.getString("framingVersion"));
+        assertEquals("WearAuthV2", binding.getString("authenticationBranch"));
+        assertEquals("", TransportObservation.missingForLive(binding, observation));
+        assertTrue(TransportObservation.supportsLive(observation, "lchz.watch.m67"));
     }
 }

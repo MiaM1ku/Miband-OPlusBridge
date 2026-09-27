@@ -688,6 +688,9 @@ public final class MainActivity extends AppCompatActivity {
             case "DIAGNOSTIC_WINDOW_OPEN" -> "连接参数采集已开启。仅观察已导入手环的连接类型和协议版本，不记录消息内容或密钥。请在官方应用中重连。";
             case "PROTOCOL_CAPTURE_OPEN" -> "协议消息采集已开启，120 秒后关闭。请执行本次测试操作。";
             case "UNPROVISIONED" -> "尚未导入绑定信息。";
+            case "BINDING_SAVED" -> "绑定已保存。型号：" + response.getString("model", "")
+                    + "\n产品：" + response.getString("productId", "")
+                    + "\n固件：" + (response.getString("firmware", "").isBlank() ? "连接后读取" : response.getString("firmware", ""));
             case "BINDING_INCOMPLETE" -> "BINDING_INCOMPLETE\n已加密保存转换结果，但尚缺实机协议证据，不能独立连接。\n型号："
                     + response.getString("model", "") + "\n产品：" + response.getString("productId", "")
                     + "\n固件：" + response.getString("firmware", "") + "\n导入时缺失：" + response.getString("missing", "");

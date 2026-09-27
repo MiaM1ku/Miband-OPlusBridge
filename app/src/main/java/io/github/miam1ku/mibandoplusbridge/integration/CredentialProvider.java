@@ -151,15 +151,19 @@ public final class CredentialProvider extends ContentProvider {
                 case "status" -> {
                     requireSelf(self);
                     JSONObject saved = store.read();
+                    JSONObject observation = TransportObservation.read(getContext());
+                    boolean ready = saved != null && TransportObservation.supportsLive(
+                            observation, saved.optString("model", ""));
                     Bundle status = result(open ? "IMPORT_WINDOW_OPEN"
-                            : saved == null ? "UNPROVISIONED" : "BINDING_INCOMPLETE");
+                            : saved == null ? "UNPROVISIONED"
+                            : ready ? "BINDING_SAVED" : "BINDING_INCOMPLETE");
                     if (saved != null) {
+                        TransportObservation.applyToBinding(saved, observation);
                         for (String field : new String[]{"address", "model", "productId", "firmware"}) {
                             status.putString(field, saved.optString(field, ""));
                         }
-                        status.putString("missing", saved.getString("missing"));
-                        status.putString("transportObservation",
-                                TransportObservation.read(getContext()).toString());
+                        status.putString("missing", TransportObservation.missingForLive(saved, observation));
+                        status.putString("transportObservation", observation.toString());
                         status.putBoolean("diagnosticOpen", diagnosticOpen);
                         status.putBoolean("captureOpen", captureOpen);
                         status.putString("captureError", captureError);
@@ -221,6 +225,12 @@ public final class CredentialProvider extends ContentProvider {
         if (!TransportObservation.write(getContext(), observation)) {
             throw new IllegalStateException("OBSERVATION_STORAGE_FAILED");
         }
+        JSONObject saved = store.read();
+        if (saved != null) {
+            TransportObservation.applyToBinding(saved, observation);
+            saved.put("missing", TransportObservation.missingForLive(saved, observation));
+            store.save(saved);
+        }
         diagnosticWrites++;
         getContext().getContentResolver().notifyChange(URI, null);
         return result("TRANSPORT_OBSERVED");
@@ -252,16 +262,16 @@ public final class CredentialProvider extends ContentProvider {
             }
             record.put("privateUUID", privateUUID);
         }
-        StringBuilder missing = new StringBuilder("observedTransport,framingVersion,authenticationBranch");
-        for (String key : new String[]{"address", "model", "productId", "userId", "region", "token", "firmware"}) {
-            if (record.optString(key, "").isBlank()) missing.append(',').append(key);
-        }
-        record.put("missing", missing.toString());
+        JSONObject observation = TransportObservation.read(getContext());
+        TransportObservation.applyToBinding(record, observation);
+        record.put("missing", TransportObservation.missingForLive(record, observation));
         store.save(record);
         closeCapture();
         window.close();
         getContext().getContentResolver().notifyChange(URI, null);
-        return result("BINDING_INCOMPLETE");
+        boolean ready = record.optString("missing").isBlank()
+                && TransportObservation.supportsLive(observation, record.optString("model", ""));
+        return result(ready ? "BINDING_SAVED" : "BINDING_INCOMPLETE");
     }
 
 

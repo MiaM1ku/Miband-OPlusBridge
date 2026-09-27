@@ -53,4 +53,59 @@ public final class TransportObservation {
                 && SERVICE.equals(observation.optString("rfcommUuid"))
                 && observation.optBoolean("rfcommSecure");
     }
+
+    /** Copy live-profile evidence onto the encrypted binding so import can complete without firmware. */
+    public static void applyToBinding(JSONObject binding, JSONObject observation) throws org.json.JSONException {
+        if (binding == null || observation == null) return;
+        if (binding.optString("firmware", "").isBlank()) {
+            String firmware = observation.optString("firmware", "");
+            if (!firmware.isBlank()) binding.put("firmware", firmware);
+        }
+        String transport = observation.optString("transport", "");
+        if (!transport.isBlank()) binding.put("observedTransport", transport);
+        String framing = framingVersion(observation);
+        if (!framing.isBlank()) binding.put("framingVersion", framing);
+        if ("WearAuthV2".equals(observation.optString("authImplementation"))
+                && !observation.optBoolean("authOobPresent")
+                && !observation.optBoolean("authAppDeviceIdPresent")) {
+            binding.put("authenticationBranch", "WearAuthV2");
+        }
+    }
+
+    public static String framingVersion(JSONObject observation) {
+        if (observation == null) return "";
+        String queue = observation.optString("queueClass", "");
+        if (queue.contains("SppTaskQueueV1")) return "1";
+        if (queue.contains("SppTaskQueueV2")) return "2";
+        if ("GATT".equals(observation.optString("transport"))) return "1";
+        String version = observation.optString("versionName", "");
+        if (version.startsWith("1.")) return "1";
+        if (version.startsWith("2.") || version.startsWith("3.")) return "2";
+        return "";
+    }
+
+    public static String missingForLive(JSONObject binding, JSONObject observation) {
+        StringBuilder missing = new StringBuilder();
+        if (binding == null) return "address,model,userId,region,token";
+        for (String key : new String[]{"address", "model", "userId", "region", "token"}) {
+            if (binding.optString(key, "").isBlank()) {
+                if (missing.length() > 0) missing.append(',');
+                missing.append(key);
+            }
+        }
+        String model = binding.optString("model", "");
+        if (supportsLive(observation, model)) return missing.toString();
+        if (observation == null || observation.optString("transport", "").isBlank()) append(missing, "observedTransport");
+        if (framingVersion(observation).isBlank()) append(missing, "framingVersion");
+        if (!"WearAuthV2".equals(observation == null ? "" : observation.optString("authImplementation"))
+                || (observation != null && observation.optBoolean("authOobPresent"))) {
+            append(missing, "authenticationBranch");
+        }
+        return missing.toString();
+    }
+
+    private static void append(StringBuilder missing, String field) {
+        if (missing.length() > 0) missing.append(',');
+        missing.append(field);
+    }
 }
