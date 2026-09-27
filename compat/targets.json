@@ -1,0 +1,380 @@
+{
+  "schemaVersion": 1,
+  "minimumApi": 36,
+  "mismatchStatus": "HOST_VERSION_UNSUPPORTED",
+  "requireInstalledBaseApkHash": true,
+  "targets": [
+    {
+      "packageName": "com.mi.health",
+      "apkSha256": "46100649d47000e8886d94cfbb34c18706e492a5d3aaa7f34cd4785841ffc254",
+      "signerSha256Api36": "c9009d01ebf9f5d0302bc71b2fe9aa9a47a432bba17308a3111b75d7b2149025",
+      "input": "3.59.1_20260906202621_mihealth.apk",
+      "evidenceLevel": "STATIC_ONLY",
+      "runtimeVerified": false,
+      "anchors": [
+        {
+          "role": "bindingConversion",
+          "classDescriptor": "Lcom/xiaomi/fit/device/extensions/DeviceModelExtKt;",
+          "methodName": "convert",
+          "methodDescriptor": "(Lcom/xiaomi/fitness/device/manager/export/bean/WearableDeviceInfo;)Lcom/xiaomi/wearable/core/DeviceInfo;",
+          "dex": "classes9.dex",
+          "evidence": "analysis/smali/mihealth/classes9.dex/com/xiaomi/fit/device/extensions/DeviceModelExtKt.smali",
+          "line": 51
+        },
+        {
+          "role": "bleConnect",
+          "classDescriptor": "Lcom/xiaomi/wearable/connection/BleConnection;",
+          "methodName": "connect",
+          "methodDescriptor": "()V",
+          "dex": "classes3.dex",
+          "evidence": "analysis/smali/mihealth/classes3.dex/com/xiaomi/wearable/connection/BleConnection.smali",
+          "line": 544
+        },
+        {
+          "role": "sppConnect",
+          "classDescriptor": "Lcom/xiaomi/wearable/connection/SppConnection;",
+          "methodName": "connect",
+          "methodDescriptor": "()V",
+          "dex": "classes3.dex",
+          "evidence": "analysis/smali/mihealth/classes3.dex/com/xiaomi/wearable/connection/SppConnection.smali",
+          "line": 293
+        },
+        {
+          "role": "sppQueue",
+          "classDescriptor": "Lynq;",
+          "methodName": "newTaskQueue",
+          "methodDescriptor": "()Lcom/xiaomi/wearable/transport/queue/ITaskQueue;",
+          "dex": "classes3.dex",
+          "evidence": "analysis/smali/mihealth/classes3.dex/ynq.smali",
+          "line": 275
+        },
+        {
+          "role": "sppApiVersion",
+          "classDescriptor": "Lynq;",
+          "methodName": "getVersion",
+          "methodDescriptor": "()I",
+          "dex": "classes3.dex",
+          "evidence": "analysis/smali/mihealth/classes3.dex/ynq.smali",
+          "line": 197
+        },
+        {
+          "role": "commandReceive",
+          "classDescriptor": "Lcom/xiaomi/wearable/wear/api/WearApiCall;",
+          "methodName": "handleData",
+          "methodDescriptor": "(I[B)Z",
+          "dex": "classes3.dex",
+          "evidence": "analysis/smali/mihealth/classes3.dex/com/xiaomi/wearable/wear/api/WearApiCall.smali",
+          "line": 925
+        },
+        {
+          "role": "authenticationStart",
+          "classDescriptor": "Lcom/xiaomi/wearable/wear/api/WearAuthV2;",
+          "methodName": "i",
+          "methodDescriptor": "()V",
+          "dex": "classes3.dex",
+          "evidence": "analysis/smali/mihealth/classes3.dex/com/xiaomi/wearable/wear/api/WearAuthV2.smali",
+          "line": 237
+        },
+        {
+          "role": "authenticationProof",
+          "classDescriptor": "Lcom/xiaomi/wearable/wear/api/WearAuthV2;",
+          "methodName": "k",
+          "methodDescriptor": "([B[B[B)V",
+          "dex": "classes3.dex",
+          "evidence": "analysis/smali/mihealth/classes3.dex/com/xiaomi/wearable/wear/api/WearAuthV2.smali",
+          "line": 375
+        },
+        {
+          "role": "authenticationFinish",
+          "classDescriptor": "Lcom/xiaomi/wearable/wear/api/WearAuthV2;",
+          "methodName": "h",
+          "methodDescriptor": "([B[B)V",
+          "dex": "classes3.dex",
+          "evidence": "analysis/smali/mihealth/classes3.dex/com/xiaomi/wearable/wear/api/WearAuthV2.smali",
+          "line": 110
+        },
+        {
+          "role": "apiTransportConnected",
+          "classDescriptor": "Lcom/xiaomi/wearable/wear/api/WearApiCall;",
+          "methodName": "onConnected",
+          "methodDescriptor": "()V",
+          "dex": "classes3.dex",
+          "evidence": "analysis/smali/mihealth/classes3.dex/com/xiaomi/wearable/wear/api/WearApiCall.smali",
+          "line": 1253
+        },
+        {
+          "role": "apiAuthenticationCompleted",
+          "classDescriptor": "Lcom/xiaomi/wearable/wear/api/WearApiCall;",
+          "methodName": "onConnectSuccessInternal",
+          "methodDescriptor": "()V",
+          "dex": "classes3.dex",
+          "evidence": "analysis/smali/mihealth/classes3.dex/com/xiaomi/wearable/wear/api/WearApiCall.smali",
+          "line": 1192
+        },
+        {
+          "role": "apiDeviceUpdated",
+          "classDescriptor": "Lcom/xiaomi/wearable/wear/api/WearApiCall;",
+          "methodName": "onUpdate",
+          "methodDescriptor": "(Lcom/xiaomi/wearable/core/DeviceInfo;)V",
+          "dex": "classes3.dex",
+          "evidence": "analysis/smali/mihealth/classes3.dex/com/xiaomi/wearable/wear/api/WearApiCall.smali",
+          "line": 1427
+        },
+        {
+          "role": "bleConnectionSuccess",
+          "classDescriptor": "Lcom/xiaomi/wearable/connection/BleConnection;",
+          "methodName": "onConnectSuccess",
+          "methodDescriptor": "()V",
+          "dex": "classes3.dex",
+          "evidence": "analysis/smali/mihealth/classes3.dex/com/xiaomi/wearable/connection/BleConnection.smali",
+          "line": 1388
+        },
+        {
+          "role": "sppConnectionStatus",
+          "classDescriptor": "Lcom/xiaomi/wearable/connection/SppConnection;",
+          "methodName": "onConnectStatusChanged",
+          "methodDescriptor": "(Z)V",
+          "dex": "classes3.dex",
+          "evidence": "analysis/smali/mihealth/classes3.dex/com/xiaomi/wearable/connection/SppConnection.smali",
+          "line": 756
+        },
+        {
+          "role": "authenticationConstruction",
+          "classDescriptor": "Lcom/xiaomi/wearable/wear/api/WearAuthV2;",
+          "methodName": "<init>",
+          "methodDescriptor": "(Ljava/lang/String;[BLjava/lang/String;Ljava/lang/String;ZLcom/xiaomi/wearable/wear/api/WearApiCall;I)V",
+          "dex": "classes3.dex",
+          "evidence": "analysis/smali/mihealth/classes3.dex/com/xiaomi/wearable/wear/api/WearAuthV2.smali",
+          "line": 21
+        },
+        {
+          "role": "commandSend",
+          "classDescriptor": "Lcom/xiaomi/wearable/wear/api/WearApiCall;",
+          "methodName": "call",
+          "methodDescriptor": "(I[BZLcom/xiaomi/wearable/core/ICallback;I)I",
+          "dex": "classes3.dex",
+          "evidence": "analysis/smali/mihealth/classes3.dex/com/xiaomi/wearable/wear/api/WearApiCall.smali",
+          "line": 475
+        },
+        {
+          "role": "massCommandSend",
+          "classDescriptor": "Lcom/xiaomi/wearable/wear/api/WearApiCall;",
+          "methodName": "massCall",
+          "methodDescriptor": "(II[BZLcom/xiaomi/wearable/core/ICallback;I)I",
+          "dex": "classes3.dex",
+          "evidence": "analysis/smali/mihealth/classes3.dex/com/xiaomi/wearable/wear/api/WearApiCall.smali",
+          "line": 1090
+        },
+        {
+          "role": "commandReply",
+          "classDescriptor": "Lcom/xiaomi/wearable/wear/api/WearApiCall;",
+          "methodName": "callbackClient",
+          "methodDescriptor": "(Lcom/xiaomi/wearable/core/ICallback;Lcom/xiaomi/wearable/core/WearApiResult;)V",
+          "dex": "classes3.dex",
+          "evidence": "analysis/smali/mihealth/classes3.dex/com/xiaomi/wearable/wear/api/WearApiCall.smali",
+          "line": 343
+        },
+        {
+          "role": "replyPayload",
+          "classDescriptor": "Lcom/xiaomi/wearable/core/WearApiResult;",
+          "methodName": "c",
+          "methodDescriptor": "()[B",
+          "dex": "classes3.dex",
+          "evidence": "analysis/smali/mihealth-results/classes3.dex/com/xiaomi/wearable/core/WearApiResult.smali",
+          "line": 120
+        },
+        {
+          "role": "replyCode",
+          "classDescriptor": "Lcom/xiaomi/wearable/core/WearApiResult;",
+          "methodName": "a",
+          "methodDescriptor": "()I",
+          "dex": "classes3.dex",
+          "evidence": "analysis/smali/mihealth-results/classes3.dex/com/xiaomi/wearable/core/WearApiResult.smali",
+          "line": 110
+        }
+      ]
+    },
+    {
+      "packageName": "com.heytap.mydevices",
+      "apkSha256": "e0cd2ddb48836e0c1a88f5cf5d34bfafccce4d953ee76c820a51c1ec6ae93a35",
+      "signerSha256Api36": "64aafaf1d5bc9155a9e417a849e4f8eda1d0d1341667c28ed7c443c76f820b9a",
+      "input": "fs/my_stock/priv-app/MyDevices/MyDevices.apk",
+      "evidenceLevel": "STATIC_ONLY",
+      "runtimeVerified": false,
+      "anchors": [
+        {
+          "role": "partnerConfigRead",
+          "classDescriptor": "Lcom/heytap/mydevices/core/config/DeviceAppConfigManager;",
+          "methodName": "o",
+          "methodDescriptor": "()Ljava/util/List;",
+          "dex": "classes2.dex",
+          "evidence": "analysis/smali/mydevices/classes2.dex/com/heytap/mydevices/core/config/DeviceAppConfigManager.smali",
+          "line": 1789
+        },
+        {
+          "role": "partnerActiveList",
+          "classDescriptor": "Lcom/heytap/mydevices/core/config/DeviceAppConfigManager;",
+          "methodName": "n",
+          "methodDescriptor": "()Ljava/util/List;",
+          "dex": "classes2.dex",
+          "evidence": "analysis/smali/mydevices/classes2.dex/com/heytap/mydevices/core/config/DeviceAppConfigManager.smali",
+          "line": 1418
+        },
+        {
+          "role": "observerRegister",
+          "classDescriptor": "Lcom/heytap/mydevices/core/agent/AppAgentManager;",
+          "methodName": "c",
+          "methodDescriptor": "(Ljava/lang/String;Laa/Ow;)V",
+          "dex": "classes2.dex",
+          "evidence": "analysis/smali/mydevices/classes2.dex/com/heytap/mydevices/core/agent/AppAgentManager.smali",
+          "line": 440
+        },
+        {
+          "role": "observerUnregister",
+          "classDescriptor": "Lcom/heytap/mydevices/core/agent/AppAgentManager;",
+          "methodName": "d",
+          "methodDescriptor": "(Ljava/lang/String;)V",
+          "dex": "classes2.dex",
+          "evidence": "analysis/smali/mydevices/classes2.dex/com/heytap/mydevices/core/agent/AppAgentManager.smali",
+          "line": 499
+        },
+        {
+          "role": "deviceRemoved",
+          "classDescriptor": "Laa/Ow;",
+          "methodName": "a",
+          "methodDescriptor": "(Ljava/lang/String;ZLjava/lang/String;)V",
+          "dex": "classes3.dex",
+          "evidence": "analysis/smali/mydevices/classes3.dex/aa/Ow.smali",
+          "line": 7
+        },
+        {
+          "role": "deviceAdded",
+          "classDescriptor": "Laa/Ow;",
+          "methodName": "b",
+          "methodDescriptor": "(Ljava/lang/String;)V",
+          "dex": "classes3.dex",
+          "evidence": "analysis/smali/mydevices/classes3.dex/aa/Ow.smali",
+          "line": 10
+        },
+        {
+          "role": "deviceUpdated",
+          "classDescriptor": "Laa/Ow;",
+          "methodName": "c",
+          "methodDescriptor": "(Ljava/lang/String;)V",
+          "dex": "classes3.dex",
+          "evidence": "analysis/smali/mydevices/classes3.dex/aa/Ow.smali",
+          "line": 13
+        }
+      ]
+    },
+    {
+      "packageName": "com.heytap.health",
+      "apkSha256": "8362b35729e09ce910d5897e6cd6bde96572f2fbed211e8aa8e45130e3d661b4",
+      "signerSha256Api36": "38bd2bbfa86127bd03c11195b507321358fe2ba116c54a16c713b91e39fa393e",
+      "input": "fs/my_stock/del-app/Health/Health.apk",
+      "evidenceLevel": "STATIC_ONLY",
+      "runtimeVerified": false,
+      "anchors": [
+        {
+          "role": "serviceCreated",
+          "classDescriptor": "Lcom/heytap/databaseengineservice/SportHealthDataService;",
+          "methodName": "onCreate",
+          "methodDescriptor": "()V",
+          "dex": "classes15.dex",
+          "evidence": "analysis/smali/health/classes15.dex/com/heytap/databaseengineservice/SportHealthDataService.smali",
+          "line": 42
+        },
+        {
+          "role": "serviceStarted",
+          "classDescriptor": "Lcom/heytap/databaseengineservice/SportHealthDataService;",
+          "methodName": "onStartCommand",
+          "methodDescriptor": "(Landroid/content/Intent;II)I",
+          "dex": "classes15.dex",
+          "evidence": "analysis/smali/health/classes15.dex/com/heytap/databaseengineservice/SportHealthDataService.smali",
+          "line": 168
+        },
+        {
+          "role": "apiInstance",
+          "classDescriptor": "Lcom/heytap/databaseengine/api/SportHealthDataAPI;",
+          "methodName": "getInstance",
+          "methodDescriptor": "()Lcom/heytap/databaseengine/api/ISportHealthDataAPI;",
+          "dex": "classes13.dex",
+          "evidence": "analysis/smali/health/classes13.dex/com/heytap/databaseengine/api/SportHealthDataAPI.smali",
+          "line": 857
+        },
+        {
+          "role": "insertData",
+          "classDescriptor": "Lcom/heytap/databaseengine/api/SportHealthDataAPI;",
+          "methodName": "insertSportHealthData",
+          "methodDescriptor": "(Lcom/heytap/databaseengine/option/DataInsertOption;)Lcom/oplus/aiunit/vision/pgc;",
+          "dex": "classes13.dex",
+          "evidence": "analysis/smali/health/classes13.dex/com/heytap/databaseengine/api/SportHealthDataAPI.smali",
+          "line": 5904
+        },
+        {
+          "role": "readData",
+          "classDescriptor": "Lcom/heytap/databaseengine/api/SportHealthDataAPI;",
+          "methodName": "readSportHealthData",
+          "methodDescriptor": "(Lcom/heytap/databaseengine/option/DataReadOption;)Lcom/oplus/aiunit/vision/pgc;",
+          "dex": "classes13.dex",
+          "evidence": "analysis/smali/health/classes13.dex/com/heytap/databaseengine/api/SportHealthDataAPI.smali",
+          "line": 6108
+        },
+        {
+          "role": "writeAndNotify",
+          "classDescriptor": "Lcom/oplus/aiunit/vision/le4;",
+          "methodName": "f",
+          "methodDescriptor": "(Lcom/heytap/databaseengine/option/DataInsertOption;Lcom/heytap/databaseengine/callback/IDataOperateListener;)V",
+          "dex": "classes15.dex",
+          "evidence": "analysis/smali/health/classes15.dex/com/oplus/aiunit/vision/le4.smali",
+          "line": 1128
+        },
+        {
+          "role": "derivedProcessing",
+          "classDescriptor": "Lcom/oplus/aiunit/vision/le4;",
+          "methodName": "c",
+          "methodDescriptor": "(ILjava/lang/String;)V",
+          "dex": "classes15.dex",
+          "evidence": "analysis/smali/health/classes15.dex/com/oplus/aiunit/vision/le4.smali",
+          "line": 730
+        },
+        {
+          "role": "currentAccount",
+          "classDescriptor": "Lcom/heytap/device/data/storage/e$a;",
+          "methodName": "d",
+          "methodDescriptor": "()Ljava/lang/String;",
+          "dex": "classes15.dex",
+          "evidence": "analysis/smali/health-extra/classes15.dex/com/heytap/device/data/storage/e$a.smali",
+          "line": 152
+        },
+        {
+          "role": "productionApi",
+          "classDescriptor": "Lcom/heytap/device/data/storage/e$a;",
+          "methodName": "b",
+          "methodDescriptor": "()Lcom/heytap/databaseengine/api/ISportHealthDataAPI;",
+          "dex": "classes15.dex",
+          "evidence": "analysis/smali/health-extra/classes15.dex/com/heytap/device/data/storage/e$a.smali",
+          "line": 102
+        },
+        {
+          "role": "resultSuccess",
+          "classDescriptor": "Lcom/oplus/aiunit/vision/hei;",
+          "methodName": "d",
+          "methodDescriptor": "()Z",
+          "dex": "classes15.dex",
+          "evidence": "analysis/smali/health-extra/classes15.dex/com/oplus/aiunit/vision/hei.smali",
+          "line": 163
+        }
+      ]
+    },
+    {
+      "packageName": "com.heytap.opluscarlink",
+      "apkSha256": "6d351fa264dbd391c25ba12b1a024da5a15f7caf7ca848f9665c2e72cf9b1232",
+      "signerSha256Api36": "64aafaf1d5bc9155a9e417a849e4f8eda1d0d1341667c28ed7c443c76f820b9a",
+      "input": "fs/my_stock/app/CarLink/CarLink.apk",
+      "evidenceLevel": "STATIC_ONLY",
+      "runtimeVerified": false,
+      "anchors": []
+    }
+  ]
+}

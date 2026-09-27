@@ -1,0 +1,14 @@
+.gradle/
+**/build/
+local.properties
+*.jks
+*.keystore
+*.apk
+dist/
+analysis/
+HANDOFF.md
+.idea/
+*.iml
+__pycache__/
+*.pyc
+tools/

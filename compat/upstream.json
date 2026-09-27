@@ -1,0 +1,130 @@
+{
+  "repository": "https://codeberg.org/Freeyourgadget/Gadgetbridge",
+  "commit": "75f923904f8504b03fabdee0987fd1c269a92278",
+  "projectLicense": "AGPL-3.0-or-later",
+  "referenceFiles": [
+    {
+      "path": "app/src/main/java/nodomain/freeyourgadget/gadgetbridge/service/devices/xiaomi/XiaomiAuthService.java",
+      "sha256": "df2f8fc4bb20a051fbcf3d71da754a9ab9be6d1d2ed1ed66db422bc97871c2f5",
+      "use": "analysis-only"
+    },
+    {
+      "path": "app/src/main/java/nodomain/freeyourgadget/gadgetbridge/service/devices/xiaomi/AbstractXiaomiBleProtocol.java",
+      "sha256": "5c6eff49a4be62a086508a1354cad7346e27e01cbdfb60f5aa79f89caa1d8f08",
+      "use": "analysis-only"
+    },
+    {
+      "path": "app/src/main/java/nodomain/freeyourgadget/gadgetbridge/service/devices/xiaomi/XiaomiBleProtocolV1.java",
+      "sha256": "2ba5a1590ffbbedb2068aa76c21d575917a71445bbfedc3c38b2f2eca3401aaa",
+      "use": "analysis-only"
+    },
+    {
+      "path": "app/src/main/java/nodomain/freeyourgadget/gadgetbridge/service/devices/xiaomi/XiaomiBleProtocolV2.java",
+      "sha256": "ccc41195479f02414986eff887f45a792db9b7d8a96a1dc2696cc80c47bb4d59",
+      "use": "analysis-only"
+    },
+    {
+      "path": "app/src/main/java/nodomain/freeyourgadget/gadgetbridge/service/devices/xiaomi/XiaomiSppPacketV1.java",
+      "sha256": "0f60e292544638382446281b8a6ee9d823886c9750b87221e67e601f0a464090",
+      "use": "analysis-only"
+    },
+    {
+      "path": "app/src/main/java/nodomain/freeyourgadget/gadgetbridge/service/devices/xiaomi/XiaomiSppPacketV2.java",
+      "sha256": "894f83f96df6fb8b332c4613ba628902bf380a2b44e845531151809a56ceeb7f",
+      "use": "analysis-only"
+    },
+    {
+      "path": "app/src/main/java/nodomain/freeyourgadget/gadgetbridge/service/devices/xiaomi/XiaomiSppProtocolV1.java",
+      "sha256": "82f1940c47ed2af1055b07b4cafd0b33b2d45ba6923a01312d616299c64d7e0a",
+      "use": "analysis-only"
+    },
+    {
+      "path": "app/src/main/java/nodomain/freeyourgadget/gadgetbridge/service/devices/xiaomi/XiaomiSppProtocolV2.java",
+      "sha256": "f682b50b288259ac28f8b5a4f28aeea2a9f31317244aff3bdc274c3738ceba49",
+      "use": "analysis-only"
+    },
+    {
+      "path": "app/src/main/java/nodomain/freeyourgadget/gadgetbridge/service/devices/xiaomi/XiaomiUuids.java",
+      "sha256": "f758c51c048afab45d34db69f90032b55da6a8212f771553dff87c77f72a5503",
+      "use": "analysis-only"
+    },
+    {
+      "path": "GBProtobufGenerator/src/main/proto/xiaomi.proto",
+      "sha256": "1227aa35991c3cbae08e3a4d6317fefa020827ff82a2bb3dfc63da1432331611",
+      "use": "analysis-only"
+    },
+    {
+      "path": "LICENSE",
+      "sha256": "76a97c878c9c7a8321bb395c2b44d3fe2f8d81314d219b20138ed0e2dddd5182",
+      "use": "analysis-only"
+    },
+    {
+      "path": "app/src/main/java/nodomain/freeyourgadget/gadgetbridge/service/devices/xiaomi/XiaomiSppSupport.java",
+      "sha256": "dc2641d2102b13896f06eb7600cd7bd37f733a578885d226afc9a7e39eaf802d",
+      "use": "analysis-and-derived-code"
+    },
+    {
+      "path": "app/src/main/java/nodomain/freeyourgadget/gadgetbridge/service/devices/xiaomi/services/XiaomiWeatherService.java",
+      "sha256": "7429b4085d14f0f686c2dc323688a0cd77011db9f24593e8be7b98f47833ba32",
+      "use": "analysis-and-derived-code"
+    },
+    {
+      "path": "app/src/main/java/nodomain/freeyourgadget/gadgetbridge/devices/xiaomi/XiaomiWeatherConditions.java",
+      "sha256": "dca83a9a0130a42103e61f671c1411b06b08c6e917d33d0e09dd4325a0f27e87",
+      "use": "analysis-and-derived-code"
+    },
+    {
+      "path": "app/src/main/java/nodomain/freeyourgadget/gadgetbridge/service/devices/xiaomi/services/XiaomiSystemService.java",
+      "sha256": "3c52cc141c0e87e6f5b160eb79c9b4caac4504347dda614795ebe501c1456f84",
+      "use": "analysis-and-derived-code"
+    },
+    {
+      "path": "app/src/main/java/nodomain/freeyourgadget/gadgetbridge/service/devices/xiaomi/services/XiaomiNotificationService.java",
+      "sha256": "4defcabd06e5926fef55e4f3680ddd888dcf69dbfb4adf1b7f01d86d5f9b82dd",
+      "use": "analysis-and-derived-code; Band11 call/notification messages not captured"
+    }
+  ],
+  "runtimeReuseFiles": [
+    {
+      "source": "app/src/main/java/nodomain/freeyourgadget/gadgetbridge/service/devices/xiaomi/XiaomiSppPacketV2.java",
+      "target": "app/src/main/java/io/github/oplusband/bridge/protocol/SppV2Codec.java"
+    },
+    {
+      "source": "app/src/main/java/nodomain/freeyourgadget/gadgetbridge/service/devices/xiaomi/XiaomiSppProtocolV2.java",
+      "target": "app/src/main/java/io/github/oplusband/bridge/protocol/SppNegotiation.java"
+    },
+    {
+      "source": "app/src/main/java/nodomain/freeyourgadget/gadgetbridge/service/devices/xiaomi/XiaomiSppPacketV1.java",
+      "target": "app/src/main/java/io/github/oplusband/bridge/protocol/SppNegotiation.java"
+    },
+    {
+      "source": "app/src/main/java/nodomain/freeyourgadget/gadgetbridge/service/devices/xiaomi/XiaomiSppSupport.java",
+      "target": "app/src/main/java/io/github/oplusband/bridge/protocol/SppNegotiation.java"
+    },
+    {
+      "source": "app/src/main/java/nodomain/freeyourgadget/gadgetbridge/service/devices/xiaomi/XiaomiAuthService.java",
+      "target": "app/src/main/java/io/github/oplusband/bridge/protocol/XiaomiSessionCrypto.java"
+    },
+    {
+      "source": "GBProtobufGenerator/src/main/proto/xiaomi.proto",
+      "target": "app/src/main/proto/xiaomi.proto"
+    },
+    {
+      "source": "app/src/main/java/nodomain/freeyourgadget/gadgetbridge/service/devices/xiaomi/services/XiaomiWeatherService.java",
+      "target": "app/src/main/java/io/github/oplusband/bridge/protocol/BandWeatherEncoder.java"
+    },
+    {
+      "source": "app/src/main/java/nodomain/freeyourgadget/gadgetbridge/devices/xiaomi/XiaomiWeatherConditions.java",
+      "target": "app/src/main/java/io/github/oplusband/bridge/protocol/WeatherConditionMap.java"
+    },
+    {
+      "source": "app/src/main/java/nodomain/freeyourgadget/gadgetbridge/service/devices/xiaomi/services/XiaomiSystemService.java",
+      "target": "app/src/main/java/io/github/oplusband/bridge/protocol/BandClockCommand.java"
+    },
+    {
+      "source": "app/src/main/java/nodomain/freeyourgadget/gadgetbridge/service/devices/xiaomi/services/XiaomiNotificationService.java",
+      "target": "app/src/main/java/io/github/oplusband/bridge/protocol/BandNotificationCommand.java"
+    }
+  ],
+  "selectionStatus": "SPP_V2_OBSERVED; INDEPENDENT_AUTHENTICATION_PENDING"
+}

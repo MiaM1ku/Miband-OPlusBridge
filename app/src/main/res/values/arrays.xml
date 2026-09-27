@@ -1,0 +1,7 @@
+<resources>
+    <string-array name="xposed_scope">
+        <item>com.mi.health</item>
+        <item>com.heytap.mydevices</item>
+        <item>com.heytap.health</item>
+    </string-array>
+</resources>

@@ -1,0 +1,88 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS" />
+    <uses-permission android:name="android.permission.SEND_SMS" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <queries>
+        <package android:name="com.mi.health" />
+        <package android:name="com.heytap.mydevices" />
+        <package android:name="com.heytap.health" />
+        <package android:name="me.weishu.kernelsu" />
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+    </queries>
+    <application android:label="小米手环桥接" android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher"
+        android:theme="@style/Theme.OplusBand"
+        android:forceQueryable="true"
+        android:supportsRtl="true" android:usesCleartextTraffic="false">
+        <meta-data android:name="xposedmodule" android:value="true" />
+        <meta-data android:name="xposeddescription" android:value="把小米手环 11 接到 ColorOS 设备空间和 OPPO 健康。" />
+        <meta-data android:name="xposedminversion" android:value="93" />
+        <meta-data android:name="xposedscope" android:resource="@array/xposed_scope" />
+        <activity android:name=".MainActivity" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <activity android:name=".DiagnosticActivity" android:exported="false" />
+        <activity android:name=".LabActivity" android:exported="false" />
+        <activity android:name=".WeatherActivity" android:exported="false" />
+        <activity android:name=".HealthAccountActivity" android:exported="false" />
+        <activity android:name=".integration.BandDetailsActivity" android:exported="true">
+            <intent-filter>
+                <action android:name="com.oplus.mydevices.ACTION_DEVICE_DETAILED_PANEL" />
+                <action android:name="com.oplus.mydevices.ACTION_DEVICE_DETAILED_PAGE" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+        <service android:name=".service.BandLiveService" android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+        <service android:name=".notify.BandNotificationListener" android:exported="false"
+            android:enabled="false"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+        <receiver android:name=".service.BootReceiver" android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.USER_UNLOCKED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+        <provider android:name=".integration.DeviceCardProvider"
+            android:authorities="io.github.miam1ku.mibandoplusbridge.devices"
+            android:exported="true" android:grantUriPermissions="false">
+            <intent-filter>
+                <action android:name="oplus.devicecards.action.DEVICE_INFO" />
+            </intent-filter>
+            <meta-data android:name="oplus.devicecards.provider" android:resource="@xml/device_center" />
+        </provider>
+        <provider android:name=".integration.WeatherSnapshotProvider"
+            android:authorities="io.github.miam1ku.mibandoplusbridge.weather"
+            android:exported="true" android:grantUriPermissions="true" />
+        <provider android:name=".integration.HealthQueueProvider"
+            android:authorities="io.github.miam1ku.mibandoplusbridge.health"
+            android:exported="true" android:directBootAware="false"
+            android:grantUriPermissions="false" />
+        <provider android:name=".integration.CredentialProvider"
+            android:authorities="io.github.miam1ku.mibandoplusbridge.credentials"
+            android:exported="true" android:directBootAware="false"
+            android:grantUriPermissions="false" />
+        <provider android:name=".integration.HostNotifyProvider"
+            android:authorities="io.github.miam1ku.mibandoplusbridge.notify"
+            android:exported="true" android:directBootAware="false"
+            android:grantUriPermissions="false" />
+    </application>
+</manifest>
