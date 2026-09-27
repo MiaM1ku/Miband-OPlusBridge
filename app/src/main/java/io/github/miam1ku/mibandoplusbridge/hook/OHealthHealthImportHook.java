@@ -136,28 +136,61 @@ public final class OHealthHealthImportHook {
             return;
         }
         scheduled.set(false);
+        boolean retrySoon = false;
         try {
-            if (sleep != null) sleep.write(context);
+            if (sleep != null) {
+                try {
+                    sleep.write(context);
+                } catch (SecurityException paused) {
+                    throw paused;
+                } catch (Exception | LinkageError sleepFail) {
+                    retrySoon |= transientImport(sleepFail);
+                    logImportFailure(sleepFail);
+                }
+            }
             drain();
             if (steps != null) steps.write(context);
             lastFailure = null;
+            if (retrySoon) scheduleRetry(2_000);
         } catch (Exception | LinkageError failure) {
-            Throwable cause = failure;
-            while (cause instanceof java.lang.reflect.InvocationTargetException && cause.getCause() != null) {
-                cause = cause.getCause();
-            }
-            String reason = cause.getMessage();
-            long wait = "SLEEP_DEVICE_NOT_READY".equals(reason) ? 2_000 : FAILURE_COOLDOWN_MS;
-            retryAfter = SystemClock.elapsedRealtime() + wait;
-            scheduled.set(true);
-            worker.postDelayed(work, wait);
-            String category = failure instanceof SecurityException ? "ACCOUNT_PAUSED" : "RETAINED";
-            String detail = category + " " + cause.getClass().getSimpleName();
-            if (reason != null && reason.matches("[A-Z][A-Z0-9_]{1,90}")) detail += " " + reason;
-            if (!detail.equals(lastFailure)) Log.i("OplusBandBridge", "OHEALTH_IMPORT_" + detail);
-            lastFailure = detail;
+            scheduleRetry(transientImport(failure) ? 2_000 : FAILURE_COOLDOWN_MS);
+            logImportFailure(failure);
             if (failure instanceof InterruptedException) Thread.currentThread().interrupt();
         }
+    }
+
+    private void scheduleRetry(long wait) {
+        retryAfter = SystemClock.elapsedRealtime() + wait;
+        scheduled.set(true);
+        worker.postDelayed(work, wait);
+    }
+
+    private static boolean transientImport(Throwable failure) {
+        Throwable cause = unwrap(failure);
+        String reason = cause.getMessage();
+        return "SLEEP_DEVICE_NOT_READY".equals(reason)
+                || "IMPORT_NOT_READY".equals(reason)
+                || "SLEEP_IMPORT_NOT_READY".equals(reason)
+                || "IMPORT_READ_FAILED_100015".equals(reason)
+                || "IMPORT_READ_FAILED_100003".equals(reason);
+    }
+
+    private static Throwable unwrap(Throwable failure) {
+        Throwable cause = failure;
+        while (cause instanceof java.lang.reflect.InvocationTargetException && cause.getCause() != null) {
+            cause = cause.getCause();
+        }
+        return cause;
+    }
+
+    private void logImportFailure(Throwable failure) {
+        Throwable cause = unwrap(failure);
+        String reason = cause.getMessage();
+        String category = failure instanceof SecurityException ? "ACCOUNT_PAUSED" : "RETAINED";
+        String detail = category + " " + cause.getClass().getSimpleName();
+        if (reason != null && reason.matches("[A-Z][A-Z0-9_]{1,90}")) detail += " " + reason;
+        if (!detail.equals(lastFailure)) Log.i("OplusBandBridge", "OHEALTH_IMPORT_" + detail);
+        lastFailure = detail;
     }
 
     private void drain() throws Exception {
