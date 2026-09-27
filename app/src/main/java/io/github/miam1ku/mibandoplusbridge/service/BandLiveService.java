@@ -79,6 +79,7 @@ public final class BandLiveService extends Service {
     private volatile boolean retryNow;
     private volatile SppDiagnosticClient client;
     private boolean receiverRegistered;
+    private boolean dndReceiverRegistered;
     private final BroadcastReceiver bluetoothEvents = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
             if (!BluetoothAdapter.ACTION_STATE_CHANGED.equals(intent.getAction())) return;
@@ -96,6 +97,11 @@ public final class BandLiveService extends Service {
                     stopLock.notifyAll();
                 }
             }
+        }
+    };
+    private final BroadcastReceiver dndEvents = new BroadcastReceiver() {
+        @Override public void onReceive(Context context, Intent intent) {
+            if (NotificationManager.ACTION_INTERRUPTION_FILTER_CHANGED.equals(intent.getAction())) syncDnd();
         }
     };
 
@@ -239,6 +245,11 @@ public final class BandLiveService extends Service {
                 return java.util.concurrent.CompletableFuture.failedFuture(new IllegalStateException("NOTIFICATION_ACCESS_REQUIRED"));
             }
         }
+        if (ordinaryPost(command) && io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.blocksNotifications(
+                io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.currentFilter(context))) {
+            android.util.Log.i("OplusBandBridge", "NOTIFY_SUPPRESSED_DND");
+            return java.util.concurrent.CompletableFuture.completedFuture(null);
+        }
         try {
             var fitted = io.github.miam1ku.mibandoplusbridge.protocol.BandNotificationCommand.fitToPayload(command,
                     notificationPayloadLimit());
@@ -258,6 +269,11 @@ public final class BandLiveService extends Service {
             return java.util.concurrent.CompletableFuture.failedFuture(
                     new IllegalStateException("NOTIFICATION_SESSION_UNAVAILABLE"));
         }
+        if (ordinaryPost(command) && io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.blocksNotifications(
+                io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.currentFilter(context))) {
+            android.util.Log.i("OplusBandBridge", "NOTIFY_SUPPRESSED_DND");
+            return java.util.concurrent.CompletableFuture.completedFuture(null);
+        }
         try {
             var fitted = io.github.miam1ku.mibandoplusbridge.protocol.BandNotificationCommand.fitToPayload(
                     command, notificationPayloadLimit());
@@ -269,6 +285,12 @@ public final class BandLiveService extends Service {
             return java.util.concurrent.CompletableFuture.failedFuture(
                     new IllegalStateException("NOTIFICATION_IDENTITY_TOO_LARGE"));
         }
+    }
+
+    private static boolean ordinaryPost(nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto.Command command) {
+        if (command.getSubtype() != 0 || !command.hasNotification()
+                || !command.getNotification().hasNotification2()) return false;
+        return !command.getNotification().getNotification2().getNotification3().getIsCall();
     }
 
     public static void cancelNotifications(Context context) {
@@ -304,6 +326,11 @@ public final class BandLiveService extends Service {
             registerReceiver(bluetoothEvents,
                     new IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED), RECEIVER_EXPORTED);
             receiverRegistered = true;
+        } catch (RuntimeException ignored) { }
+        try {
+            registerReceiver(dndEvents, new IntentFilter(NotificationManager.ACTION_INTERRUPTION_FILTER_CHANGED),
+                    RECEIVER_NOT_EXPORTED);
+            dndReceiverRegistered = true;
         } catch (RuntimeException ignored) { }
     }
 
@@ -412,6 +439,7 @@ public final class BandLiveService extends Service {
                         queue.send(nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto.Command.newBuilder()
                                 .setType(8).setSubtype(45).build());
                         historySync.request(true);
+                        syncDnd();
                     }), fileId -> coordinator.execute(() -> {
                         if (client == active && !stopRequested && historySync != null) historySync.saved(fileId);
                     }), command -> {
@@ -598,6 +626,15 @@ public final class BandLiveService extends Service {
         } catch (IOException ignored) { }
     }
 
+    private void syncDnd() {
+        var queue = commands;
+        if (stopRequested || queue == null) return;
+        boolean enabled = io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.blocksNotifications(
+                io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.currentFilter(this));
+        android.util.Log.i("OplusBandBridge", "DND_SYNC enabled=" + enabled);
+        queue.send(io.github.miam1ku.mibandoplusbridge.protocol.BandDndCommand.state(enabled));
+    }
+
     private void show(String title, String text) {
         NotificationManager manager = getSystemService(NotificationManager.class);
         manager.createNotificationChannel(new NotificationChannel(CHANNEL, "手环连接", NotificationManager.IMPORTANCE_LOW));
@@ -616,6 +653,10 @@ public final class BandLiveService extends Service {
         if (receiverRegistered) {
             unregisterReceiver(bluetoothEvents);
             receiverRegistered = false;
+        }
+        if (dndReceiverRegistered) {
+            unregisterReceiver(dndEvents);
+            dndReceiverRegistered = false;
         }
         requestStop();
         calls.close();

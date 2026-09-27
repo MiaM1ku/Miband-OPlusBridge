@@ -1155,10 +1155,9 @@ public final class OHealthDeviceHook {
             return io.github.miam1ku.mibandoplusbridge.notify.NotifySwitch.on(
                     XposedHelpers.callMethod(holder, "getPackageSwitchStatus", pkg));
         } catch (Throwable unavailable) {
-            // RegisterCenter already accepted this notification. A changed whitelist API must not drop it.
             android.util.Log.i("OplusBandBridge", "OHEALTH_NOTIFY_ALLOWLIST_UNAVAILABLE "
                     + unavailable.getClass().getSimpleName());
-            return true;
+            return false;
         }
     }
 
