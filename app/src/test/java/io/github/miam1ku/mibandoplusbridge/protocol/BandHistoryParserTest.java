@@ -116,7 +116,8 @@ public final class BandHistoryParserTest {
     }
 
     @Test public void liveStepTotalRaisesTodayAndDoesNotShrinkIt() {
-        long day = java.time.LocalDate.of(2026, 9, 24).atStartOfDay(java.time.ZoneId.of("Asia/Shanghai"))
+        java.time.ZoneId zone = java.time.ZoneId.of("Asia/Shanghai");
+        long day = java.time.LocalDate.of(2026, 9, 24).atStartOfDay(zone)
                 .toInstant().toEpochMilli();
         var saved = BandHistoryParser.stepDays(java.util.List.of(
                 stepRecord("steps_day", day, day + 86_400_000L, 20)));
@@ -124,17 +125,8 @@ public final class BandHistoryParserTest {
         var kept = BandHistoryParser.preferLiveTotal(saved, 10, day + 3_600_000);
         assertEquals(1, raised.size());
         assertEquals(1, kept.size());
-        java.time.ZoneId zone = java.time.ZoneId.systemDefault();
-        int today = java.time.Instant.ofEpochMilli(day + 3_600_000).atZone(zone).getYear() * 10_000
-                + java.time.Instant.ofEpochMilli(day + 3_600_000).atZone(zone).getMonthValue() * 100
-                + java.time.Instant.ofEpochMilli(day + 3_600_000).atZone(zone).getDayOfMonth();
-        if (saved.get(0).date == today) {
-            assertEquals(30, raised.get(0).steps);
-            assertEquals(20, kept.get(0).steps);
-        } else {
-            assertEquals(20, raised.get(0).steps);
-            assertEquals(30, raised.get(1).steps);
-        }
+        assertEquals(30, raised.get(0).steps);
+        assertEquals(20, kept.get(0).steps);
     }
 
     @Test public void fragmentedFilesRetainMeasurementIdentityAcrossRevisions() throws Exception {
