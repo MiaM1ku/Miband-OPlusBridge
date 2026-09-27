@@ -42,7 +42,7 @@ android {
 }
 
 tasks.configureEach {
-    if (name.startsWith('package')) {
+    if (name == 'packageDebug' || name == 'packageRelease') {
         doFirst {
             ['OPLUSBAND_KEYSTORE', 'OPLUSBAND_STORE_PASSWORD', 'OPLUSBAND_KEY_ALIAS',
              'OPLUSBAND_KEY_PASSWORD'].each {
