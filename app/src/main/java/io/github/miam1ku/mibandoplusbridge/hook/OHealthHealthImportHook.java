@@ -71,6 +71,11 @@ public final class OHealthHealthImportHook {
     public static synchronized void install(Context context, ClassLoader loader) throws Exception {
         if (installed != null) return;
         if (!HOST.equals(context.getPackageName())) return;
+        String process = Application.getProcessName();
+        if (!HOST.equals(process)) {
+            Log.i("OplusBandBridge", "OHEALTH_IMPORT_SKIPPED process=" + process);
+            return;
+        }
         final HostContract contract;
         try {
             contract = new HostContract(loader);
@@ -166,8 +171,7 @@ public final class OHealthHealthImportHook {
     }
 
     private static boolean transientImport(Throwable failure) {
-        Throwable cause = unwrap(failure);
-        String reason = cause.getMessage();
+        String reason = unwrap(failure).getMessage();
         return "SLEEP_DEVICE_NOT_READY".equals(reason)
                 || "IMPORT_NOT_READY".equals(reason)
                 || "SLEEP_IMPORT_NOT_READY".equals(reason)
@@ -193,7 +197,48 @@ public final class OHealthHealthImportHook {
         lastFailure = detail;
     }
 
+    private void ensureHeytapContext() {
+        try {
+            Class<?> type = Class.forName("com.heytap.databaseengine.apiv2._HeytapHealth", false, host.loader);
+            fillContext(type, null);
+            Object api = host.api();
+            if (api == null) return;
+            java.lang.reflect.Field holderField = api.getClass().getDeclaredField("mApiHolder");
+            holderField.setAccessible(true);
+            Object holder = holderField.get(api);
+            if (holder != null) fillContext(holder.getClass(), holder);
+        } catch (Throwable failure) {
+            Log.i("OplusBandBridge", "OHEALTH_HEYTAP_CONTEXT_UNAVAILABLE "
+                    + failure.getClass().getSimpleName());
+        }
+    }
+
+    private void fillContext(Class<?> type, Object instance) throws Exception {
+        for (java.lang.reflect.Field field : type.getDeclaredFields()) {
+            if (!Context.class.isAssignableFrom(field.getType())) continue;
+            field.setAccessible(true);
+            if (field.get(instance) == null) {
+                field.set(instance, context);
+                Log.i("OplusBandBridge", "OHEALTH_CONTEXT_SET " + type.getSimpleName() + "." + field.getName());
+            }
+        }
+        for (java.lang.reflect.Method method : type.getDeclaredMethods()) {
+            Class<?>[] params = method.getParameterTypes();
+            if (params.length != 1 || params[0] != Context.class) continue;
+            if (instance == null && (method.getModifiers() & java.lang.reflect.Modifier.STATIC) == 0) continue;
+            method.setAccessible(true);
+            try {
+                method.invoke(instance, context);
+                Log.i("OplusBandBridge", "OHEALTH_CONTEXT_CALL " + type.getSimpleName() + "." + method.getName());
+            } catch (Throwable ignored) { }
+        }
+    }
+
     private void drain() throws Exception {
+        if (OHealthDeviceHook.registeredSnapshot() == null) {
+            throw new IllegalStateException("SLEEP_DEVICE_NOT_READY");
+        }
+        ensureHeytapContext();
         String account = host.account();
         if (account == null || account.isBlank() || account.length() > 512) return;
         long epoch = accountEpoch.get();
@@ -466,17 +511,12 @@ public final class OHealthHealthImportHook {
             readEnd.invoke(option, end + 1);
             readTable.invoke(option, model.kind.table);
             readDevice.invoke(option, records.get(0).deviceId);
-            readType.invoke(option, -1); // SpO2 default excludes bridge continuous/manual types.
-            // count/groupUnitType/aggregateType remain zero: untruncated plain detail read.
+            readType.invoke(option, -1);
             Object bean = awaitRead(read.invoke(api, option));
             if (!beanClass.isInstance(bean)) throw new IllegalStateException("IMPORT_READ_BEAN_TYPE");
             int code = (Integer) errorCode.invoke(bean);
-            // ERR_QUERY_EMPTY is the SDK's empty-range result, not transport or storage failure.
-            // An empty post-insert read still matches no records and therefore authorizes no ACK.
             if (code == 101005) return Set.of();
-            if (code != 0) {
-                throw new IllegalStateException("IMPORT_READ_FAILED_" + code);
-            }
+            if (code != 0) throw new IllegalStateException("IMPORT_READ_FAILED_" + code);
             Object value = payload.invoke(bean);
             if (!(value instanceof List<?> rows)) throw new IllegalStateException("IMPORT_READ_PAYLOAD");
             Set<OHealthHealthModels.Point> result = new HashSet<>();

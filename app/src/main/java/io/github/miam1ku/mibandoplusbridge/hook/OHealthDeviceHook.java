@@ -425,7 +425,7 @@ public final class OHealthDeviceHook {
         }
         for (String className : items) {
             String simple = className.substring(className.lastIndexOf('.') + 1);
-            if (HIDE_ITEMS.contains(simple)) {
+            if (hideWearableRow(simple)) {
                 hideWatchFace(className, loader,
                         "DeviceWatchFaceItem".equals(simple) ? eventType : null,
                         "DeviceWatchFaceItem".equals(simple) ? "java.util.Map" : "kotlin.Unit");
@@ -435,6 +435,14 @@ public final class OHealthDeviceHook {
         }
         installHostNotifications(loader);
         installNotifyExtras(loader);
+    }
+
+    private static boolean hideWearableRow(String simple) {
+        return HIDE_ITEMS.contains(simple)
+                || simple.contains("Ota")
+                || simple.contains("Firmware")
+                || simple.contains("NewFunction")
+                || simple.endsWith("UpdateItem");
     }
 
     private static List<String> wearableItemNames(ClassLoader loader) {
