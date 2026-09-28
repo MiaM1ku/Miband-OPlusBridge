@@ -23,8 +23,6 @@ public final class ClockAlarmHook {
     private static final Pattern SCHEDULE_LABEL = Pattern.compile("mLabel='([^']*)'");
     private static final AtomicBoolean installed = new AtomicBoolean();
     private static volatile int ringingScheduleId = -1;
-    private static Context ringContext;
-    private static android.database.ContentObserver bandDismiss;
 
     private ClockAlarmHook() {}
 
@@ -82,43 +80,6 @@ public final class ClockAlarmHook {
         }
     }
 
-    private static void watchBand(Context context) {
-        if (context == null) return;
-        if (bandDismiss == null) {
-            bandDismiss = new android.database.ContentObserver(
-                    new android.os.Handler(android.os.Looper.getMainLooper())) {
-                @Override public void onChange(boolean selfChange) { takeBand(); }
-            };
-            try {
-                context.getContentResolver().registerContentObserver(
-                        android.net.Uri.parse("content://" + AUTHORITY), false, bandDismiss);
-            } catch (RuntimeException failure) {
-                android.util.Log.i("OplusBandBridge", "CLOCK_ALARM_WATCH_FAILED "
-                        + failure.getClass().getSimpleName());
-                bandDismiss = null;
-            }
-        }
-        takeBand();
-    }
-
-    private static void takeBand() {
-        Context context = ringContext;
-        if (context == null || ringingScheduleId < 0) return;
-        try {
-            Bundle result = context.getContentResolver().call(AUTHORITY, "take", null, null);
-            if (result == null) return;
-            int op = result.getInt("op", 0);
-            if (op != 1 && op != 2) return;
-            int id = result.getInt("id", ringingScheduleId);
-            if (id >= 0) ringingScheduleId = id;
-            android.util.Log.i("OplusBandBridge", "CLOCK_ALARM_TAKE op=" + op + " id=" + id);
-            stopRinging(context, op);
-            ringingScheduleId = -1;
-        } catch (RuntimeException failure) {
-            android.util.Log.i("OplusBandBridge", "CLOCK_ALARM_TAKE_FAILED "
-                    + failure.getClass().getSimpleName());
-        }
-    }
 
     private static void forwardRing(Context context, Object[] args) {
         Object schedule = null;
@@ -140,9 +101,8 @@ public final class ClockAlarmHook {
             return;
         }
         ringingScheduleId = id;
-        ringContext = context.getApplicationContext() == null ? context : context.getApplicationContext();
-        watchBand(ringContext);
-        call(context, 0, id, labelOf(schedule, text));
+        Context app = context.getApplicationContext() == null ? context : context.getApplicationContext();
+        call(app, 0, id, labelOf(schedule, text));
     }
 
     private static void forwardStop(Context context, Object[] args) {
@@ -213,6 +173,19 @@ public final class ClockAlarmHook {
         extras.putInt("id", id);
         extras.putInt("alertTimeSec", (int) (System.currentTimeMillis() / 1000L));
         extras.putString("label", label == null ? "" : label);
+        if (op == 0) extras.putParcelable("reply", new android.os.Messenger(
+                new android.os.Handler(android.os.Looper.getMainLooper()) {
+                    @Override public void handleMessage(android.os.Message message) {
+                        int bandOp = message.arg1;
+                        int bandId = message.arg2;
+                        if (bandOp != 1 && bandOp != 2) return;
+                        if (bandId >= 0) ringingScheduleId = bandId;
+                        android.util.Log.i("OplusBandBridge", "CLOCK_ALARM_REPLY op=" + bandOp
+                                + " id=" + ringingScheduleId);
+                        stopRinging(context, bandOp);
+                        ringingScheduleId = -1;
+                    }
+                }));
         try {
             context.getContentResolver().call(AUTHORITY, "operation", null, extras);
         } catch (SecurityException denied) {

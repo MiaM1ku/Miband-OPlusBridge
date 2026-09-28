@@ -14,30 +14,31 @@ import io.github.miam1ku.mibandoplusbridge.service.BandLiveService;
 
 /** Clock process to bridge. Only the OPPO clock uid may call. */
 public final class PhoneAlarmProvider extends ContentProvider {
-    private static volatile int pendingOp = -1;
-    private static volatile int pendingId = -1;
-    private static Context notifier;
-    private static final Uri CHANGES = Uri.parse("content://io.github.miam1ku.mibandoplusbridge.phone-alarm");
+    private static android.os.Messenger replyTo;
 
-    /** Band dismissed or snoozed. The ringing clock is observing CHANGES. */
+    /** Band dismissed or snoozed. Calls the messenger the clock left when it started ringing. */
     public static void offer(int op, int id) {
         if (op != 1 && op != 2) return;
-        pendingOp = op;
-        pendingId = id;
-        Context context = notifier;
-        if (context != null) context.getContentResolver().notifyChange(CHANGES, null);
+        android.os.Messenger reply = replyTo;
+        replyTo = null;
+        if (reply == null) return;
+        android.os.Message message = android.os.Message.obtain();
+        message.arg1 = op;
+        message.arg2 = id;
+        try {
+            reply.send(message);
+        } catch (android.os.RemoteException closed) {
+            android.util.Log.i("OplusBandBridge", "CLOCK_ALARM_REPLY_DEAD");
+        }
     }
 
-    @Override public boolean onCreate() {
-        notifier = getContext();
-        return true;
-    }
+    @Override public boolean onCreate() { return true; }
 
 
     @Override public Bundle call(String method, String arg, Bundle extras) {
-        if (!clockCaller()) return null;
-        if ("take".equals(method)) return take();
-        if (extras == null) return null;
+        if (!clockCaller() || extras == null) return null;
+        android.os.Messenger reply = extras.getParcelable("reply", android.os.Messenger.class);
+        if (reply != null) replyTo = reply;
         int op = extras.getInt("op", -1);
         int id = extras.getInt("id", -1);
         int alertTimeSec = extras.getInt("alertTimeSec", -1);
@@ -53,16 +54,6 @@ public final class PhoneAlarmProvider extends ContentProvider {
         } finally {
             Binder.restoreCallingIdentity(identity);
         }
-    }
-
-    private static Bundle take() {
-        int op = pendingOp;
-        if (op != 1 && op != 2) return null;
-        pendingOp = -1;
-        Bundle result = new Bundle();
-        result.putInt("op", op);
-        result.putInt("id", pendingId);
-        return result;
     }
 
     private boolean clockCaller() {
