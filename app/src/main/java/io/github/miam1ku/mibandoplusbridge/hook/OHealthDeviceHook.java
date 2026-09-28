@@ -1154,7 +1154,8 @@ public final class OHealthDeviceHook {
             Bundle extras = new Bundle();
             extras.putBoolean("removed", removed);
             extras.putBoolean("call", call);
-            extras.putBoolean("connected", callConnected(bean));
+            extras.putInt("callState", call ? callState(bean) : 0);
+            extras.putBoolean("connected", call && callConnected(bean));
             extras.putString("pkg", pkg);
             extras.putString("key", key);
             extras.putInt("id", id);
@@ -1201,6 +1202,19 @@ public final class OHealthDeviceHook {
             return false;
         }
     }
+
+    private static int callState(Object bean) {
+        try {
+            Object origin = XposedHelpers.callMethod(bean, "getOrigin");
+            if (origin instanceof StatusBarNotification posted) {
+                return io.github.miam1ku.mibandoplusbridge.notify.CallPresentation.wire(posted.getNotification());
+            }
+        } catch (Throwable ignored) { }
+        return io.github.miam1ku.mibandoplusbridge.notify.CallPresentation.wire(
+                io.github.miam1ku.mibandoplusbridge.notify.CallPresentation.kind(false, false, 0,
+                        text(bean, "getContent"), text(bean, "getTitle")));
+    }
+
 
     private static boolean callConnected(Object bean) {
         try {

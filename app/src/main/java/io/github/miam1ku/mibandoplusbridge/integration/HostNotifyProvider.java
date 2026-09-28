@@ -18,7 +18,7 @@ import java.time.ZoneId;
 /** OHealth process cannot see BandLiveService.instance. This is the only notify IPC. */
 public final class HostNotifyProvider extends ContentProvider {
     public static final Uri URI = Uri.parse("content://io.github.miam1ku.mibandoplusbridge.notify");
-
+    private int postedCallState;
     @Override public boolean onCreate() { return true; }
 
     @Override public Bundle call(String method, String arg, Bundle extras) {
@@ -42,17 +42,33 @@ public final class HostNotifyProvider extends ContentProvider {
             int id = extras.getInt("id", 0);
             if (id == 0) id = Math.max(1, key.hashCode() & 0x7fffffff);
             boolean call = extras.getBoolean("call", false);
+            int callState = call ? callState(extras) : 0;
+            if (call && !removed && callState == 0) {
+                io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(getContext(), "CALL_HOST_UNRESOLVED");
+                Bundle pending = new Bundle();
+                pending.putString("status", "QUEUED");
+                return pending;
+            }
             if (call && BandLiveService.callsOwned()) {
-                if (!removed && (extras.getBoolean("connected", false)
-                        || CallPresentation.connected(extras.getBoolean("chronometer", false),
-                                extras.getString("body", ""), extras.getString("title", "")))) {
-                    BandLiveService.noteCallAnswered();
-                }
+                if (removed) postedCallState = 0;
+                else if (callState == BandNotificationCommand.CALL_ACTIVE) BandLiveService.noteCallAnswered();
                 io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(getContext(),
-                        "CALL_HOST_SKIPPED removed=" + removed + " connected=" + extras.getBoolean("connected", false));
+                        "CALL_HOST_SKIPPED removed=" + removed + " state=" + callState);
                 Bundle owned = new Bundle();
                 owned.putString("status", "QUEUED");
                 return owned;
+            }
+            int previous;
+            synchronized (this) {
+                if (call && !removed && callState == postedCallState) {
+                    io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(getContext(),
+                            "CALL_HOST_UNCHANGED state=" + callState);
+                    Bundle unchanged = new Bundle();
+                    unchanged.putString("status", "QUEUED");
+                    return unchanged;
+                }
+                previous = postedCallState;
+                if (call) postedCallState = removed ? 0 : callState;
             }
             Instant when = Instant.ofEpochMilli(Math.max(1, extras.getLong("when", System.currentTimeMillis())));
             String app = blankTo(extras.getString("app"), "");
@@ -62,18 +78,28 @@ public final class HostNotifyProvider extends ContentProvider {
             }
             if (app.isBlank()) app = pkg;
             io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(getContext(),
-                    "NOTIFY_HOST pkg=" + pkg + " app=" + (app.equals(pkg) ? "package" : "label")
-                            + " removed=" + removed + " call=" + call);
+                    call ? "CALL_HOST removed=" + removed + " state=" + callState + " previous=" + previous
+                            : "NOTIFY_HOST pkg=" + pkg + " app=" + (app.equals(pkg) ? "package" : "label")
+                                    + " removed=" + removed + " call=false");
             var command = call
                     ? (removed ? BandNotificationCommand.endCall()
-                            : BandNotificationCommand.incomingCall(
-                                    extras.getString("title"), extras.getString("body"),
-                                    when, ZoneId.systemDefault(), false))
+                            : BandNotificationCommand.call(
+                                    CallPresentation.displayName(extras.getString("title"),
+                                            CallPresentation.kind(callState)),
+                                    null, callState, when, ZoneId.systemDefault(), false))
                     : (removed
                             ? BandNotificationCommand.dismiss(pkg, key, id)
                             : BandNotificationCommand.post(pkg, app, key, id,
                                     extras.getString("title", ""), extras.getString("body", ""),
                                     when, ZoneId.systemDefault()));
+            if (call && !removed && previous != 0) {
+                var next = command;
+                BandLiveService.forwardHostNotification(getContext(), BandNotificationCommand.endCall())
+                        .whenComplete((ignored, error) -> BandLiveService.forwardHostNotification(getContext(), next));
+                Bundle replaced = new Bundle();
+                replaced.putString("status", "QUEUED");
+                return replaced;
+            }
             var pending = BandLiveService.forwardHostNotification(getContext(), command);
             String status = "QUEUED";
             if (pending.toCompletableFuture().isCompletedExceptionally()) {
@@ -170,6 +196,18 @@ public final class HostNotifyProvider extends ContentProvider {
     private static String blankTo(String value, String fallback) {
         return value == null || value.isBlank() ? fallback : value;
     }
+
+    private static int callState(Bundle extras) {
+        int stated = extras.getInt("callState", 0);
+        if (stated == BandNotificationCommand.CALL_INCOMING
+                || stated == BandNotificationCommand.CALL_ACTIVE
+                || stated == BandNotificationCommand.CALL_OUTGOING) return stated;
+        return CallPresentation.wire(CallPresentation.kind(
+                extras.getBoolean("chronometer", false) || extras.getBoolean("liveChronometer", false),
+                false, extras.getInt("callType", 0),
+                extras.getString("body", ""), extras.getString("title", ""), extras.getString("subText", "")));
+    }
+
 
     @Override public Cursor query(Uri uri, String[] projection, String selection, String[] args, String sort) {
         throw new SecurityException("NOTIFY_IPC_ONLY");

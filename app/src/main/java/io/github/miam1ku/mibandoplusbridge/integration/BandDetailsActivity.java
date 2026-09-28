@@ -56,8 +56,8 @@ public final class BandDetailsActivity extends AppCompatActivity {
     };
 
     @Override public void onCreate(Bundle state) {
+        if (!panelRequest(getIntent())) setTheme(io.github.miam1ku.mibandoplusbridge.R.style.Theme_OplusBand);
         super.onCreate(state);
-        if (openNativePanelIfRequested()) return;
         String requestedId = getIntent().getStringExtra("device_id");
         if (requestedId != null && !requestedId.equals(
                 io.github.miam1ku.mibandoplusbridge.data.LocalPrefs.open(this, "band-state").getString("deviceId", ""))) {
@@ -243,9 +243,16 @@ public final class BandDetailsActivity extends AppCompatActivity {
         if (record.timezone != null) text.append("\n").append(record.timezone);
     }
 
+    private static boolean panelRequest(Intent incoming) {
+        if (incoming == null) return false;
+        String action = incoming.getAction();
+        return "com.oplus.mydevices.ACTION_DEVICE_DETAILED_PANEL".equals(action)
+                || "com.oplus.mydevices.ACTION_DEVICE_DETAILED_PAGE".equals(action);
+    }
+
     private boolean openNativePanelIfRequested() {
         Intent incoming = getIntent();
-        if (incoming == null) return false;
+        if (!panelRequest(incoming)) return false;
         String action = incoming.getAction();
         if (!"com.oplus.mydevices.ACTION_DEVICE_DETAILED_PANEL".equals(action)
                 && !"com.oplus.mydevices.ACTION_DEVICE_DETAILED_PAGE".equals(action)) {
