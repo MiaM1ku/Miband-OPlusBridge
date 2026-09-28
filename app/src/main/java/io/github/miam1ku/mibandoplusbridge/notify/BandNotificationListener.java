@@ -29,7 +29,6 @@ public final class BandNotificationListener extends NotificationListenerService 
     private final Handler main = new Handler(Looper.getMainLooper());
     private volatile boolean listenerConnected;
     private NotificationRelay relay;
-    private PhoneMusic music;
     private SharedPreferences settings;
     private long appliedSession;
     private boolean appliedEnabled, appliedBody;
@@ -61,11 +60,7 @@ public final class BandNotificationListener extends NotificationListenerService 
 
     public static void connectionChanged() {
         BandNotificationListener current = instance;
-        if (current == null) return;
-        current.main.post(() -> {
-            current.resetSession();
-            if (current.music != null) current.music.onBandSessionChanged(current.listenerConnected);
-        });
+        if (current != null) current.main.post(current::resetSession);
     }
 
     @Override public void onCreate() {
@@ -78,19 +73,16 @@ public final class BandNotificationListener extends NotificationListenerService 
         filter.addAction(Intent.ACTION_USER_PRESENT);
         registerReceiver(lockChanged, filter, Context.RECEIVER_NOT_EXPORTED);
         instance = this;
-        music = new PhoneMusic(this, main);
     }
 
     @Override public void onListenerConnected() {
         listenerConnected = true;
         resetSession();
-        if (music != null) music.onListenerConnected();
     }
 
     @Override public void onListenerDisconnected() {
         appliedSession = 0;
         listenerConnected = false;
-        if (music != null) music.onListenerDisconnected();
         relay.disconnected();
         BandLiveService.cancelNotifications(this);
     }
@@ -254,7 +246,6 @@ public final class BandNotificationListener extends NotificationListenerService 
 
     @Override public void onDestroy() {
         if (instance == this) instance = null;
-        if (music != null) music.close();
         listenerConnected = false;
         relay.disconnected();
         BandLiveService.cancelNotifications(this);

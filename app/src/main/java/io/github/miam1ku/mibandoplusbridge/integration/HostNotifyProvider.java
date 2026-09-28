@@ -23,6 +23,7 @@ public final class HostNotifyProvider extends ContentProvider {
     @Override public Bundle call(String method, String arg, Bundle extras) {
         HostIdentity.requireCaller(getContext(), HostIdentity.HEALTH_PACKAGE);
         if ("findWatch".equals(method)) return findWatch(extras);
+        if ("music".equals(method)) return music(extras);
         if (!"forward".equals(method) || extras == null) {
             throw new SecurityException("NOTIFY_METHOD_UNSUPPORTED");
         }
@@ -76,6 +77,39 @@ public final class HostNotifyProvider extends ContentProvider {
             return result;
         } catch (RuntimeException failure) {
             Log.i("OplusBandBridge", "FIND_WATCH_IPC_FAILED " + failure.getClass().getSimpleName());
+            Bundle result = new Bundle();
+            result.putString("status", "FAILED");
+            return result;
+        } finally {
+            Binder.restoreCallingIdentity(identity);
+        }
+    }
+
+    private Bundle music(Bundle extras) {
+        long identity = Binder.clearCallingIdentity();
+        try {
+            if (extras == null || !BandLiveService.notificationSessionReady(getContext())) {
+                Bundle result = new Bundle();
+                result.putString("status", "FAILED");
+                return result;
+            }
+            int state = extras.getInt("state", 0);
+            int volume = extras.getInt("volume", 0);
+            var command = state == 0
+                    ? io.github.miam1ku.mibandoplusbridge.protocol.BandMusicCommand.nothing(volume)
+                    : io.github.miam1ku.mibandoplusbridge.protocol.BandMusicCommand.playback(
+                            volume, extras.getString("track", ""), extras.getString("artist", ""),
+                            extras.getInt("position", 0), extras.getInt("duration", 0), state == 1);
+            int limit = BandLiveService.notificationPayloadLimit();
+            command = io.github.miam1ku.mibandoplusbridge.protocol.BandMusicCommand.fit(command, limit);
+            BandLiveService.sendSessionCommand(command);
+            Log.i("OplusBandBridge", "MUSIC_OUT state=" + command.getMusic().getMusicInfo().getState()
+                    + " volume=" + command.getMusic().getMusicInfo().getVolume());
+            Bundle result = new Bundle();
+            result.putString("status", "QUEUED");
+            return result;
+        } catch (RuntimeException failure) {
+            Log.i("OplusBandBridge", "MUSIC_IPC_FAILED " + failure.getClass().getSimpleName());
             Bundle result = new Bundle();
             result.putString("status", "FAILED");
             return result;

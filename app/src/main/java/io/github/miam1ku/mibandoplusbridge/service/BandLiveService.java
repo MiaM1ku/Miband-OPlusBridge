@@ -461,18 +461,8 @@ public final class BandLiveService extends Service {
                                     .onBandCommand(BandLiveService.this, command));
                         }
                         if (command.getType() == 18) {
-                            int musicSubtype = command.getSubtype();
-                            if (musicSubtype == 0 || musicSubtype == 2) {
-                                main.post(() -> {
-                                    if (musicSubtype == 0) {
-                                        io.github.miam1ku.mibandoplusbridge.notify.PhoneMusic
-                                                .requestRefresh(BandLiveService.this);
-                                    } else {
-                                        io.github.miam1ku.mibandoplusbridge.notify.PhoneMusic
-                                                .onMediaKey(BandLiveService.this, command);
-                                    }
-                                });
-                            }
+                            main.post(() -> io.github.miam1ku.mibandoplusbridge.notify.NativeMusic
+                                    .onBandCommand(BandLiveService.this, command));
                         }
                         weatherSync.onCommand(command);
                         if (command.getType() == 8 && command.getSubtype() == 47 && command.hasHealth()
