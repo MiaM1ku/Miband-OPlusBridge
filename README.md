@@ -46,8 +46,8 @@
 打 tag 后 GitHub Actions 会构建，并把同一个 `app-release.apk` 发到两个仓库：
 
 ```
-git tag 30-1.2.7
-git push origin 30-1.2.7
+git tag 31-1.2.8
+git push origin 31-1.2.8
 ```
 
 - 源仓库：https://github.com/MiaM1ku/Miband-OPlusBridge

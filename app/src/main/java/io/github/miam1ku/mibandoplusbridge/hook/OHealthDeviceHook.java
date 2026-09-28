@@ -1184,11 +1184,11 @@ public final class OHealthDeviceHook {
 
     private static final java.util.Set<String> phoneAlarmKeys = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
-    /** Ringing is a foreground clock notification. Send the phone-alarm packet before the allowlist can drop it. */
+    /** Clock notifications skip the health main switch. A post is the ring; its removal closes the band. */
     private static boolean deliverPhoneAlarm(Object bean, String pkg, String key, boolean removed) {
         if (!io.github.miam1ku.mibandoplusbridge.notify.PhoneAlarmNotice.CLOCK.equals(pkg)) return false;
         if (!removed) {
-            if (!clockRinging(bean)) return false;
+            trace("ALARM_CLOCK_POST " + clockShape(bean));
             phoneAlarmKeys.add(key);
         } else if (!phoneAlarmKeys.remove(key)) {
             return false;
@@ -1213,14 +1213,17 @@ public final class OHealthDeviceHook {
         }
     }
 
-    private static boolean clockRinging(Object bean) {
+    private static String clockShape(Object bean) {
         try {
             Object origin = de.robv.android.xposed.XposedHelpers.callMethod(bean, "getOrigin");
-            if (origin instanceof android.service.notification.StatusBarNotification posted) {
-                return io.github.miam1ku.mibandoplusbridge.notify.PhoneAlarmNotice.ringing(posted);
-            }
-        } catch (Throwable ignored) { }
-        return false;
+            if (!(origin instanceof android.service.notification.StatusBarNotification posted)) return "origin=absent";
+            android.app.Notification notification = posted.getNotification();
+            String channel = notification == null || notification.getChannelId() == null ? "" : notification.getChannelId();
+            return "id=" + posted.getId() + " flags=" + (notification == null ? 0 : notification.flags)
+                    + " channel=" + channel;
+        } catch (Throwable failure) {
+            return "origin=" + failure.getClass().getSimpleName();
+        }
     }
 
     private static boolean isIncomingCall(Object bean) {
