@@ -402,7 +402,17 @@ public final class SppDiagnosticClient implements AutoCloseable {
         if (packet.channel() == SppV1Codec.CHANNEL_VERSION) return null;
         byte[] payload = packet.payload();
         if (packet.channel() == SppV1Codec.CHANNEL_FITNESS) {
-            acceptV1Activity(payload);
+            byte[] fitness = payload;
+            if (packet.dataType() == SppV1Codec.DATA_ENCRYPTED) {
+                try {
+                    fitness = session.decryptV1(payload);
+                } catch (RuntimeException rejected) {
+                    SessionLog.line(context, "rx spp1 fitness decrypt failed len=" + payload.length);
+                    throw new Failure("V1_DECRYPT_FAILED");
+                }
+            }
+            acceptV1Activity(fitness);
+            if (fitness != payload) Arrays.fill(fitness, (byte) 0);
             return null;
         }
         if (packet.channel() != SppV1Codec.CHANNEL_PROTO_RX && packet.channel() != SppV1Codec.CHANNEL_PROTO_TX) {
@@ -460,17 +470,25 @@ public final class SppDiagnosticClient implements AutoCloseable {
         return command;
     }
 
-    private void acceptV1Activity(byte[] payload) throws Exception {
-        if (history == null) return;
+    private void acceptV1Activity(byte[] payload) {
+        if (history == null) {
+            SessionLog.line(context, "rx spp1 activity before history len="
+                    + (payload == null ? -1 : payload.length));
+            return;
+        }
+        BandHistoryParser.FileResult result;
         try {
-            var result = history.acceptFragment(payload);
-            if (result != null && onFileStored != null) {
-                rawHistory.persist(result, historyDeviceId, verifiedDevice.firmware(), System.currentTimeMillis());
-                if ("PARSED".equals(result.parseStatus)) summarizeSport(result.measurements);
-                onFileStored.accept(result.copyFileId());
-            }
-        } catch (Exception ignored) {
-            if (history != null) history.reset();
+            result = history.acceptFragment(payload);
+            progress.accept("HISTORY_FRAGMENT_RECEIVED");
+        } catch (IllegalArgumentException malformed) {
+            history.reset();
+            progress.accept("HISTORY_FILE_REJECTED");
+            SessionLog.line(context, "rx spp1 activity rejected len=" + payload.length);
+            return;
+        }
+        if (result != null) {
+            byte[] fileId = archiveActivity(result);
+            if (fileId != null) ackActivity(fileId);
         }
     }
 
@@ -643,41 +661,50 @@ public final class SppDiagnosticClient implements AutoCloseable {
                 Arrays.fill(plain, (byte) 0);
             }
         }
-        byte[] fileId = null;
-        if (result != null) {
-            try {
-                rawHistory.persist(result, historyDeviceId, verifiedDevice.firmware(), System.currentTimeMillis());
-                fileId = result.copyFileId();
-                progress.accept("HISTORY_FILE_ARCHIVED");
-            } catch (Exception storageFailed) {
-                progress.accept("HISTORY_STORAGE_FAILED");
-            }
-            if (fileId != null) {
-                if ("PARSED".equals(result.parseStatus)) {
-                    try { summarizeSport(result.measurements); }
-                    catch (RuntimeException snapshotFailed) { progress.accept("HEALTH_SNAPSHOT_PAUSED"); }
-                } else progress.accept("HISTORY_FORMAT_UNSUPPORTED");
-            }
-        }
+        byte[] fileId = result == null ? null : archiveActivity(result);
         if (receivedPayloads[sequence] != null) Arrays.fill(receivedPayloads[sequence], (byte) 0);
         receivedPayloads[sequence] = rawPayload;
         receivedAt[sequence] = receive.count() - 1;
         sendFrame(new SppV2Codec.Frame(SppV2Codec.TYPE_ACK, sequence, new byte[0]));
-        if (fileId == null) return;
-        byte[] savedId = fileId;
-        LiveCommandQueue commands = liveCommands;
-        if (commands != null) {
-            commands.send(XiaomiProto.Command.newBuilder().setType(8).setSubtype(5)
-                    .setHealth(XiaomiProto.Health.newBuilder()
-                            .setActivitySyncAckFileIds(ByteString.copyFrom(savedId))).build())
-                    .whenComplete((ignored, error) -> {
-                        if (error == null) {
-                            progress.accept("HISTORY_FILE_STORED");
-                            Consumer<byte[]> stored = onFileStored;
-                            if (stored != null) stored.accept(savedId);
-                        } else progress.accept("HISTORY_CONFIRMATION_PENDING");
-                    });
+        if (fileId != null) ackActivity(fileId);
+    }
+
+    /** Persist before any band confirm. Unsupported files are still acked so the band can send the next one. */
+    private byte[] archiveActivity(BandHistoryParser.FileResult result) {
+        byte[] fileId;
+        try {
+            rawHistory.persist(result, historyDeviceId, verifiedDevice.firmware(), System.currentTimeMillis());
+            fileId = result.copyFileId();
+            progress.accept("HISTORY_FILE_ARCHIVED");
+        } catch (Exception storageFailed) {
+            progress.accept("HISTORY_STORAGE_FAILED");
+            SessionLog.line(context, "history storage failed");
+            return null;
         }
+        if ("PARSED".equals(result.parseStatus)) {
+            try { summarizeSport(result.measurements); }
+            catch (RuntimeException snapshotFailed) { progress.accept("HEALTH_SNAPSHOT_PAUSED"); }
+        } else {
+            progress.accept("HISTORY_FORMAT_UNSUPPORTED");
+            SessionLog.line(context, "history " + result.parseStatus);
+        }
+        return fileId;
+    }
+
+    /** Type 8 subtype 5. SPP V1 and BLE have no transport ACK, so this confirm is what releases the next file. */
+    private void ackActivity(byte[] fileId) {
+        LiveCommandQueue commands = liveCommands;
+        if (commands == null) return;
+        commands.send(XiaomiProto.Command.newBuilder().setType(8).setSubtype(5)
+                .setHealth(XiaomiProto.Health.newBuilder()
+                        .setActivitySyncAckFileIds(ByteString.copyFrom(fileId))).build())
+                .whenComplete((ignored, error) -> {
+                    if (error == null) {
+                        progress.accept("HISTORY_FILE_STORED");
+                        Consumer<byte[]> stored = onFileStored;
+                        if (stored != null) stored.accept(fileId);
+                    } else progress.accept("HISTORY_CONFIRMATION_PENDING");
+                });
     }
 
     private void summarizeSport(java.util.List<BandHistoryParser.Measurement> measurements) {
