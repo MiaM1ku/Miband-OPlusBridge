@@ -14,6 +14,9 @@ import io.github.miam1ku.mibandoplusbridge.data.BandStateRepository;
 import io.github.miam1ku.mibandoplusbridge.data.LocalPrefs;
 import io.github.miam1ku.mibandoplusbridge.protocol.BandNotificationCommand;
 import io.github.miam1ku.mibandoplusbridge.notify.FindPhone;
+import io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd;
+import io.github.miam1ku.mibandoplusbridge.protocol.BandAlarmCommand;
+import io.github.miam1ku.mibandoplusbridge.protocol.BandDndCommand;
 import io.github.miam1ku.mibandoplusbridge.protocol.BandMusicCommand;
 import io.github.miam1ku.mibandoplusbridge.service.BandLiveService;
 import io.github.miam1ku.mibandoplusbridge.ui.BridgeScreen;
@@ -89,6 +92,24 @@ public final class LabActivity extends AppCompatActivity {
         screen.filled("发送测试音乐", () -> send("测试音乐", BandMusicCommand.playback(
                 50, "测试音乐", "桥接", 12, 180, true), true));
 
+        LinearLayout dnd = screen.card();
+        screen.overline(dnd, "免打扰");
+        screen.caption(dnd, "先发同步开关，再发当前手机免打扰状态。两包都发，不看型号。");
+        screen.setLastChildMargin(dnd, 0);
+        screen.filled("同步免打扰", () -> sendAll("免打扰",
+                BandDndCommand.mirror(PhoneDnd.currentFilter(this))));
+
+        LinearLayout alarm = screen.card();
+        screen.overline(alarm, "闹钟");
+        screen.caption(alarm, "只测响铃、关闭和稍后响，不写入手环自己的闹钟列表。");
+        screen.setLastChildMargin(alarm, 0);
+        screen.filled("测试闹钟响铃", () -> send("闹钟响铃",
+                BandAlarmCommand.operation(0, 1, (int) (System.currentTimeMillis() / 1000L), "测试闹钟"), true));
+        screen.outlined("测试关闭闹钟", () -> send("关闭闹钟",
+                BandAlarmCommand.operation(1, 1, -1, ""), true));
+        screen.outlined("测试稍后响", () -> send("稍后响",
+                BandAlarmCommand.operation(2, 1, (int) (System.currentTimeMillis() / 1000L), "测试闹钟"), true));
+
         LinearLayout extra = screen.card();
         screen.overline(extra, "其他");
         screen.setLastChildMargin(extra, 0);
@@ -147,24 +168,52 @@ public final class LabActivity extends AppCompatActivity {
 
     private void send(String label, nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto.Command command,
                       boolean sessionCommand) {
-        if (!BandLiveService.notificationSessionReady(this)) {
-            try { BandLiveService.start(this); } catch (RuntimeException ignored) { }
-            setResultText("会话未就绪，无法发送" + label + "。请先点立即同步，等手环连上后再试。");
-            refresh();
-            return;
-        }
+        if (!ready()) return;
         setResultText("正在发送" + label + "…");
         var pending = sessionCommand
                 ? BandLiveService.sendSessionCommand(command)
                 : BandLiveService.forwardHostNotification(this, command);
-        pending.whenComplete((ignored, error) -> main.post(() -> {
-            if (isDestroyed()) return;
-            String detail = error == null ? "已确认送达手环。"
-                    : ("发送失败：" + (error.getMessage() == null ? error.getClass().getSimpleName() : error.getMessage()));
-            Log.i("OplusBandBridge", "LAB " + label + " " + (error == null ? "ok" : error.getClass().getSimpleName()));
-            setResultText(label + detail);
+        pending.whenComplete((ignored, error) -> main.post(() -> finishSend(label, error)));
+    }
+
+    private void sendAll(String label, java.util.List<nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto.Command> commands) {
+        if (!ready()) return;
+        setResultText("正在发送" + label + "…");
+        sendAllAt(label, commands, 0);
+    }
+
+    private void sendAllAt(String label,
+            java.util.List<nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto.Command> commands, int index) {
+        if (index >= commands.size()) {
+            setResultText(label + "已确认送达手环。共 " + commands.size() + " 包。");
             refresh();
+            return;
+        }
+        BandLiveService.sendSessionCommand(commands.get(index)).whenComplete((ignored, error) -> main.post(() -> {
+            if (isDestroyed()) return;
+            if (error != null) {
+                finishSend(label + "（第 " + (index + 1) + " 包）", error);
+                return;
+            }
+            sendAllAt(label, commands, index + 1);
         }));
+    }
+
+    private boolean ready() {
+        if (BandLiveService.notificationSessionReady(this)) return true;
+        try { BandLiveService.start(this); } catch (RuntimeException ignored) { }
+        setResultText("会话未就绪。请先点立即同步，等手环连上后再试。");
+        refresh();
+        return false;
+    }
+
+    private void finishSend(String label, Throwable error) {
+        if (isDestroyed()) return;
+        String detail = error == null ? "已确认送达手环。"
+                : ("发送失败：" + (error.getMessage() == null ? error.getClass().getSimpleName() : error.getMessage()));
+        Log.i("OplusBandBridge", "LAB " + label + " " + (error == null ? "ok" : error.getClass().getSimpleName()));
+        setResultText(label + detail);
+        refresh();
     }
 
     private void checkUpdate() {

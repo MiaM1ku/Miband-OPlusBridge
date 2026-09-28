@@ -76,6 +76,8 @@ public final class BandLiveService extends Service {
     private final AtomicBoolean running = new AtomicBoolean();
     private final Object stopLock = new Object();
     private volatile boolean stopRequested;
+    private volatile long lastDndSentNanos;
+    private int dndPollGeneration;
     private volatile boolean retryNow;
     private volatile SppDiagnosticClient client;
     private boolean receiverRegistered;
@@ -103,6 +105,9 @@ public final class BandLiveService extends Service {
         @Override public void onReceive(Context context, Intent intent) {
             if (NotificationManager.ACTION_INTERRUPTION_FILTER_CHANGED.equals(intent.getAction())) syncDnd();
         }
+    };
+    private final android.database.ContentObserver zenMode = new android.database.ContentObserver(main) {
+        @Override public void onChange(boolean selfChange) { syncDnd(); }
     };
 
     public static void start(Context context) {
@@ -288,8 +293,7 @@ public final class BandLiveService extends Service {
                 return java.util.concurrent.CompletableFuture.failedFuture(new IllegalStateException("NOTIFICATION_ACCESS_REQUIRED"));
             }
         }
-        if (ordinaryPost(command) && io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.blocksNotifications(
-                io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.currentFilter(context))) {
+        if (suppressForDnd(command, io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.currentFilter(context))) {
             android.util.Log.i("OplusBandBridge", "NOTIFY_SUPPRESSED_DND");
             io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(context, "NOTIFY_SUPPRESSED_DND");
             return java.util.concurrent.CompletableFuture.completedFuture(null);
@@ -342,6 +346,12 @@ public final class BandLiveService extends Service {
         }
     }
 
+    static boolean suppressForDnd(
+            nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto.Command command, int filter) {
+        return ordinaryPost(command) && io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd
+                .blocksNotifications(filter);
+    }
+
     private static boolean ordinaryPost(nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto.Command command) {
         if (command.getSubtype() != 0 || !command.hasNotification()
                 || !command.getNotification().hasNotification2()) return false;
@@ -388,8 +398,12 @@ public final class BandLiveService extends Service {
         } catch (RuntimeException ignored) { }
         try {
             registerReceiver(dndEvents, new IntentFilter(NotificationManager.ACTION_INTERRUPTION_FILTER_CHANGED),
-                    RECEIVER_NOT_EXPORTED);
+                    RECEIVER_EXPORTED);
             dndReceiverRegistered = true;
+        } catch (RuntimeException ignored) { }
+        try {
+            getContentResolver().registerContentObserver(
+                    android.provider.Settings.Global.getUriFor("zen_mode"), false, zenMode);
         } catch (RuntimeException ignored) { }
     }
 
@@ -416,6 +430,7 @@ public final class BandLiveService extends Service {
     }
 
     private void requestStop() {
+        dndPollGeneration++;
         synchronized (stopLock) {
             stopRequested = true;
             stopLock.notifyAll();
@@ -501,12 +516,18 @@ public final class BandLiveService extends Service {
                                 .setType(8).setSubtype(45).build());
                         historySync.request(true);
                         syncDnd();
+                        startDndPoll();
                     }), fileId -> coordinator.execute(() -> {
                         if (client == active && !stopRequested && historySync != null) historySync.saved(fileId);
                     }), command -> {
-                        if (command.getType() == 7 || command.getType() == 18) {
+                        if (command.getType() == 2) {
                             io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(BandLiveService.this,
-                                    "rx type=" + command.getType() + " subtype=" + command.getSubtype());
+                                    describeSystem(command));
+                            applyBandManual(command);
+                        } else if (command.getType() == 7 || command.getType() == 18) {
+                            io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(BandLiveService.this,
+                                    "rx type=" + command.getType() + " subtype=" + command.getSubtype()
+                                            + " status=" + command.getStatus());
                         }
                         if (command.getType() == 7) {
                             android.util.Log.i("OplusBandBridge", "NOTIFY_IN subtype=" + command.getSubtype()
@@ -528,6 +549,17 @@ public final class BandLiveService extends Service {
                         if (command.getType() == 18) {
                             main.post(() -> io.github.miam1ku.mibandoplusbridge.notify.NativeMusic
                                     .onBandCommand(BandLiveService.this, command));
+                        }
+                        if (command.getType() == 17 && command.getSubtype() == 16) {
+                            int op = command.hasSchedule() && command.getSchedule().hasPhoneAlarmOperation()
+                                    ? command.getSchedule().getPhoneAlarmOperation().getOpCode() : -1;
+                            int alarmId = op >= 0 && command.getSchedule().getPhoneAlarmOperation().hasPhoneAlarm()
+                                    ? command.getSchedule().getPhoneAlarmOperation().getPhoneAlarm().getId() : -1;
+                            io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(BandLiveService.this,
+                                    "ALARM_FROM_BAND op=" + op + " id=" + alarmId);
+                            if (op == 1 || op == 2) {
+                                io.github.miam1ku.mibandoplusbridge.integration.PhoneAlarmProvider.offer(op, alarmId);
+                            }
                         }
                         weatherSync.onCommand(command);
                         if (command.getType() == 8 && command.getSubtype() == 47 && command.hasHealth()
@@ -702,10 +734,106 @@ public final class BandLiveService extends Service {
     private void syncDnd() {
         var queue = commands;
         if (stopRequested || queue == null) return;
-        boolean enabled = io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.blocksNotifications(
-                io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.currentFilter(this));
-        android.util.Log.i("OplusBandBridge", "DND_SYNC enabled=" + enabled);
-        queue.send(io.github.miam1ku.mibandoplusbridge.protocol.BandDndCommand.state(enabled));
+        int filter = io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.currentFilter(this);
+        boolean on = io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.blocksNotifications(filter);
+        android.util.Log.i("OplusBandBridge", "DND_SYNC filter=" + filter + " on=" + on);
+        io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this, "DND_SYNC filter=" + filter + " on=" + on);
+        // The band drops a rule list that arrives before sync_with_phone is on.
+        queue.send(io.github.miam1ku.mibandoplusbridge.protocol.BandDndCommand.syncWithPhone())
+                .whenComplete((done, error) -> {
+                    if (error != null) {
+                        android.util.Log.i("OplusBandBridge", "DND_SYNC_REJECTED subtype=15");
+                    }
+                    sendDndFollowup();
+                });
+    }
+
+    private void sendDndFollowup() {
+        var queue = commands;
+        if (stopRequested || queue == null) return;
+        lastDndSentNanos = System.nanoTime();
+        int filter = io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.currentFilter(this);
+        boolean on = io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.blocksNotifications(filter);
+        int activatedAt = (int) (System.currentTimeMillis() / 1000L);
+        sendQuietly(queue, io.github.miam1ku.mibandoplusbridge.protocol.BandDndCommand.state(on));
+        sendQuietly(queue, io.github.miam1ku.mibandoplusbridge.protocol.BandDndCommand.queryRules());
+        sendQuietly(queue, io.github.miam1ku.mibandoplusbridge.protocol.BandDndCommand.phoneRules(on, activatedAt));
+        main.postDelayed(this::sendDndRulesAgain, 2000);
+    }
+
+    private void startDndPoll() {
+        int generation = ++dndPollGeneration;
+        main.postDelayed(new Runnable() {
+            @Override public void run() {
+                if (generation != dndPollGeneration || stopRequested) return;
+                var queue = commands;
+                if (queue != null && System.nanoTime() - lastDndSentNanos >= 3_000_000_000L) {
+                    sendQuietly(queue, io.github.miam1ku.mibandoplusbridge.protocol.BandDndCommand.queryRules());
+                }
+                main.postDelayed(this, 5_000);
+            }
+        }, 5_000);
+    }
+
+    private void applyBandManual(nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto.Command command) {
+        Boolean bandOn = io.github.miam1ku.mibandoplusbridge.protocol.BandDndCommand.manualState(command);
+        if (bandOn == null) return;
+        if (!io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.acceptBandManual(
+                bandOn, io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.currentFilter(this),
+                lastDndSentNanos, System.nanoTime())) return;
+        boolean on = bandOn;
+        main.post(() -> {
+            if (!io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.acceptBandManual(
+                    on, io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.currentFilter(this),
+                    lastDndSentNanos, System.nanoTime())) return;
+            boolean applied = io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.apply(this, on);
+            io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this, "DND_FROM_BAND on=" + on
+                    + " applied=" + applied);
+            if (!applied) android.util.Log.i("OplusBandBridge", "PHONE_DND_POLICY_REQUIRED");
+        });
+    }
+
+    private void sendDndRulesAgain() {
+        var queue = commands;
+        if (stopRequested || queue == null) return;
+        lastDndSentNanos = System.nanoTime();
+        int filter = io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.currentFilter(this);
+        boolean on = io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.blocksNotifications(filter);
+        sendQuietly(queue, io.github.miam1ku.mibandoplusbridge.protocol.BandDndCommand.phoneRules(
+                on, (int) (System.currentTimeMillis() / 1000L)));
+        sendQuietly(queue, io.github.miam1ku.mibandoplusbridge.protocol.BandDndCommand.queryRules());
+    }
+
+    private static void sendQuietly(
+            io.github.miam1ku.mibandoplusbridge.protocol.LiveCommandQueue queue,
+            nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto.Command command) {
+        int subtype = command.getSubtype();
+        queue.send(command).exceptionally(error -> {
+            android.util.Log.i("OplusBandBridge", "DND_SYNC_REJECTED subtype=" + subtype);
+            return null;
+        });
+    }
+
+    private static String describeSystem(
+            nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto.Command command) {
+        byte[] raw = command.toByteArray();
+        StringBuilder hex = new StringBuilder(Math.min(raw.length, 120) * 2);
+        int shown = Math.min(raw.length, 120);
+        for (int i = 0; i < shown; i++) {
+            hex.append(Character.forDigit((raw[i] >> 4) & 0xf, 16))
+                    .append(Character.forDigit(raw[i] & 0xf, 16));
+        }
+        StringBuilder rules = new StringBuilder();
+        if (command.hasSystem() && command.getSystem().hasPhoneZenRules()) {
+            var list = command.getSystem().getPhoneZenRules().getRuleList();
+            rules.append(" rules=").append(list.size());
+            for (var rule : list) {
+                rules.append(" {").append(rule.getName()).append(" manual=").append(rule.getManual())
+                        .append(" state=").append(rule.getState()).append('}');
+            }
+        }
+        return "rx type=2 subtype=" + command.getSubtype() + " status=" + command.getStatus()
+                + " bytes=" + raw.length + rules + " hex=" + hex;
     }
 
     private void show(String title, String text) {
@@ -731,6 +859,7 @@ public final class BandLiveService extends Service {
             unregisterReceiver(dndEvents);
             dndReceiverRegistered = false;
         }
+        try { getContentResolver().unregisterContentObserver(zenMode); } catch (RuntimeException ignored) { }
         requestStop();
         calls.close();
         weatherSync.close();

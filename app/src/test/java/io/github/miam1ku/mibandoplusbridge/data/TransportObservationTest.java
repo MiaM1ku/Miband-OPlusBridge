@@ -21,6 +21,12 @@ public final class TransportObservationTest {
                 .put("authAppDeviceIdPresent", false);
     }
 
+    @Test public void phoneCapabilityKeepsCapturedBitsAndAddsZenRuleSync() {
+        int sent = TransportObservation.withZenRuleSync(TransportObservation.APP_CAPABILITY);
+        assertEquals(0, TransportObservation.APP_CAPABILITY & TransportObservation.ZEN_RULE_SYNC);
+        assertEquals(TransportObservation.APP_CAPABILITY | TransportObservation.ZEN_RULE_SYNC, sent);
+    }
+
     @Test public void capturedSppWearAuthAllowsLiveSession() throws Exception {
         assertTrue(TransportObservation.supportsLive(
                 verified("miwear.watch.q66cn", "3.2.15"), "miwear.watch.q66cn"));

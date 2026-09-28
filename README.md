@@ -18,6 +18,7 @@
    - `com.heytap.mydevices`（设备空间）
    - `com.heytap.health`（OPPO 健康）
    - `com.mi.health`（导入绑定时需要）
+   - `com.coloros.alarmclock`（时钟）
 3. 在 KernelSU 里对本应用授权。
 4. 打开「小米手环桥接」：检查 Root → 导入已配对手环 → 添加到健康。导入时会记录连接参数；若首页提示「连接参数丢失」，先恢复官方管理，再在小米运动健康中重连一次手环。
 5. 强停「设备空间」和「OPPO 健康」后再打开。
@@ -30,6 +31,8 @@
 - 设备信息（名称、型号、固件、电量、连接；MAC 只显示末位）
 - 测试通知 / 撤回
 - 测试来电 / 结束来电
+- 同步免打扰（同步开关 + 当前状态）
+- 测试闹钟响铃 / 关闭 / 稍后响
 - 测试查找手机 / 停止查找（OPPO 健康自己的响铃）
 - 发送测试音乐
 - 检查更新（GitHub Releases）
@@ -43,8 +46,8 @@
 打 tag 后 GitHub Actions 会构建，并把同一个 `app-release.apk` 发到两个仓库：
 
 ```
-git tag 26-1.2.3
-git push origin 26-1.2.3
+git tag 27-1.2.4
+git push origin 27-1.2.4
 ```
 
 - 源仓库：https://github.com/MiaM1ku/Miband-OPlusBridge
@@ -59,6 +62,13 @@ tag 格式：`{versionCode}-{versionName}`。`workflow_dispatch` 只更新源仓
 - `OPLUSBAND_KEY_ALIAS`
 - `OPLUSBAND_KEY_PASSWORD`
 - `XPOSED_REPO_PAT`：对 `Xposed-Modules-Repo/io.github.miam1ku.mibandoplusbridge` 有 Contents 写权限的 PAT。`GITHUB_TOKEN` 不能推另一个仓库。缺这个 secret 时，tag 发布会在源 Release 之后失败。
+
+## 鸣谢
+
+协议对照用了这些项目：
+
+- [AstroBox-NG](https://github.com/AstralSightStudios/AstroBox-NG)（AstralSightStudios）
+- [Gadgetbridge](https://gadgetbridge.org/)
 
 ## 许可证
 

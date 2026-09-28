@@ -7,11 +7,17 @@ import org.json.JSONObject;
 /** Last verified SPP profile. Survives LSPosed preference redirect and diagnostic recapture. */
 public final class TransportObservation {
     public static final int APP_CAPABILITY = 25_171_686;
+    /** Mi Fitness CAPABILITY_SUPPORT_ZEN_RULE_SYNC. The band hides 同步手机勿扰 without this bit. */
+    public static final int ZEN_RULE_SYNC = 1 << 20;
     private static final String NAME = "transport-observation";
     private static final String KEY = "snapshot";
     private static final String SERVICE = "00001101-0000-1000-8000-00805f9b34fb";
 
     private TransportObservation() {}
+
+    public static int withZenRuleSync(int captured) {
+        return captured | ZEN_RULE_SYNC;
+    }
 
     public static JSONObject read(Context context) {
         String snapshot = LocalPrefs.open(context, NAME).getString(KEY, "");

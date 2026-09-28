@@ -78,7 +78,7 @@ message AuthDeviceInfo {
   required uint32 unknown1 = 1; // 0 - needs to be serialized explicitly
   required float phoneApiLevel = 2;
   required string phoneName = 3; // phone model
-  required uint32 unknown3 = 4; // 224
+  required uint32 unknown3 = 4; // CompanionDevice.app_capability. Bit 20 is phone DND sync.
   required string region = 5; // 2-letter, upper case
 }
 
@@ -164,7 +164,10 @@ message System {
 
   // 2, 79
   optional DeviceState deviceState = 49;
-}
+
+  // 2, 110 set, 2, 109 get. Mi Fitness puts the phone zen-rule list here.
+  optional PhoneZenRuleList phoneZenRules = 71;
+ }
 
 message Power {
   optional Battery battery = 1;
@@ -324,6 +327,30 @@ message MiscNotificationSettings {
 
 message DndSync {
   optional uint32 enabled = 1; // 0/1
+}
+
+message PhoneZenRuleList {
+  repeated PhoneZenRule rule = 1;
+}
+
+message PhoneZenRule {
+  optional bool manual = 1;
+  optional string name = 2;
+  optional int32 state = 3; // 0 off, 1 on
+  optional int32 conditionOverride = 4;
+  optional uint32 lastActivation = 5; // low 32 bits of epoch millis, as Mi Fitness casts it
+  optional PhoneZenSchedule schedule = 6;
+}
+
+message PhoneZenSchedule {
+  optional PhoneZenTime start = 1;
+  optional PhoneZenTime end = 2;
+  optional uint32 repeat = 3; // bit0 Monday .. bit5 Saturday, bit6 Sunday
+}
+
+message PhoneZenTime {
+  optional uint32 hour = 1;
+  optional uint32 minute = 2;
 }
 
 message WearingMode {
@@ -1000,8 +1027,22 @@ message Schedule {
   // 17, 17
   optional Reminder editReminder = 15;
 
+  // 17, 16 phone alarm alert / dismiss / snooze. uint32 so an unknown op is not dropped.
+  optional PhoneAlarmOperation phone_alarm_operation = 16;
+
   // 17, 18
   optional ReminderDelete deleteReminder = 17;
+}
+
+message PhoneAlarmTarget {
+  optional uint32 id = 1;
+  optional uint32 alert_time = 2;
+  optional string label = 3;
+}
+
+message PhoneAlarmOperation {
+  optional uint32 op_code = 1; // 0 alert, 1 dismiss, 2 snooze
+  optional PhoneAlarmTarget phone_alarm = 2;
 }
 
 message Alarms {

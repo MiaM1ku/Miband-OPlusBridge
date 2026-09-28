@@ -12,4 +12,13 @@ public final class PhoneDndTest {
         assertTrue(PhoneDnd.blocksNotifications(PhoneDnd.NONE));
         assertTrue(PhoneDnd.blocksNotifications(PhoneDnd.ALARMS));
     }
+
+    @Test public void bandManualAppliesOnlyWhenItDisagreesAndTheWriteHasSettled() {
+        assertFalse(PhoneDnd.acceptBandManual(true, PhoneDnd.PRIORITY, 0, 5_000_000_000L));
+        assertFalse(PhoneDnd.acceptBandManual(false, PhoneDnd.ALL, 0, 5_000_000_000L));
+        assertFalse(PhoneDnd.acceptBandManual(true, PhoneDnd.UNKNOWN, 0, 5_000_000_000L));
+        assertFalse(PhoneDnd.acceptBandManual(true, PhoneDnd.ALL, 1_000_000_000L, 2_000_000_000L));
+        assertTrue(PhoneDnd.acceptBandManual(true, PhoneDnd.ALL, 1_000_000_000L, 5_000_000_000L));
+        assertTrue(PhoneDnd.acceptBandManual(false, PhoneDnd.NONE, 0, 1L));
+    }
 }

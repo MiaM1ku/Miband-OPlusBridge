@@ -233,7 +233,8 @@ public final class SppDiagnosticClient implements AutoCloseable {
             if (!session.verifyWatchProof(watchNonce.getHmac().toByteArray())) throw new Failure("CREDENTIAL_REFRESH_REQUIRED");
             var phoneInfo = XiaomiProto.AuthDeviceInfo.newBuilder().setUnknown1(0)
                     .setPhoneApiLevel((float) Build.VERSION.SDK_INT).setPhoneName(Build.MODEL)
-                    .setUnknown3(binding.capability()).setRegion(binding.region()).build();
+                    .setUnknown3(io.github.miam1ku.mibandoplusbridge.data.TransportObservation
+                            .withZenRuleSync(binding.capability())).setRegion(binding.region()).build();
             var confirmation = XiaomiProto.AuthStep3.newBuilder()
                     .setEncryptedNonces(ByteString.copyFrom(session.phoneProof()))
                     .setEncryptedDeviceInfo(ByteString.copyFrom(session.encryptPhoneInfo(phoneInfo.toByteArray())));

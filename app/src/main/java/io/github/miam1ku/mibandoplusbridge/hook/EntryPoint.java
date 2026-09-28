@@ -16,6 +16,22 @@ public final class EntryPoint implements IXposedHookLoadPackage {
     private static final AtomicBoolean healthInstalled = new AtomicBoolean();
 
     @Override public void handleLoadPackage(XC_LoadPackage.LoadPackageParam load) {
+        if ("com.coloros.alarmclock".equals(load.packageName)) {
+            XposedHelpers.findAndHookMethod(Application.class, "attach", Context.class, new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam param) {
+                    Context context = (Context) param.args[0];
+                    if (context == null) return;
+                    Context app = context.getApplicationContext() == null ? context : context.getApplicationContext();
+                    try {
+                        ClockAlarmHook.install(app, load.classLoader);
+                    } catch (Throwable failure) {
+                        android.util.Log.i("OplusBandBridge", "CLOCK_ALARM_HOOK_SKIPPED "
+                                + failure.getClass().getSimpleName());
+                    }
+                }
+            });
+            return;
+        }
         if (!HostIdentity.MI_PACKAGE.equals(load.packageName)
                 && !"com.heytap.mydevices".equals(load.packageName)
                 && !"com.heytap.health".equals(load.packageName)) return;
