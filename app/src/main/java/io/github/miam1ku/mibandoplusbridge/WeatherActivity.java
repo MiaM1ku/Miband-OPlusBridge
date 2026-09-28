@@ -40,7 +40,7 @@ public final class WeatherActivity extends AppCompatActivity {
         BridgeScreen screen = BridgeScreen.attach(this, "天气", true);
         LinearLayout statusCard = screen.card();
         status = screen.bodyText(statusCard, "尚未读取 OHealth 天气。");
-        screen.caption(statusCard, "只使用 OHealth 已有的天气和定位。没有有效天气或地点时不会发送到手环。");
+        screen.caption(statusCard, "使用 OHealth 已有的天气和定位。天气和地点有效后发送到手环。");
         screen.setLastChildMargin(statusCard, 0);
         screen.filled("获取当前位置天气", this::requestWeather);
         send = screen.outlined("发送到手环", this::sendWeather);
@@ -61,7 +61,7 @@ public final class WeatherActivity extends AppCompatActivity {
 
     private void requestWeather() {
         if (worker.isShutdown()) return;
-        status.setText("正在请求当前位置天气；可保留有效的上一份天气，不会自动打开 OHealth。");
+        status.setText("正在请求当前位置天气。上一份有效天气会保留。");
         BandLiveService.refreshWeather(this);
         worker.execute(() -> {
             try {
@@ -187,7 +187,7 @@ public final class WeatherActivity extends AppCompatActivity {
             case "WEATHER_BAND_REJECTED" -> "手环拒绝本次天气；健康连接保持不变。";
             case "WEATHER_BUSY" -> "天气任务正在处理，请稍后再试。";
             case "WEATHER_DISCONNECTED", "LIVE_SESSION_UNAVAILABLE", "WEATHER_CLOSED", "NATIVE_OWNERSHIP_REQUIRED" -> "请先在配置首页确认手环已添加、已接管且已连接。";
-            case "WEATHER_DATA_INVALID" -> "天气数据或天气码不可用，不会发送猜测值。";
+            case "WEATHER_DATA_INVALID" -> "天气数据或天气码不可用。";
             default -> "天气未完成传输，请检查连接和天气源后重试。";
         };
     }

@@ -4,6 +4,7 @@ local.properties
 *.jks
 *.keystore
 *.apk
+vendor/
 dist/
 analysis/
 HANDOFF.md

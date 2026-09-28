@@ -7,11 +7,12 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import org.junit.Test;
+import static io.github.miam1ku.mibandoplusbridge.notify.PhoneCallGate.Phase.*;
 import static io.github.miam1ku.mibandoplusbridge.notify.PhoneCallGate.State.*;
 import static org.junit.Assert.*;
 
 public final class PhoneCallGateTest {
-    @Test public void dualSimClearsOnlyWhenLastRingingSubscriptionStops() {
+    @Test public void dualSimStaysIncomingUntilTheLastRingEnds() {
         Sender sender = new Sender();
         PhoneCallGate gate = connected(sender);
         gate.onState(1, RINGING);
@@ -19,31 +20,45 @@ public final class PhoneCallGateTest {
         sender.ack(0);
         assertTrue(gate.isRingingDelivered());
         gate.onState(1, OFFHOOK);
-        assertEquals(List.of("ring"), sender.events);
+        assertEquals(List.of("incoming"), sender.events);
         gate.onState(2, IDLE);
+        assertEquals(List.of("incoming", "cancel", "active"), sender.events);
         gate.onState(1, IDLE);
-        assertEquals(List.of("ring", "cancel", "clear"), sender.events);
-        sender.ack(1);
+        assertEquals(List.of("incoming", "cancel", "active", "cancel", "clear"), sender.events);
+        sender.ack(2);
         assertFalse(gate.isRingingDelivered());
     }
 
-    @Test public void outgoingCallsNeverRequestIncomingAlert() {
+    @Test public void outgoingDialIsNotAnIncomingAlert() {
         Sender sender = new Sender();
         PhoneCallGate gate = connected(sender);
         gate.onState(1, OFFHOOK);
         gate.onState(2, OFFHOOK);
+        assertEquals(List.of("outgoing"), sender.events);
         gate.onState(1, IDLE);
         gate.onState(2, IDLE);
-        assertTrue(sender.events.isEmpty());
+        assertEquals(List.of("outgoing", "cancel", "clear"), sender.events);
     }
 
-    @Test public void endCancelsUnsentRingBeforeSubmittingClearAndIgnoresLateAck() {
+    @Test public void answeringAnOutgoingCallReplacesTheAlertWithTheActiveScreen() {
+        Sender sender = new Sender();
+        PhoneCallGate gate = connected(sender);
+        gate.onState(1, OFFHOOK);
+        assertEquals(List.of("outgoing"), sender.events);
+        assertTrue(gate.markAnswered());
+        assertEquals(List.of("outgoing", "cancel", "active"), sender.events);
+        assertFalse(gate.markAnswered());
+        gate.onState(1, IDLE);
+        assertEquals(List.of("outgoing", "cancel", "active", "cancel", "clear"), sender.events);
+    }
+
+    @Test public void answeringReplacesTheRingWithTheActiveScreen() {
         Sender sender = new Sender();
         PhoneCallGate gate = connected(sender);
         gate.onState(1, RINGING);
         assertFalse(gate.isRingingDelivered());
         gate.onState(1, OFFHOOK);
-        assertEquals(List.of("ring", "cancel", "clear"), sender.events);
+        assertEquals(List.of("incoming", "cancel", "active"), sender.events);
         sender.ack(0);
         assertFalse(gate.isRingingDelivered());
         sender.ack(1);
@@ -59,13 +74,13 @@ public final class PhoneCallGateTest {
         gate.onState(2, RINGING);
         gate.setEnabled(false);
         gate.setEnabled(true);
-        assertEquals(List.of("ring", "cancel", "clear"), sender.events);
+        assertEquals(List.of("incoming", "cancel", "clear"), sender.events);
         assertFalse(gate.isRingingDelivered());
         gate.replaceStates(Map.of(1, IDLE, 2, IDLE));
-        assertEquals(List.of("ring", "cancel", "clear"), sender.events);
+        assertEquals(List.of("incoming", "cancel", "clear"), sender.events);
     }
 
-    @Test public void reconnectUsesFreshStateAndDoesNotReplayEndedCall() {
+    @Test public void reconnectShowsALiveCallAndDoesNotReplayAnEndedOne() {
         Sender sender = new Sender();
         PhoneCallGate gate = connected(sender);
         gate.onState(1, RINGING);
@@ -74,11 +89,11 @@ public final class PhoneCallGateTest {
         gate.connected(Map.of(1, IDLE, 2, OFFHOOK));
         sender.ack(0);
         assertFalse(gate.isRingingDelivered());
-        assertEquals(List.of("ring", "cancel"), sender.events);
+        assertEquals(List.of("incoming", "cancel", "active"), sender.events);
         gate.disconnected();
         gate.connected(Map.of(1, IDLE, 2, RINGING));
-        assertEquals(List.of("ring", "cancel", "cancel", "ring"), sender.events);
-        sender.ack(1);
+        assertEquals(List.of("incoming", "cancel", "active", "cancel", "incoming"), sender.events);
+        sender.ack(2);
         assertTrue(gate.isRingingDelivered());
     }
 
@@ -91,10 +106,9 @@ public final class PhoneCallGateTest {
         assertSame(failure, gate.lastFailure());
         assertFalse(gate.isRingingDelivered());
         gate.onState(1, RINGING);
-        assertEquals(List.of("ring"), sender.events);
+        assertEquals(List.of("incoming"), sender.events);
         gate.onState(1, IDLE);
-        // A transport failure can occur after bytes were sent; a clear is still required.
-        assertEquals(List.of("ring", "cancel", "clear"), sender.events);
+        assertEquals(List.of("incoming", "cancel", "clear"), sender.events);
         sender.ack(1);
         assertNull(gate.lastFailure());
     }
@@ -102,7 +116,7 @@ public final class PhoneCallGateTest {
     @Test public void immediateRejectionIsObservableWithoutEscapingCallback() {
         RuntimeException rejected = new IllegalStateException("NOT_READY");
         PhoneCallGate gate = new PhoneCallGate(new PhoneCallGate.Sender() {
-            public CompletionStage<Void> send(boolean ringing) { throw rejected; }
+            public CompletionStage<Void> send(PhoneCallGate.Phase phase) { throw rejected; }
             public void cancelQueuedRing() { }
         });
         gate.setEnabled(true);
@@ -116,13 +130,13 @@ public final class PhoneCallGateTest {
         PhoneCallGate gate = connected(sender);
         gate.onState(1, RINGING);
         gate.replaceStates(Map.of(2, IDLE));
-        gate.onState(1, RINGING); // Removed subscription's late callback is ignored.
+        gate.onState(1, RINGING);
         gate.onState(2, RINGING);
-        sender.ack(1); // Previous clear must not overwrite the new desired ring's delivery.
+        sender.ack(1);
         assertFalse(gate.isRingingDelivered());
         sender.ack(2);
         assertTrue(gate.isRingingDelivered());
-        assertEquals(List.of("ring", "cancel", "clear", "ring"), sender.events);
+        assertEquals(List.of("incoming", "cancel", "clear", "incoming"), sender.events);
     }
 
     private static PhoneCallGate connected(Sender sender) {
@@ -135,8 +149,13 @@ public final class PhoneCallGateTest {
     private static final class Sender implements PhoneCallGate.Sender {
         final List<String> events = new ArrayList<>();
         final List<CompletableFuture<Void>> pending = new ArrayList<>();
-        public CompletionStage<Void> send(boolean ringing) {
-            events.add(ringing ? "ring" : "clear");
+        public CompletionStage<Void> send(PhoneCallGate.Phase phase) {
+            events.add(switch (phase) {
+                case INCOMING -> "incoming";
+                case ACTIVE -> "active";
+                case OUTGOING -> "outgoing";
+                case NONE -> "clear";
+            });
             CompletableFuture<Void> result = new CompletableFuture<>();
             pending.add(result);
             return result;

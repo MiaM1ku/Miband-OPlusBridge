@@ -58,6 +58,8 @@ public final class PhoneMusic {
         return 0;
     }
 
+    public static boolean attached() { return listener != null; }
+
     public static void attach(BandNotificationListener service, Handler handler) {
         listener = service;
         main = handler;

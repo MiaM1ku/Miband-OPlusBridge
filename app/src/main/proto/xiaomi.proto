@@ -829,7 +829,8 @@ message Notification3 {
   optional string body = 5;
   optional string timestamp = 6;
   optional uint32 id = 7;
-  optional bool isCall = 8;
+  // Mi Fitness BleNotifyModel writes this as an int, not a bool: 1 incoming, 2 active, 3 outgoing.
+  optional uint32 callState = 8;
   optional bool repliesAllowed = 11; // only for calls?
   optional string key = 12; // "0|<package>|<id 2 complement>|null|12345"
   optional bool openOnPhone = 13; // 1 to show "Open on phone", needs key

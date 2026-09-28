@@ -83,6 +83,7 @@ public final class OHealthSleepHook {
         XposedBridge.hookAllMethods(accountCompanion.getClass(), "getSsoId", new XC_MethodHook() {
             @Override protected void afterHookedMethod(MethodHookParam p) {
                 String account = p.getResult() instanceof String ? (String) p.getResult() : "";
+                if (account.isBlank() || "com.heytap.health".equals(account)) return;
                 if (!account.equals(observedAccount)) {
                     observedAccount = account;
                     cache = Cache.empty();
@@ -125,8 +126,8 @@ public final class OHealthSleepHook {
     }
 
     private static String currentAccount() {
-        Object value = XposedHelpers.callMethod(accountCompanion, "getSsoId");
-        return value instanceof String ? (String) value : "";
+        String account = observedAccount;
+        return account == null || account.isBlank() || "com.heytap.health".equals(account) ? "" : account;
     }
 
     private static boolean selected() {

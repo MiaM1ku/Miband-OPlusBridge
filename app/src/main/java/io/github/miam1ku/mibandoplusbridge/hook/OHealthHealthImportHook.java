@@ -112,10 +112,15 @@ public final class OHealthHealthImportHook {
                 });
         XposedBridge.hookMethod(host.accountGetter, new XC_MethodHook() {
             @Override protected void afterHookedMethod(MethodHookParam param) {
+                // Cache the id OHealth already returned. Never call getSsoId.
                 String account = param.hasThrowable() ? null : (String) param.getResult();
-                if (!Objects.equals(observedAccount.getAndSet(account), account)) {
+                if (!usableAccount(account)) return;
+                String previous = observedAccount.getAndSet(account);
+                host.publishedAccount = account;
+                if (!Objects.equals(previous, account)) {
                     accountEpoch.incrementAndGet();
-                    request();
+                    String seen = account;
+                    worker.post(() -> adoptAccount(seen));
                 }
             }
         });
@@ -222,16 +227,6 @@ public final class OHealthHealthImportHook {
                 Log.i("OplusBandBridge", "OHEALTH_CONTEXT_SET " + type.getSimpleName() + "." + field.getName());
             }
         }
-        for (java.lang.reflect.Method method : type.getDeclaredMethods()) {
-            Class<?>[] params = method.getParameterTypes();
-            if (params.length != 1 || params[0] != Context.class) continue;
-            if (instance == null && (method.getModifiers() & java.lang.reflect.Modifier.STATIC) == 0) continue;
-            method.setAccessible(true);
-            try {
-                method.invoke(instance, context);
-                Log.i("OplusBandBridge", "OHEALTH_CONTEXT_CALL " + type.getSimpleName() + "." + method.getName());
-            } catch (Throwable ignored) { }
-        }
     }
 
     private void drain() throws Exception {
@@ -295,6 +290,7 @@ public final class OHealthHealthImportHook {
                     Object option = host.insertOption(model.kind.table, rows);
                     requireAccount(account, epoch);
                     host.insert(api, option);
+                    host.syncCloud(api, model.kind.table);
                     inserted = true;
                     requireAccount(account, epoch);
                     found = host.read(api, account, model, records);
@@ -352,6 +348,25 @@ public final class OHealthHealthImportHook {
         }
         return page;
     }
+
+    /** Health's tourist placeholder is not a signed-in SSO. */
+    private static boolean usableAccount(String account) {
+        return account != null && !account.isBlank() && account.length() <= 512
+                && !"com.heytap.health".equals(account);
+    }
+
+    /** Bind the account OHealth already returned. Do not switch or pause an existing binding. */
+    private void adoptAccount(String account) {
+        try {
+            Bundle data = new Bundle();
+            data.putString("account", account);
+            context.getContentResolver().call(HealthQueueProvider.URI, "adoptAccount", null, data);
+            request();
+        } catch (Throwable ignored) {
+            Log.i("OplusBandBridge", "OHEALTH_ACCOUNT_ADOPT_FAILED");
+        }
+    }
+
 
     private void requireAccount(String expected, long epoch) throws Exception {
         if (!expected.equals(host.account()) || accountEpoch.get() != epoch) {
@@ -419,7 +434,8 @@ public final class OHealthHealthImportHook {
             }
         }
 
-        String account() throws ReflectiveOperationException { return (String) accountGetter.invoke(companion); }
+        volatile String publishedAccount;
+        String account() { return publishedAccount; }
         Object api() throws ReflectiveOperationException { return apiGetter.invoke(companion); }
 
         Object insertOption(int table, List<Object> rows) throws ReflectiveOperationException {
@@ -445,6 +461,54 @@ public final class OHealthHealthImportHook {
 
         void insertRows(Object api, int table, List<Object> rows) throws ReflectiveOperationException {
             insert(api, insertOption(table, rows));
+            syncCloud(api, table);
+        }
+
+        /** Same post-insert cloud request as databaseengineservice. A cloud failure leaves the local row. */
+        void syncCloud(Object api, int table) {
+            int[] request = cloudRequest(table);
+            if (request == null || api == null) return;
+            try {
+                Class<?> type = Class.forName("com.heytap.databaseengine.option.DataSyncOption", false, loader);
+                Object option = syncOption(type);
+                type.getMethod("setSyncDataType", int.class).invoke(option, request[0]);
+                type.getMethod("setSyncAction", int.class).invoke(option, request[1]);
+                type.getMethod("setSyncScope", int.class).invoke(option, 1);
+                Object observer = observerConstructor.newInstance();
+                try {
+                    subscribe.invoke(api.getClass().getMethod("synCloud", type).invoke(api, option), observer);
+                } finally {
+                    try { observerDispose.invoke(observer); } catch (ReflectiveOperationException ignored) { }
+                }
+            } catch (Throwable failure) {
+                Log.i("OplusBandBridge", "OHEALTH_CLOUD_SYNC_FAILED table=" + table
+                        + " " + failure.getClass().getSimpleName());
+            }
+        }
+
+        private static Object syncOption(Class<?> type) throws ReflectiveOperationException {
+            for (Constructor<?> constructor : type.getDeclaredConstructors()) {
+                if (constructor.getParameterCount() != 7) continue;
+                constructor.setAccessible(true);
+                return constructor.newInstance(0, 0, 0, 0, null, null, 0L);
+            }
+            for (Constructor<?> constructor : type.getDeclaredConstructors()) {
+                if (constructor.getParameterCount() != 9) continue;
+                constructor.setAccessible(true);
+                return constructor.newInstance(0, 0, 0, 0, null, null, 0L, 0x7f, null);
+            }
+            throw new NoSuchMethodException("CLOUD_SYNC_OPTION");
+        }
+
+        private static int[] cloudRequest(int table) {
+            return switch (table) {
+                case 1001, 1002 -> new int[]{1, 1};
+                case 1004, 1008, 1010, 1011, 1012, 1014, 1017 -> new int[]{1000, 0};
+                case 1024 -> new int[]{13, 1};
+                case 1075 -> new int[]{18, 0};
+                case 1172, 1173, 1174, 1175, 1176, 1177 -> new int[]{17, 1};
+                default -> null;
+            };
         }
 
         List<?> readRows(Object api, String account, int table, String device, long start, long end,

@@ -33,7 +33,7 @@ public final class BandNotificationCommandTest {
         var incoming = BandNotificationCommand.incomingCall(null,
                 Instant.parse("2026-09-23T18:32:06Z"), ZoneId.of("Asia/Shanghai"))
                 .getNotification().getNotification2().getNotification3();
-        assertTrue(incoming.getIsCall());
+        assertEquals(BandNotificationCommand.CALL_INCOMING, incoming.getCallState());
         assertFalse(incoming.getRepliesAllowed());
         assertEquals("?", incoming.getTitle());
         assertEquals("?", incoming.getBody());
@@ -41,6 +41,21 @@ public final class BandNotificationCommandTest {
         var end = BandNotificationCommand.endCall().getNotification().getNotificationDismiss().getNotificationId(0);
         assertEquals("phone", end.getPackage());
         assertEquals(0, end.getId());
+    }
+
+    @Test public void answeredAndOutgoingCallsUseDistinctStates() {
+        var active = BandNotificationCommand.call("张三", null, BandNotificationCommand.CALL_ACTIVE,
+                Instant.parse("2026-09-23T18:32:06Z"), ZoneId.of("Asia/Shanghai"), false)
+                .getNotification().getNotification2().getNotification3();
+        assertEquals(BandNotificationCommand.CALL_ACTIVE, active.getCallState());
+        assertEquals("张三", active.getTitle());
+        assertEquals("通话中", active.getBody());
+        var outgoing = BandNotificationCommand.call("去电", null, BandNotificationCommand.CALL_OUTGOING,
+                Instant.EPOCH, ZoneId.of("UTC"), true)
+                .getNotification().getNotification2().getNotification3();
+        assertEquals(BandNotificationCommand.CALL_OUTGOING, outgoing.getCallState());
+        assertFalse(outgoing.getRepliesAllowed());
+        assertEquals("去电", outgoing.getBody());
     }
 
     @Test public void smsReplyRequiresUsableNumberAndDoesNotAllowEmergency() {

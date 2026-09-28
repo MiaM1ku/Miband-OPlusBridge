@@ -365,7 +365,7 @@ public final class LiveCommandQueue implements AutoCloseable {
         if (command.getSubtype() == 0 && notification.hasNotification2()
                 && notification.getNotification2().hasNotification3()) {
             XiaomiProto.Notification3 post = notification.getNotification2().getNotification3();
-            if (post.getIsCall()) {
+            if (BandNotificationCommand.isCall(post)) {
                 return "phone".equals(post.getPackage()) && post.getId() == 0
                         ? Kind.CALL : Kind.GENERAL;
             }

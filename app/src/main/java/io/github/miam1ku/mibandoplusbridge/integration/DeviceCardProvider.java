@@ -105,7 +105,7 @@ public final class DeviceCardProvider extends ContentProvider {
             if (!actual.equals(selectionArgs[0])) return result;
         }
         try {
-            JSONObject data = deviceData(getContext(), state, deviceId, mac);
+            JSONObject data = deviceData(state, deviceId, mac);
             MatrixCursor.RowBuilder row = result.newRow();
             for (String column : requested) {
                 row.add(switch (column) {
@@ -127,7 +127,7 @@ public final class DeviceCardProvider extends ContentProvider {
         return false;
     }
 
-    private static JSONObject deviceData(Context context, io.github.miam1ku.mibandoplusbridge.data.LocalPrefs state,
+    private static JSONObject deviceData(io.github.miam1ku.mibandoplusbridge.data.LocalPrefs state,
             String deviceId, String mac) throws JSONException {
         boolean connected = state.getBoolean("registered", false) && state.getBoolean("connected", false);
         String connectState = connected ? "CONNECTED" : "DISCONNECTED";
@@ -143,14 +143,12 @@ public final class DeviceCardProvider extends ContentProvider {
                 .put("coordinationState", "DEFAULT")
                 .put("lastConnectTime", connected ? state.getLong("lastUpdateMs", 0) : 0)
                 .put("lastDisconnectTime", connected ? 0 : state.getLong("lastUpdateMs", 0));
-        String icon = "android.resource://" + context.getPackageName() + "/"
-                + io.github.miam1ku.mibandoplusbridge.R.drawable.band_card;
         JSONObject data = new JSONObject()
                 .put("mDeviceId", deviceId)
                 .put("mDeviceName", BandCatalog.displayName(
                         state.getString("modelId", ""), state.getString("name", "")))
                 .put("mMacAddress", mac)
-                .put("modelId", state.getString("modelId", ""))
+                .put("modelId", "OB19B1")
                 .put("mDeviceType", "WRISTBAND")
                 .put("mBatteryInfoList", batteries)
                 .put("mBatteryList", levels)
@@ -159,8 +157,8 @@ public final class DeviceCardProvider extends ContentProvider {
                 .put("mAuthority", AUTHORITY)
                 .put("isActive", connected)
                 .put("cardStyle", 1)
-                .put("mIconUrl", icon)
-                .put("iconUrl", icon)
+                .put("mIconUrl", "OB19B1")
+                .put("iconUrl", "OB19B1")
                 .put("timestamp", state.getLong("lastUpdateMs", 0))
                 .put("versionCode", 1L)
                 .put("feature", 0)

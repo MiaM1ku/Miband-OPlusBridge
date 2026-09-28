@@ -77,7 +77,7 @@ public final class BandDetailsActivity extends AppCompatActivity {
         screen.navRow(links, "模块管理", () -> openPackage(KERNELSU));
         screen.setLastChildMargin(links, 0);
         screen.heading("已保存历史");
-        screen.caption("仅显示当前健康账号下这台手环的记录。移除设备后仍会保留。");
+        screen.caption("显示当前 OHealth 账号下这台手环的记录。移除设备后记录仍保留。");
         kindPicker = new Spinner(this);
         kindPicker.setMinimumHeight(BridgeScreen.dp(this, 48));
         ArrayAdapter<String> kinds = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item,
@@ -182,7 +182,7 @@ public final class BandDetailsActivity extends AppCompatActivity {
                 String device = BandStateRepository.deviceId(binding);
                 String account = store.confirmedAccountHash();
                 if (account == null) {
-                    message = "请先在配置 App 确认当前健康账号，再查看已保存历史。";
+                    message = "健康记录写入当前 OHealth 账号后，可在这里查看。";
                 } else {
                     List<HealthRecord> page = new ArrayList<>();
                     try (Cursor rows = store.localMeasurements(device, kind, 0, Long.MAX_VALUE, cursor)) {
@@ -203,7 +203,7 @@ public final class BandDetailsActivity extends AppCompatActivity {
                     message = page.isEmpty() ? "这一页没有已保存记录。" : text.toString();
                 }
             } catch (Exception unavailable) {
-                message = "暂时无法读取已保存历史。请确认已解锁、已导入绑定并确认健康账号后重试。";
+                message = "暂时无法读取已保存历史。请确认已解锁并已导入绑定后重试。";
             }
             String result = message;
             String nextCursor = last;

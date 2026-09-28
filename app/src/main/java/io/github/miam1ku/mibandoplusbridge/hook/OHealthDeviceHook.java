@@ -1060,6 +1060,7 @@ public final class OHealthDeviceHook {
             });
             Log.i("OplusBandBridge", "OHEALTH_NOTIFICATION_HOOK process="
                     + android.app.Application.getProcessName());
+            trace("OHEALTH_NOTIFICATION_HOOK process=" + android.app.Application.getProcessName());
             XposedHelpers.findAndHookMethod(center, loader, "onNotificationRemoved", bean, new XC_MethodHook() {
                 @Override protected void afterHookedMethod(MethodHookParam param) {
                     forwardHostNotification(param.args[0], true);
@@ -1153,10 +1154,16 @@ public final class OHealthDeviceHook {
             Bundle extras = new Bundle();
             extras.putBoolean("removed", removed);
             extras.putBoolean("call", call);
+            extras.putBoolean("connected", callConnected(bean));
             extras.putString("pkg", pkg);
             extras.putString("key", key);
             extras.putInt("id", id);
-            extras.putString("app", text(bean, "getAppName"));
+            String app = text(bean, "getAppName");
+            if (app.isBlank() || app.equals(pkg)) {
+                String resolved = io.github.miam1ku.mibandoplusbridge.notify.AppLabels.label(hostContext, pkg);
+                if (!resolved.isBlank()) app = resolved;
+            }
+            extras.putString("app", app);
             extras.putString("title", text(bean, "getTitle"));
             extras.putString("body", text(bean, "getContent"));
             extras.putLong("when", when);
@@ -1193,6 +1200,16 @@ public final class OHealthDeviceHook {
         } catch (Throwable ignored) {
             return false;
         }
+    }
+
+    private static boolean callConnected(Object bean) {
+        try {
+            Object origin = XposedHelpers.callMethod(bean, "getOrigin");
+            if (origin instanceof StatusBarNotification posted) {
+                return io.github.miam1ku.mibandoplusbridge.notify.CallPresentation.connected(posted.getNotification());
+            }
+        } catch (Throwable ignored) { }
+        return false;
     }
 
     /** Health switch {@code screen_on_push} false means do not push while the screen is on. */

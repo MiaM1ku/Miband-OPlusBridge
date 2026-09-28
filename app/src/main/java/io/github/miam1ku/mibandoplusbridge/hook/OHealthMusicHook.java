@@ -41,6 +41,7 @@ public final class OHealthMusicHook {
             presenter = XposedHelpers.findClass(PRESENTER, loader);
         } catch (Throwable failure) {
             android.util.Log.i("OplusBandBridge", "MUSIC native unavailable");
+            trace("MUSIC_HOOK presenter-missing");
             return;
         }
         XC_MethodHook mirror = new XC_MethodHook() {
@@ -74,6 +75,7 @@ public final class OHealthMusicHook {
             XposedHelpers.getStaticObjectField(XposedHelpers.findClass(MANAGER, loader), "INSTANCE");
         } catch (Throwable failure) {
             android.util.Log.i("OplusBandBridge", "MUSIC native unavailable");
+            trace("MUSIC_HOOK manager-missing " + failure.getClass().getSimpleName());
         }
     }
 
@@ -139,6 +141,7 @@ public final class OHealthMusicHook {
             lastArtist = artist;
         } catch (RuntimeException failure) {
             android.util.Log.i("OplusBandBridge", "MUSIC native unavailable");
+            trace("MUSIC_HOOK publish-failed " + failure.getClass().getSimpleName());
         }
     }
 
@@ -206,5 +209,14 @@ public final class OHealthMusicHook {
     private static int number(Object[] args, int index) {
         if (args == null || index < 0 || index >= args.length || !(args[index] instanceof Number value)) return 0;
         return value.intValue();
+    }
+
+    private static void trace(String line) {
+        if (app == null || line == null || line.isBlank()) return;
+        try {
+            android.os.Bundle extras = new android.os.Bundle();
+            extras.putString("line", line);
+            app.getContentResolver().call(HostNotifyProvider.URI, "trace", null, extras);
+        } catch (RuntimeException ignored) { }
     }
 }

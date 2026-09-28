@@ -9,6 +9,7 @@ import android.os.Binder;
 import android.os.Bundle;
 import android.util.Log;
 import io.github.miam1ku.mibandoplusbridge.HostIdentity;
+import io.github.miam1ku.mibandoplusbridge.notify.CallPresentation;
 import io.github.miam1ku.mibandoplusbridge.protocol.BandNotificationCommand;
 import io.github.miam1ku.mibandoplusbridge.service.BandLiveService;
 import java.time.Instant;
@@ -41,7 +42,28 @@ public final class HostNotifyProvider extends ContentProvider {
             int id = extras.getInt("id", 0);
             if (id == 0) id = Math.max(1, key.hashCode() & 0x7fffffff);
             boolean call = extras.getBoolean("call", false);
+            if (call && BandLiveService.callsOwned()) {
+                if (!removed && (extras.getBoolean("connected", false)
+                        || CallPresentation.connected(extras.getBoolean("chronometer", false),
+                                extras.getString("body", ""), extras.getString("title", "")))) {
+                    BandLiveService.noteCallAnswered();
+                }
+                io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(getContext(),
+                        "CALL_HOST_SKIPPED removed=" + removed + " connected=" + extras.getBoolean("connected", false));
+                Bundle owned = new Bundle();
+                owned.putString("status", "QUEUED");
+                return owned;
+            }
             Instant when = Instant.ofEpochMilli(Math.max(1, extras.getLong("when", System.currentTimeMillis())));
+            String app = blankTo(extras.getString("app"), "");
+            if (app.isBlank() || app.equals(pkg)) {
+                String resolved = io.github.miam1ku.mibandoplusbridge.notify.AppLabels.label(getContext(), pkg);
+                if (!resolved.isBlank()) app = resolved;
+            }
+            if (app.isBlank()) app = pkg;
+            io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(getContext(),
+                    "NOTIFY_HOST pkg=" + pkg + " app=" + (app.equals(pkg) ? "package" : "label")
+                            + " removed=" + removed + " call=" + call);
             var command = call
                     ? (removed ? BandNotificationCommand.endCall()
                             : BandNotificationCommand.incomingCall(
@@ -49,9 +71,8 @@ public final class HostNotifyProvider extends ContentProvider {
                                     when, ZoneId.systemDefault(), false))
                     : (removed
                             ? BandNotificationCommand.dismiss(pkg, key, id)
-                            : BandNotificationCommand.post(pkg,
-                                    blankTo(extras.getString("app"), pkg),
-                                    key, id, extras.getString("title", ""), extras.getString("body", ""),
+                            : BandNotificationCommand.post(pkg, app, key, id,
+                                    extras.getString("title", ""), extras.getString("body", ""),
                                     when, ZoneId.systemDefault()));
             var pending = BandLiveService.forwardHostNotification(getContext(), command);
             String status = "QUEUED";

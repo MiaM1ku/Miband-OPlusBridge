@@ -3,6 +3,7 @@ package io.github.miam1ku.mibandoplusbridge.notify;
 
 import android.Manifest;
 import android.app.AppOpsManager;
+import android.media.AudioManager;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
@@ -15,6 +16,7 @@ import android.telephony.SubscriptionManager;
 import android.telephony.TelephonyCallback;
 import android.telephony.TelephonyManager;
 import io.github.miam1ku.mibandoplusbridge.data.BandStateRepository;
+import io.github.miam1ku.mibandoplusbridge.data.SessionLog;
 import io.github.miam1ku.mibandoplusbridge.protocol.BandNotificationCommand;
 import io.github.miam1ku.mibandoplusbridge.service.BandLiveService;
 import java.time.Instant;
@@ -24,7 +26,6 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ScheduledExecutorService;
 import nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto;
@@ -42,6 +43,8 @@ public final class PhoneCallMonitor implements AutoCloseable {
     private boolean subscriptionListenerRegistered;
     private boolean gateConnected;
     private boolean sessionConnected;
+    private volatile String caller = "来电";
+    private int savedRingerMode = -1;
     private volatile boolean closed;
     private volatile String monitorFailure;
 
@@ -66,10 +69,10 @@ public final class PhoneCallMonitor implements AutoCloseable {
         appOps = this.context.getSystemService(AppOpsManager.class);
         settings = this.context.getSharedPreferences("notification-settings", Context.MODE_PRIVATE);
         gate = new PhoneCallGate(new PhoneCallGate.Sender() {
-            @Override public CompletionStage<Void> send(boolean ringing) {
-                if (ringing) return CompletableFuture.completedFuture(null);
-                return BandLiveService.forwardHostNotification(PhoneCallMonitor.this.context,
-                        BandNotificationCommand.endCall());
+            @Override public CompletionStage<Void> send(PhoneCallGate.Phase phase) {
+                SessionLog.line(PhoneCallMonitor.this.context, "CALL_PHASE " + phase);
+                if (phase == PhoneCallGate.Phase.NONE) restoreRinger();
+                return BandLiveService.forwardHostNotification(PhoneCallMonitor.this.context, commandFor(phase));
             }
             @Override public void cancelQueuedRing() {
                 BandLiveService.cancelCall(PhoneCallMonitor.this.context);
@@ -101,6 +104,12 @@ public final class PhoneCallMonitor implements AutoCloseable {
         });
     }
 
+    public void noteAnswered() {
+        if (!closed) coordinator.execute(() -> {
+            if (gate.markAnswered()) SessionLog.line(context, "CALL_ANSWERED");
+        });
+    }
+
     /** Content-free status; a submission or transport failure never appears as delivered. */
     public String lastFailureCode() {
         if (monitorFailure != null) return monitorFailure;
@@ -115,8 +124,14 @@ public final class PhoneCallMonitor implements AutoCloseable {
     private void handleBandCommand(XiaomiProto.Command command) {
         if (closed) return;
         int subtype = command.getSubtype();
-        if (subtype == 2 || subtype == 5 || isCallDismiss(command)) {
+        SessionLog.line(context, "CALL_IN subtype=" + subtype);
+        if (subtype == 5) {
+            silence();
+            return;
+        }
+        if (subtype == 2 || isCallDismiss(command)) {
             android.util.Log.i("OplusBandBridge", "CALL_HANGUP_FROM_BAND subtype=" + subtype);
+            SessionLog.line(context, "CALL_HANGUP subtype=" + subtype);
             hangup();
             return;
         }
@@ -158,6 +173,64 @@ public final class PhoneCallMonitor implements AutoCloseable {
         } catch (SecurityException failure) {
             android.util.Log.i("OplusBandBridge", "CALL_HANGUP_DENIED");
         }
+    }
+
+    private void silence() {
+        try {
+            TelecomManager telecom = context.getSystemService(TelecomManager.class);
+            if (telecom != null) telecom.silenceRinger();
+            SessionLog.line(context, "CALL_IGNORE silence");
+            return;
+        } catch (SecurityException denied) {
+            AudioManager audio = context.getSystemService(AudioManager.class);
+            if (audio == null) {
+                SessionLog.line(context, "CALL_IGNORE denied");
+                return;
+            }
+            int mode = audio.getRingerMode();
+            if (mode != AudioManager.RINGER_MODE_SILENT) {
+                savedRingerMode = mode;
+                audio.setRingerMode(AudioManager.RINGER_MODE_SILENT);
+            }
+            SessionLog.line(context, "CALL_IGNORE ringer");
+        }
+    }
+
+    private void restoreRinger() {
+        if (savedRingerMode < 0) return;
+        AudioManager audio = context.getSystemService(AudioManager.class);
+        int mode = savedRingerMode;
+        savedRingerMode = -1;
+        if (audio != null) {
+            try { audio.setRingerMode(mode); }
+            catch (SecurityException denied) { SessionLog.line(context, "CALL_RINGER_RESTORE denied"); }
+        }
+    }
+
+    private XiaomiProto.Command commandFor(PhoneCallGate.Phase phase) {
+        Instant now = Instant.now();
+        ZoneId zone = ZoneId.systemDefault();
+        return switch (phase) {
+            case INCOMING -> {
+                String title = BandNotificationListener.currentIncomingCallTitle(context);
+                if (title != null && !title.isBlank()) caller = title;
+                yield BandNotificationCommand.call(caller, null, BandNotificationCommand.CALL_INCOMING, now, zone, false);
+            }
+            case ACTIVE -> BandNotificationCommand.call(
+                    "来电".equals(caller) ? "通话中" : caller, null,
+                    BandNotificationCommand.CALL_ACTIVE, now, zone, false);
+            case OUTGOING -> BandNotificationCommand.call("去电", null,
+                    BandNotificationCommand.CALL_OUTGOING, now, zone, false);
+            case NONE -> BandNotificationCommand.endCall();
+        };
+    }
+
+    public boolean ownsCalls() {
+        return !closed && callsEnabled() && eligible();
+    }
+
+    private boolean callsEnabled() {
+        return settings.getBoolean("callsEnabled", false);
     }
 
     private boolean smsReplyEnabled() {
@@ -204,10 +277,11 @@ public final class PhoneCallMonitor implements AutoCloseable {
 
     private void refreshNow(boolean freshSession) {
         if (closed) return;
-        if (!eligible()) {
+        if (!eligible() || !callsEnabled()) {
             if (!BandLiveService.notificationSessionReady(context)) disconnectGate();
             gate.setEnabled(false);
             stopListening();
+            SessionLog.line(context, "CALL_MONITOR off eligible=" + eligible() + " enabled=" + callsEnabled());
             return;
         }
         try {
@@ -225,7 +299,7 @@ public final class PhoneCallMonitor implements AutoCloseable {
             while (iterator.hasNext()) {
                 var entry = iterator.next();
                 if (!ids.contains(entry.getKey())) {
-                    entry.getValue().manager.unregisterTelephonyCallback(entry.getValue());
+                    unregister(entry.getValue());
                     iterator.remove();
                 }
             }
@@ -263,10 +337,7 @@ public final class PhoneCallMonitor implements AutoCloseable {
     }
 
     private void stopListening() {
-        for (CallListener listener : listeners.values()) {
-            try { listener.manager.unregisterTelephonyCallback(listener); }
-            catch (RuntimeException ignored) { /* Permission revocation must still release our references. */ }
-        }
+        for (CallListener listener : listeners.values()) unregister(listener);
         listeners.clear();
         if (subscriptionListenerRegistered) {
             try { subscriptions.removeOnSubscriptionsChangedListener(subscriptionListener); }
@@ -295,13 +366,18 @@ public final class PhoneCallMonitor implements AutoCloseable {
         };
     }
 
+    private void unregister(CallListener listener) {
+        try { listener.manager.unregisterTelephonyCallback(listener); }
+        catch (RuntimeException ignored) { /* Permission revocation must still release our references. */ }
+    }
+
     private final class CallListener extends TelephonyCallback implements TelephonyCallback.CallStateListener {
         final int id;
         final TelephonyManager manager;
         CallListener(int id, TelephonyManager manager) { this.id = id; this.manager = manager; }
         @Override public void onCallStateChanged(int state) {
             if (closed || listeners.get(id) != this) return;
-            if (!eligible()) { refreshNow(false); return; }
+            if (!eligible() || !callsEnabled()) { refreshNow(false); return; }
             gate.onState(id, stateOf(state));
         }
     }

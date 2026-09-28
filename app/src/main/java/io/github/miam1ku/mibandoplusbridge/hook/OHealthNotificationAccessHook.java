@@ -22,7 +22,9 @@ public final class OHealthNotificationAccessHook {
     public static void install(ClassLoader loader) throws ClassNotFoundException {
         XC_MethodHook grant = new XC_MethodHook() {
             @Override protected void afterHookedMethod(MethodHookParam param) {
-                if (!Boolean.TRUE.equals(param.getResult())) param.setResult(true);
+                if (Boolean.TRUE.equals(param.getResult())) return;
+                Context context = contextArg(param);
+                if (context != null && granted(context)) param.setResult(true);
             }
         };
         Class<?> companion = Class.forName(COMPANION, false, loader);
@@ -30,8 +32,12 @@ public final class OHealthNotificationAccessHook {
         XposedBridge.hookAllMethods(Class.forName(UTIL, false, loader), "isNotificationListenerEnabled", grant);
         XC_MethodHook keep = new XC_MethodHook() {
             @Override protected void beforeHookedMethod(MethodHookParam param) {
-                Log.i("OplusBandBridge", "OHEALTH_NOTIFICATION_LISTENER_KEEP");
-                param.setResult(null);
+                Context context = contextArg(param);
+                boolean real = context != null && granted(context);
+                Log.i("OplusBandBridge", "OHEALTH_NOTIFICATION_LISTENER granted=" + real);
+                // A granted listener that the ROM reports as off gets disable/enable-looped.
+                // An actually missing listener must still be allowed to start.
+                if (real) param.setResult(null);
             }
         };
         XposedBridge.hookAllMethods(companion, "runNotificationService", keep);
@@ -42,7 +48,9 @@ public final class OHealthNotificationAccessHook {
                     @Override protected void afterHookedMethod(MethodHookParam param) {
                         if (Boolean.TRUE.equals(param.getResult())) return;
                         if (!(param.args[0] instanceof ComponentName name)) return;
-                        if (LISTENER.equals(name.getClassName())) param.setResult(true);
+                        if (!LISTENER.equals(name.getClassName())) return;
+                        Context context = contextArg(param);
+                        if (context != null && granted(context)) param.setResult(true);
                     }
                 });
         Class<?> item = Class.forName(

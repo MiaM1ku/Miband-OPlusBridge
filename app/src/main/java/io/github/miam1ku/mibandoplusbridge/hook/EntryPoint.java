@@ -82,12 +82,6 @@ public final class EntryPoint implements IXposedHookLoadPackage {
         if (context == null || !healthInstalled.compareAndSet(false, true)) return;
         android.util.Log.i("OplusBandBridge", "OHEALTH_HOOKS_BEGIN");
         try {
-            OHealthAccountHook.install(context, loader);
-            android.util.Log.i("OplusBandBridge", "OHEALTH_ACCOUNT_HOOK_INSTALLED");
-        } catch (Throwable incompatible) {
-            android.util.Log.i("OplusBandBridge", "OHEALTH_ACCOUNT_HOOK_UNAVAILABLE");
-        }
-        try {
             OHealthWeatherHook.install(context, loader);
             android.util.Log.i("OplusBandBridge", "OHEALTH_WEATHER_HOOK_INSTALLED");
         } catch (Throwable incompatible) {

@@ -40,14 +40,17 @@
 
 ## 发布
 
-打 tag 后 GitHub Actions 会构建并创建 Release：
+打 tag 后 GitHub Actions 会构建，并把同一个 `app-release.apk` 发到两个仓库：
 
 ```
-git tag 3-1.0.0
-git push origin 3-1.0.0
+git tag 24-1.2.1
+git push origin 24-1.2.1
 ```
 
-LSPosed 仓库 tag 格式：`{versionCode}-{versionName}`。
+- 源仓库：https://github.com/MiaM1ku/Miband-OPlusBridge
+- LSPosed 仓库：https://github.com/Xposed-Modules-Repo/io.github.miam1ku.mibandoplusbridge
+
+tag 格式：`{versionCode}-{versionName}`。`workflow_dispatch` 只更新源仓库，不镜像。
 
 仓库 Secrets：
 
@@ -55,6 +58,7 @@ LSPosed 仓库 tag 格式：`{versionCode}-{versionName}`。
 - `OPLUSBAND_STORE_PASSWORD`
 - `OPLUSBAND_KEY_ALIAS`
 - `OPLUSBAND_KEY_PASSWORD`
+- `XPOSED_REPO_PAT`：对 `Xposed-Modules-Repo/io.github.miam1ku.mibandoplusbridge` 有 Contents 写权限的 PAT。`GITHUB_TOKEN` 不能推另一个仓库。缺这个 secret 时，tag 发布会在源 Release 之后失败。
 
 ## 许可证
 

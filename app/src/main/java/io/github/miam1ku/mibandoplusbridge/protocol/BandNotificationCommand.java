@@ -16,6 +16,11 @@ public final class BandNotificationCommand {
     private static final DateTimeFormatter TIMESTAMP =
             DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss", Locale.ROOT);
     private BandNotificationCommand() {}
+    /** Field 8. Mi Fitness uses 1 for a ringing call and 3 for a call this phone placed. */
+    public static final int CALL_INCOMING = 1;
+    /** Answered call. The band keeps a hang-up screen instead of the incoming buttons. */
+    public static final int CALL_ACTIVE = 2;
+    public static final int CALL_OUTGOING = 3;
 
     public static XiaomiProto.Command post(String packageName, String appName, String key,
                                             int id, String title, String body,
@@ -54,16 +59,33 @@ public final class BandNotificationCommand {
 
     public static XiaomiProto.Command incomingCall(String displayName, String number,
                                                     Instant when, ZoneId zone, boolean repliesAllowed) {
+        return call(displayName, number, CALL_INCOMING, when, zone, repliesAllowed);
+    }
+
+    public static XiaomiProto.Command call(String displayName, String number, int callState,
+                                            Instant when, ZoneId zone, boolean repliesAllowed) {
         if (when == null || zone == null) throw new IllegalArgumentException("CALL_TIME_REQUIRED");
-        boolean reply = repliesAllowed && usableNumber(number);
-        var call = XiaomiProto.Notification3.newBuilder().setPackage("phone").setAppName("phone")
-                .setId(0).setUnknown4("").setIsCall(true).setRepliesAllowed(reply)
+        if (callState != CALL_INCOMING && callState != CALL_ACTIVE && callState != CALL_OUTGOING) {
+            throw new IllegalArgumentException("CALL_STATE");
+        }
+        boolean reply = callState == CALL_INCOMING && repliesAllowed && usableNumber(number);
+        String title = displayName != null && !displayName.isBlank() ? displayName : "?";
+        String body = reply ? number.trim() : switch (callState) {
+            case CALL_ACTIVE -> "通话中";
+            case CALL_OUTGOING -> "去电";
+            default -> "?";
+        };
+        var notification = XiaomiProto.Notification3.newBuilder().setPackage("phone").setAppName("phone")
+                .setId(0).setUnknown4("").setCallState(callState).setRepliesAllowed(reply)
                 .setTimestamp(TIMESTAMP.format(when.atZone(zone)))
-                .setTitle(displayName != null && !displayName.isBlank() ? displayName : "?")
-                .setBody(reply ? number.trim() : "?");
+                .setTitle(title).setBody(body);
         return XiaomiProto.Command.newBuilder().setType(7).setSubtype(0)
                 .setNotification(XiaomiProto.Notification.newBuilder().setNotification2(
-                        XiaomiProto.Notification2.newBuilder().setNotification3(call))).build();
+                        XiaomiProto.Notification2.newBuilder().setNotification3(notification))).build();
+    }
+
+    public static boolean isCall(XiaomiProto.Notification3 data) {
+        return data != null && data.getCallState() != 0;
     }
 
     public static boolean usableNumber(String number) {

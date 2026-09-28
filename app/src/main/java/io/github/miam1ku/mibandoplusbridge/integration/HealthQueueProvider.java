@@ -98,6 +98,13 @@ public final class HealthQueueProvider extends ContentProvider {
         requireUnlocked();
         if (method == null) throw new IllegalArgumentException("UNSUPPORTED_HEALTH_OPERATION");
         switch (method) {
+            case "adoptAccount": {
+                if (self || extras == null) throw new SecurityException("OHEALTH_CALLER_REQUIRED");
+                if (!"ACCOUNT_UNCONFIRMED".equals(store.accountState())) return status(store.accountState());
+                store.confirmAccountHash(HealthRecordStore.hashAccount(extras.getString("account")));
+                notifyRecordsChanged();
+                return status("HEALTH_ACCOUNT_CONFIRMED");
+            }
             case "proposeAccount": {
                 if (self || extras == null) throw new SecurityException("OHEALTH_CALLER_REQUIRED");
                 String account = extras.getString("account");
@@ -106,13 +113,6 @@ public final class HealthQueueProvider extends ContentProvider {
                 store.authorizedAccount(account); // Mismatch latches pause without moving old rows.
                 notifyRecordsChanged();
                 return status("ACCOUNT_PROPOSED");
-            }
-            case "accountSignedOut": {
-                if (self) throw new SecurityException("OHEALTH_CALLER_REQUIRED");
-                proposedFingerprint = null;
-                store.authorizedAccount(null);
-                notifyRecordsChanged();
-                return status("OHEALTH_ACCOUNT_CHANGED");
             }
             case "confirmProposedAccount": {
                 requireSelf(self);

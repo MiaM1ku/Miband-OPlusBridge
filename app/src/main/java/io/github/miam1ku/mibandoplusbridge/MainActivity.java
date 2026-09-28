@@ -71,7 +71,6 @@ public final class MainActivity extends AppCompatActivity {
     private TextView checklistImport;
     private TextView checklistProfile;
     private TextView checklistAdd;
-    private TextView checklistAccount;
     private TextView primaryHint;
     private Button homePrimary;
     private Button openKsu;
@@ -116,7 +115,6 @@ public final class MainActivity extends AppCompatActivity {
         checklistImport = screen.caption(setupCard, "");
         checklistProfile = screen.caption(setupCard, "");
         checklistAdd = screen.caption(setupCard, "");
-        checklistAccount = screen.caption(setupCard, "");
         primaryHint = screen.caption(setupCard, "");
         screen.caption(setupCard, SETUP_PREREQ);
         screen.setLastChildMargin(setupCard, 0);
@@ -136,7 +134,6 @@ public final class MainActivity extends AppCompatActivity {
                 io.github.miam1ku.mibandoplusbridge.integration.BandDetailsActivity.class)));
         screen.navRow(shortcuts, "协议测试", () -> startActivity(new Intent(this, LabActivity.class)));
         screen.navRow(shortcuts, "天气同步", () -> startActivity(new Intent(this, WeatherActivity.class)));
-        screen.navRow(shortcuts, "OHealth 账号", () -> startActivity(new Intent(this, HealthAccountActivity.class)));
         screen.navRow(shortcuts, "发送调试日志到 QQ", this::shareDebugLog);
         screen.setLastChildMargin(shortcuts, 0);
         screen.textButton("系统权限设置", () -> startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
@@ -153,7 +150,7 @@ public final class MainActivity extends AppCompatActivity {
         LinearLayout.LayoutParams advancedParams = new LinearLayout.LayoutParams(-1, -2);
         screen.body.addView(advanced, advancedParams);
         screen.heading(advanced, "绑定导入与诊断");
-        screen.caption(advanced, "导入和协议采集需先恢复官方管理，再在小米运动健康中操作。恢复不会删除设备登记或健康历史。");
+        screen.caption(advanced, "导入和协议采集前，先恢复官方管理，再在小米运动健康中操作。设备登记和健康历史会保留。");
         advancedRestore = screen.outlined(advanced, "恢复官方管理", () -> changeOwnership(Change.RESTORE));
         screen.caption(advanced, "选择已配对设备");
         bonded = new LinearLayout(this);
@@ -295,7 +292,7 @@ public final class MainActivity extends AppCompatActivity {
                 rootGranted = granted;
                 ownershipStatus.setText(granted
                         ? "KernelSU 已授权。"
-                        : "未获得 root。请打开 KernelSU 为本应用打开超级用户权限，返回后再点「检查 Root」。未授权前不会继续初始化。");
+                        : "未获得 root。打开 KernelSU，为本应用打开超级用户权限，返回后点「检查 Root」。");
                 updateControls();
                 refreshDevice();
                 if (granted) continueInit();
@@ -333,7 +330,7 @@ public final class MainActivity extends AppCompatActivity {
                     BandLiveService.start(this);
                 }
                 message = !registered
-                        ? (needsOfficialRestore() ? "尚未登记，官方应用仍处于暂停状态。可添加设备或恢复官方管理。" : "尚未添加设备；桥接不会自动连接。")
+                        ? (needsOfficialRestore() ? "尚未登记，官方应用仍处于暂停状态。可添加设备或恢复官方管理。" : "尚未添加设备。")
                         : "NATIVE".equals(owner.mode())
                                 ? "已由桥接管理。连接状态以设备实际响应为准。"
                                 : "当前由小米运动健康管理。可点击连接重新接管。";
@@ -386,7 +383,7 @@ public final class MainActivity extends AppCompatActivity {
                     }
                     BandLiveService.start(this);
                     BandLiveService.requestSync(this);
-                    message = "设备已登记。正在尝试连接；蓝牙关闭或手环不在附近时保持离线。";
+                    message = "设备已登记，正在连接。";
                 } else {
                     if (change == Change.REMOVE) {
                         repository.unregisterDevice();
@@ -401,7 +398,7 @@ public final class MainActivity extends AppCompatActivity {
                     owner.restoreOfficial();
                     message = change == Change.REMOVE
                             ? "已移除并恢复官方管理。绑定和健康历史已保留。"
-                            : "已恢复官方管理。桥接不会自动连接，绑定和历史已保留。";
+                            : "已恢复官方管理。绑定和健康历史已保留。";
                 }
             } catch (Exception failure) {
                 if (removalSaved || (change == Change.RESTORE && !repository.isRegistered())) {
@@ -448,8 +445,8 @@ public final class MainActivity extends AppCompatActivity {
         new MaterialAlertDialogBuilder(this)
                 .setTitle(change == Change.ADD ? "添加到健康并接管？" : "连接这只手环？")
                 .setMessage(change == Change.ADD
-                        ? "将暂停小米运动健康，由本应用接管手环。请先确认绑定已导入，表盘、OTA、NFC 已结束，并且 KernelSU 已授权。不会解绑或清除历史。手环不必在线。"
-                        : "请先结束小米运动健康的表盘、OTA 和 NFC 操作。接管需要 KernelSU 授权。不会解绑或清除历史。")
+                        ? "将暂停小米运动健康，由本应用接管手环。请先导入绑定，结束表盘、OTA 和 NFC，并完成 KernelSU 授权。绑定和健康历史会保留。"
+                        : "请先结束小米运动健康的表盘、OTA 和 NFC。接管需要 KernelSU 授权。绑定和健康历史会保留。")
                 .setNegativeButton("取消", null)
                 .setPositiveButton(change == Change.ADD ? "添加并接管" : "连接", (dialog, which) -> changeOwnership(change))
                 .show();
@@ -466,7 +463,7 @@ public final class MainActivity extends AppCompatActivity {
         pendingPermission = null;
         refreshDevice();
         if (hasBluetoothPermission() && requested != null) requestNative(requested);
-        else ownershipStatus.setText("需要附近设备权限才能添加或连接。可在权限设置中授权；已有登记不会删除。");
+        else ownershipStatus.setText("添加或连接需要附近设备权限。请在权限设置中授权。已有登记会保留。");
     }
 
     private void ensureCallPermissions() {
@@ -548,7 +545,6 @@ public final class MainActivity extends AppCompatActivity {
         bindChecklistRow(checklistImport, progress, SetupProgress.Step.IMPORT, "导入绑定");
         bindChecklistRow(checklistProfile, progress, SetupProgress.Step.PROFILE, "采集连接参数");
         bindChecklistRow(checklistAdd, progress, SetupProgress.Step.ADD, "添加到健康");
-        bindChecklistRow(checklistAccount, progress, SetupProgress.Step.ACCOUNT, "确认健康账号");
         String hint = progress.primaryHint();
         primaryHint.setText(hint);
         primaryHint.setVisibility(hint.isEmpty() ? View.GONE : View.VISIBLE);
@@ -579,7 +575,6 @@ public final class MainActivity extends AppCompatActivity {
             case IMPORT -> startBindingImport();
             case PROFILE -> startProfileCapture();
             case ADD -> requestNative(Change.ADD);
-            case ACCOUNT -> startActivity(new Intent(this, HealthAccountActivity.class));
             case DONE -> requestNative(Change.RECONNECT);
         }
     }
@@ -659,7 +654,7 @@ public final class MainActivity extends AppCompatActivity {
         }
         String collection = getSharedPreferences("live-service", MODE_PRIVATE).getString("healthCollectionStatus", "");
         String collectionText = switch (collection) {
-            case "ACCOUNT_CONFIRMATION_REQUIRED" -> "健康记录已保留，请关联 OHealth 账号。";
+            case "ACCOUNT_CONFIRMATION_REQUIRED" -> "健康记录写入当前 OHealth 账号，并由 OHealth 同步到云端。";
             case "HEALTH_OUTBOX_FULL" -> "等待健康处理，采集已暂停，记录未丢弃。";
             case "HISTORY_FORMAT_UNSUPPORTED" -> "部分健康文件暂不支持，原始记录已保留。";
             case "HISTORY_FILE_REJECTED" -> "健康文件未通过校验，将在下次同步重试。";
@@ -830,8 +825,7 @@ public final class MainActivity extends AppCompatActivity {
                 .setMessage("1. 打开 KernelSU，为本应用打开超级用户权限，返回后点「检查 Root」。\n"
                         + "2. 导入绑定：选择已配对手环，打开小米运动健康点开该设备。连接参数会同时记录。\n"
                         + "3. 若提示连接参数丢失：点「采集连接参数」，在小米运动健康里再连一次手环。\n"
-                        + "4. 添加到健康：暂停小米运动健康并由本应用接管。\n"
-                        + "5. 确认 OHealth 账号。\n\n"
+                        + "4. 添加到健康：暂停小米运动健康并由本应用接管。\n\n"
                         + SETUP_PREREQ)
                 .setPositiveButton("关闭", null)
                 .show();

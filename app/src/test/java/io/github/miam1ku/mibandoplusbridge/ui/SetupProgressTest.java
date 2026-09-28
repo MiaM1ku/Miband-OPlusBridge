@@ -48,11 +48,11 @@ public final class SetupProgressTest {
         assertEquals("添加到健康", progress.primaryLabel());
     }
 
-    @Test public void registeredWithoutAccountKeepsChecklist() {
+    @Test public void registeredWithoutAccountIsDone() {
         SetupProgress progress = new SetupProgress(true, true, true, true, true, false);
-        assertEquals(SetupProgress.Step.ACCOUNT, progress.current());
-        assertTrue(progress.showChecklist());
-        assertEquals("确认健康账号", progress.primaryLabel());
+        assertEquals(SetupProgress.Step.DONE, progress.current());
+        assertFalse(progress.showChecklist());
+        assertEquals("立即同步", progress.primaryLabel());
     }
 
     @Test public void confirmedAccountHidesChecklist() {

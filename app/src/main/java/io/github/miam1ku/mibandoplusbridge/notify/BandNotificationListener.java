@@ -17,6 +17,7 @@ import android.os.Looper;
 import android.service.notification.NotificationListenerService;
 import android.service.notification.StatusBarNotification;
 import android.telecom.TelecomManager;
+import io.github.miam1ku.mibandoplusbridge.data.SessionLog;
 import io.github.miam1ku.mibandoplusbridge.service.BandLiveService;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -33,6 +34,7 @@ public final class BandNotificationListener extends NotificationListenerService 
     private long appliedSession;
     private boolean appliedEnabled, appliedBody;
     private Set<String> appliedPackages = Set.of();
+    private String lastSkip = "";
     private final SharedPreferences.OnSharedPreferenceChangeListener settingsChanged = (prefs, key) -> {
         if (!"observedPackages".equals(key)) main.post(this::resetSession);
     };
@@ -56,6 +58,20 @@ public final class BandNotificationListener extends NotificationListenerService 
             if (flat.equals(item) || shortName.equals(item)) return true;
         }
         return false;
+    }
+
+    public static boolean listenerConnected() {
+        BandNotificationListener current = instance;
+        return current != null && current.listenerConnected;
+    }
+
+    /** The manifest disables the service so the system hides it until native mode. */
+    public static void ensureEnabled(Context context) {
+        PackageManager packages = context.getPackageManager();
+        ComponentName component = new ComponentName(context, BandNotificationListener.class);
+        if (packages.getComponentEnabledSetting(component) == PackageManager.COMPONENT_ENABLED_STATE_ENABLED) return;
+        packages.setComponentEnabledSetting(component, PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
+                PackageManager.DONT_KILL_APP);
     }
 
     public static void connectionChanged() {
@@ -127,7 +143,17 @@ public final class BandNotificationListener extends NotificationListenerService 
     @Override public void onNotificationPosted(StatusBarNotification item, RankingMap rankings) {
         if (!listenerConnected || item == null) return;
         observePackage(item.getPackageName()); // Package names only, even while disabled.
-        if (!notificationsAllowed()) { relay.disconnected(); BandLiveService.cancelNotifications(this); return; }
+        Notification posted = item.getNotification();
+        if (posted != null && Notification.CATEGORY_CALL.equals(posted.category)
+                && CallPresentation.connected(posted)) {
+            BandLiveService.noteCallAnswered();
+        }
+        if (!notificationsAllowed()) {
+            skip(sessionAllowed() ? "switch" : !accessGranted(this) ? "access" : "session", item.getPackageName());
+            relay.disconnected();
+            BandLiveService.cancelNotifications(this);
+            return;
+        }
         Notification n = item.getNotification();
         Ranking ranking = new Ranking();
         if (getPackageName().equals(item.getPackageName())
@@ -136,7 +162,9 @@ public final class BandNotificationListener extends NotificationListenerService 
                 || n.visibility == Notification.VISIBILITY_SECRET
                 || rankings == null || !rankings.getRanking(item.getKey(), ranking)
                 || ranking.getImportance() <= NotificationManager.IMPORTANCE_LOW) {
-            relay.removed(item.getKey()); return;
+            skip(skipReason(item, n, rankings, ranking), item.getPackageName());
+            relay.removed(item.getKey());
+            return;
         }
         boolean locked = locked(this);
         Notification visible = n;
@@ -148,14 +176,32 @@ public final class BandNotificationListener extends NotificationListenerService 
         String title = extra(visible, Notification.EXTRA_TITLE);
         String body = bodyAllowed ? extra(visible, Notification.EXTRA_BIG_TEXT) : "";
         if (bodyAllowed && body.isBlank()) body = extra(visible, Notification.EXTRA_TEXT);
-        String appName = item.getPackageName();
-        try { appName = NotificationRelay.sanitize(getPackageManager().getApplicationLabel(
-                getPackageManager().getApplicationInfo(item.getPackageName(), 0))); }
-        catch (PackageManager.NameNotFoundException unavailable) { /* Stable package remains the label. */ }
+        String appName = AppLabels.label(this, item.getPackageName());
         if (appName.isBlank()) appName = item.getPackageName();
+        SessionLog.line(this, "NOTIFY_POST pkg=" + item.getPackageName()
+                + " app=" + (appName.equals(item.getPackageName()) ? "package" : "label"));
         relay.posted(new NotificationRelay.Event(item.getPackageName(), appName, item.getKey(),
                 title, body, visible != n ? title : null, visible != n ? body : null,
                 item.getPostTime(), n.visibility, locked, false, false, ranking.getImportance()));
+    }
+
+    private String skipReason(StatusBarNotification item, Notification notification, RankingMap rankings, Ranking ranking) {
+        if (getPackageName().equals(item.getPackageName())) return "self";
+        if (!settings.getStringSet("packages", Set.of()).contains(item.getPackageName())) return "package";
+        if (notification == null) return "empty";
+        if ((notification.flags & Notification.FLAG_GROUP_SUMMARY) != 0) return "summary";
+        if ((notification.flags & Notification.FLAG_FOREGROUND_SERVICE) != 0) return "foreground";
+        if (notification.visibility == Notification.VISIBILITY_SECRET) return "secret";
+        if (rankings == null || !rankings.getRanking(item.getKey(), ranking)) return "ranking";
+        if (ranking.getImportance() <= NotificationManager.IMPORTANCE_LOW) return "importance";
+        return "filtered";
+    }
+
+    private void skip(String reason, String pkg) {
+        String line = reason + "|" + pkg;
+        if (line.equals(lastSkip)) return;
+        lastSkip = line;
+        SessionLog.line(this, "NOTIFY_SKIP reason=" + reason + " pkg=" + (pkg == null || pkg.isBlank() ? "none" : pkg));
     }
 
     @Override public void onNotificationRemoved(StatusBarNotification item, RankingMap rankings, int reason) {

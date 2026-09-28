@@ -204,6 +204,33 @@ public final class BandLiveService extends Service {
                 + " restored=" + owner.getBoolean("officialRestored", false);
     }
 
+    public static boolean callsOwned() {
+        BandLiveService live = instance;
+        return live != null && live.calls != null && live.calls.ownsCalls();
+    }
+
+    public static void noteCallAnswered() {
+        BandLiveService live = instance;
+        if (live != null && live.calls != null) live.calls.noteAnswered();
+    }
+
+    private void logFeatures() {
+        var settings = getSharedPreferences("notification-settings", MODE_PRIVATE);
+        boolean access = io.github.miam1ku.mibandoplusbridge.notify.BandNotificationListener.accessGranted(this);
+        boolean up = io.github.miam1ku.mibandoplusbridge.notify.BandNotificationListener.listenerConnected();
+        String enabled = android.provider.Settings.Secure.getString(getContentResolver(), "enabled_notification_listeners");
+        boolean health = enabled != null && enabled.contains(
+                "com.heytap.health/com.heytap.health.watch.commonnotification.HeytapNotificationListenerService");
+        io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this, "features local="
+                + (up ? "up" : access ? "granted" : "absent")
+                + " healthListener=" + health
+                + " notify=" + settings.getBoolean("enabled", false)
+                + " packages=" + settings.getStringSet("packages", java.util.Set.of()).size()
+                + " calls=" + settings.getBoolean("callsEnabled", false)
+                + " callOwner=" + (calls != null && calls.ownsCalls())
+                + " music=" + io.github.miam1ku.mibandoplusbridge.notify.PhoneMusic.attached());
+    }
+
 
     public static long notificationSessionId() {
         BandLiveService live = instance;
@@ -234,11 +261,14 @@ public final class BandLiveService extends Service {
         var queue = live == null ? null : live.commands;
         if (queue == null || !notificationSessionReady(context) || command == null || command.getType() != 7
                 || (command.getSubtype() != 0 && command.getSubtype() != 1) || !command.hasNotification()) {
+            io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(context, "NOTIFY_DROP reason="
+                    + (queue == null ? "service" : !notificationSessionReady(context) ? sessionReason(context) : "command"));
             return java.util.concurrent.CompletableFuture.failedFuture(new IllegalStateException("NOTIFICATION_SESSION_UNAVAILABLE"));
         }
         var notification = command.getNotification();
         boolean call = command.getSubtype() == 0 && notification.hasNotification2()
-                && notification.getNotification2().getNotification3().getIsCall();
+                && io.github.miam1ku.mibandoplusbridge.protocol.BandNotificationCommand.isCall(
+                        notification.getNotification2().getNotification3());
         boolean clearCall = command.getSubtype() == 1 && notification.hasNotificationDismiss()
                 && notification.getNotificationDismiss().getNotificationIdCount() == 1
                 && "phone".equals(notification.getNotificationDismiss().getNotificationId(0).getPackage())
@@ -247,25 +277,31 @@ public final class BandLiveService extends Service {
         if (call && (!settings.getBoolean("callsEnabled", false)
                 || context.checkSelfPermission(android.Manifest.permission.READ_PHONE_STATE)
                         != android.content.pm.PackageManager.PERMISSION_GRANTED)) {
+            io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(context, "NOTIFY_DROP reason=call-permission");
             return java.util.concurrent.CompletableFuture.failedFuture(new IllegalStateException("CALL_PERMISSION_REQUIRED"));
         }
         if (!call && !clearCall) {
             var manager = context.getSystemService(NotificationManager.class);
             if (!settings.getBoolean("enabled", false) || !manager.isNotificationListenerAccessGranted(
                     new android.content.ComponentName(context, io.github.miam1ku.mibandoplusbridge.notify.BandNotificationListener.class))) {
+                io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(context, "NOTIFY_DROP reason=access");
                 return java.util.concurrent.CompletableFuture.failedFuture(new IllegalStateException("NOTIFICATION_ACCESS_REQUIRED"));
             }
         }
         if (ordinaryPost(command) && io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.blocksNotifications(
                 io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.currentFilter(context))) {
             android.util.Log.i("OplusBandBridge", "NOTIFY_SUPPRESSED_DND");
+            io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(context, "NOTIFY_SUPPRESSED_DND");
             return java.util.concurrent.CompletableFuture.completedFuture(null);
         }
         try {
             var fitted = io.github.miam1ku.mibandoplusbridge.protocol.BandNotificationCommand.fitToPayload(command,
                     notificationPayloadLimit());
+            io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(context, "NOTIFY_OUT type=" + fitted.getType()
+                    + " subtype=" + fitted.getSubtype() + " bytes=" + fitted.getSerializedSize());
             return queue.send(fitted);
         } catch (IllegalArgumentException tooLarge) {
+            io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(context, "NOTIFY_DROP reason=too-large");
             return java.util.concurrent.CompletableFuture.failedFuture(new IllegalStateException("NOTIFICATION_IDENTITY_TOO_LARGE"));
         }
     }
@@ -309,7 +345,8 @@ public final class BandLiveService extends Service {
     private static boolean ordinaryPost(nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto.Command command) {
         if (command.getSubtype() != 0 || !command.hasNotification()
                 || !command.getNotification().hasNotification2()) return false;
-        return !command.getNotification().getNotification2().getNotification3().getIsCall();
+        return !io.github.miam1ku.mibandoplusbridge.protocol.BandNotificationCommand.isCall(
+                command.getNotification().getNotification2().getNotification3());
     }
 
     public static void cancelNotifications(Context context) {
@@ -341,6 +378,7 @@ public final class BandLiveService extends Service {
             } catch (java.util.concurrent.RejectedExecutionException stopping) { }
         });
         calls = new io.github.miam1ku.mibandoplusbridge.notify.PhoneCallMonitor(this, coordinator);
+        io.github.miam1ku.mibandoplusbridge.notify.BandNotificationListener.ensureEnabled(this);
         instance = this;
         coordinator.scheduleAtFixedRate(this::tick, 1, 1, TimeUnit.MINUTES);
         try {
@@ -371,7 +409,7 @@ public final class BandLiveService extends Service {
         if (intent != null && ACTION_SYNC.equals(intent.getAction())) syncRequested = true;
         if (running.compareAndSet(false, true)) {
             stopped = new java.util.concurrent.CountDownLatch(1);
-            show("正在连接手环", "鉴权成功前不会显示已连接");
+            show("正在连接手环", "等待手环响应");
             worker.execute(this::supervise);
         }
         return START_STICKY;
@@ -445,6 +483,7 @@ public final class BandLiveService extends Service {
                         }
                         commands = queue;
                         calls.connected();
+                        logFeatures();
                         io.github.miam1ku.mibandoplusbridge.notify.BandNotificationListener.connectionChanged();
                         io.github.miam1ku.mibandoplusbridge.notify.NativeMusic.requestRefresh(this);
                         historySync = new LiveHistorySync(queue, coordinator, () -> {
@@ -465,6 +504,10 @@ public final class BandLiveService extends Service {
                     }), fileId -> coordinator.execute(() -> {
                         if (client == active && !stopRequested && historySync != null) historySync.saved(fileId);
                     }), command -> {
+                        if (command.getType() == 7 || command.getType() == 18) {
+                            io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(BandLiveService.this,
+                                    "rx type=" + command.getType() + " subtype=" + command.getSubtype());
+                        }
                         if (command.getType() == 7) {
                             android.util.Log.i("OplusBandBridge", "NOTIFY_IN subtype=" + command.getSubtype()
                                     + " status=" + command.getStatus());

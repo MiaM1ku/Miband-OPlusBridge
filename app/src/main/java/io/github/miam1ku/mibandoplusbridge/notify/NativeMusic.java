@@ -51,9 +51,13 @@ public final class NativeMusic {
 
                 @Override public void onServiceDisconnected(ComponentName name) { }
             }, Context.BIND_AUTO_CREATE);
-            if (!bound) Log.i("OplusBandBridge", "MUSIC native unavailable");
+            if (!bound) {
+                Log.i("OplusBandBridge", "MUSIC native unavailable");
+                io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(context, "MUSIC_NATIVE unavailable");
+            }
         } catch (RuntimeException unavailable) {
             Log.i("OplusBandBridge", "MUSIC native unavailable");
+            io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(context, "MUSIC_NATIVE unavailable");
         }
     }
 }
