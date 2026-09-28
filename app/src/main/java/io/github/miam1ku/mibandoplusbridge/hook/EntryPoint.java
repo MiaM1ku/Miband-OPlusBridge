@@ -39,6 +39,7 @@ public final class EntryPoint implements IXposedHookLoadPackage {
             android.util.Log.i("OplusBandBridge", "OHEALTH_PACKAGE_LOADED process=" + load.processName);
             de.robv.android.xposed.XposedBridge.log("OplusBandBridge OHEALTH_PACKAGE_LOADED process="
                     + load.processName);
+            OHealthLoginDebug.install(load.classLoader);
             XposedHelpers.findAndHookMethod("com.heytap.health.SportHealthApplication", load.classLoader,
                     "onCreate", new XC_MethodHook() {
                         @Override protected void afterHookedMethod(MethodHookParam param) {

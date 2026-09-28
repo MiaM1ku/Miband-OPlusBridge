@@ -58,6 +58,7 @@ public final class BandDetailsActivity extends AppCompatActivity {
     @Override public void onCreate(Bundle state) {
         if (!panelRequest(getIntent())) setTheme(io.github.miam1ku.mibandoplusbridge.R.style.Theme_OplusBand);
         super.onCreate(state);
+        if (openNativePanelIfRequested()) return;
         String requestedId = getIntent().getStringExtra("device_id");
         if (requestedId != null && !requestedId.equals(
                 io.github.miam1ku.mibandoplusbridge.data.LocalPrefs.open(this, "band-state").getString("deviceId", ""))) {
@@ -244,42 +245,14 @@ public final class BandDetailsActivity extends AppCompatActivity {
     }
 
     private static boolean panelRequest(Intent incoming) {
-        if (incoming == null) return false;
-        String action = incoming.getAction();
-        return "com.oplus.mydevices.ACTION_DEVICE_DETAILED_PANEL".equals(action)
-                || "com.oplus.mydevices.ACTION_DEVICE_DETAILED_PAGE".equals(action);
+        return incoming != null && NativePanel.panelAction(incoming.getAction());
     }
 
     private boolean openNativePanelIfRequested() {
         Intent incoming = getIntent();
         if (!panelRequest(incoming)) return false;
-        String action = incoming.getAction();
-        if (!"com.oplus.mydevices.ACTION_DEVICE_DETAILED_PANEL".equals(action)
-                && !"com.oplus.mydevices.ACTION_DEVICE_DETAILED_PAGE".equals(action)) {
-            return false;
-        }
-        String deviceId = incoming.getStringExtra("device_id");
-        if (deviceId == null) deviceId = incoming.getStringExtra("key_device_id");
-        if (deviceId == null || !deviceId.matches("miband11_[0-9a-f]{64}")) return false;
-        String mac = "";
-        String name = "";
-        try (Cursor cursor = getContentResolver().query(DeviceCardProvider.URI,
-                new String[]{"device_mac", "device_data"}, "device_id=?", new String[]{deviceId}, null)) {
-            if (cursor == null || !cursor.moveToFirst()) return false;
-            mac = cursor.getString(cursor.getColumnIndexOrThrow("device_mac"));
-            name = new JSONObject(cursor.getString(cursor.getColumnIndexOrThrow("device_data")))
-                    .optString("mDeviceName", "");
-        } catch (Exception ignored) {
-            return false;
-        }
-        if (mac == null || mac.isBlank()) return false;
-        Intent panel = new Intent("com.oplus.mydevices.ACTION_DEVICE_DETAILED_PANEL");
-        panel.setClassName(OHEALTH, "com.heytap.health.linkage.ui.DeviceDetailsPanelActivity");
-        panel.putExtra("device_id", deviceId);
-        panel.putExtra("device_title", name);
-        panel.putExtra("model_id", "OB19B1");
-        panel.putExtra("device_mac_info", mac);
-        panel.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        Intent panel = new Intent(incoming);
+        if (!NativePanel.redirect(this, panel)) return false;
         try {
             startActivity(panel);
         } catch (ActivityNotFoundException | SecurityException unavailable) {

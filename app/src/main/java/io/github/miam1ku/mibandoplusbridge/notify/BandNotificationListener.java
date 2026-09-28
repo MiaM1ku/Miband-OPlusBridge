@@ -278,6 +278,7 @@ public final class BandNotificationListener extends NotificationListenerService 
         return notification.extras == null ? "" : NotificationRelay.sanitize(notification.extras.getCharSequence(key));
     }
 
+
     private static boolean locked(Context context) {
         KeyguardManager keyguard = context.getSystemService(KeyguardManager.class);
         return keyguard == null || keyguard.isDeviceLocked();

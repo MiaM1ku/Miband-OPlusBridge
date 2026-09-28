@@ -167,4 +167,5 @@ public final class NotificationRelayTest {
         assertEquals("key0", h.commands.get(NotificationRelay.CAPACITY).getNotification()
                 .getNotificationDismiss().getNotificationId(0).getKey());
     }
+
 }

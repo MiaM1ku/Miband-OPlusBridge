@@ -3,12 +3,10 @@ package io.github.miam1ku.mibandoplusbridge.hook;
 
 import android.app.Application;
 import android.app.Instrumentation;
-import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.database.ContentObserver;
 import android.database.Cursor;
-import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.util.Log;
@@ -16,6 +14,7 @@ import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import io.github.miam1ku.mibandoplusbridge.integration.DeviceCardProvider;
+import io.github.miam1ku.mibandoplusbridge.integration.NativePanel;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.ArrayList;
@@ -36,12 +35,8 @@ import org.json.JSONObject;
 public final class MyDevicesHook {
     private static final String TAG = "OplusBandBridge";
     private static final String PACKAGE = "io.github.miam1ku.mibandoplusbridge";
-    private static final String HEALTH = "com.heytap.health";
-    private static final String NATIVE_PANEL = "com.heytap.health.linkage.ui.DeviceDetailsPanelActivity";
-    private static final String OPPO_BAND_MODEL = "OB19B1";
     private static final String MANAGER = "com.heytap.mydevices.core.config.DeviceAppConfigManager";
     private static final String APP_AGENT = "com.heytap.mydevices.core.agent.AppAgentManager";
-    private static final ThreadLocal<Boolean> OPENING_PANEL = new ThreadLocal<>();
     private static volatile ObserverSession active;
 
     private MyDevicesHook() {}
@@ -52,7 +47,9 @@ public final class MyDevicesHook {
                 || !(process.equals("com.heytap.mydevices") || process.startsWith("com.heytap.mydevices:"))) {
             return;
         }
-        hookDetailJump(context, hostLoader);
+        hookDetailJump(context);
+        hookIconPackage(hostLoader);
+        hookPlaceholderIcon(context, hostLoader);
         if (!"com.heytap.mydevices".equals(process)) return;
         Class<?> deviceApp = Class.forName("com.oplus.mydevices.domain.entities.config.DeviceApp", false, hostLoader);
         Class<?> deletion = Class.forName("com.oplus.mydevices.domain.entities.config.DelDeviceMethod", false, hostLoader);
@@ -216,151 +213,147 @@ public final class MyDevicesHook {
 
 
     /**
-     * 点卡片打开 OHealth 原生手环详情面板。只拦设备号以 {@code miband11_} 开头的跳转。
+     * 控制中心的点击最终都是一次 {@code startActivity}。只认详情动作和手环设备号，
+     * 把意图改到健康里注册了该动作的面板，不挂钩某一版的混淆类。
      */
-    private static void hookDetailJump(Context context, ClassLoader loader) {
-        String[] types = {
-                "com.oplus.mydevices.opsynergy.OpDeviceSdkProxy",
-                "com.heytap.mydevices.plugin.linker.core.OPSynergyScannerImpl",
-                "com.heytap.mydevices.plugin.linker.core.CoreOpDeviceAction",
-                "com.oplus.mydevices.quickapp.action.QuickAppCardAction",
-                "com.oplus.mydevices.quickapp.provider.DeviceQuickAppCardWidgetProvider"
-        };
-        XC_MethodHook open = new XC_MethodHook() {
+    private static void hookDetailJump(Context context) {
+        XposedBridge.hookAllMethods(Instrumentation.class, "execStartActivity", new XC_MethodHook() {
             @Override protected void beforeHookedMethod(MethodHookParam param) {
-                String deviceId = bandDeviceId(param.args);
-                if (deviceId == null) return;
-                if (!(param.method instanceof Method method)) return;
-                Class<?> ret = method.getReturnType();
-                String methodName = method.getName();
-                boolean cardAction = method.getDeclaringClass().getName().endsWith("QuickAppCardAction");
-                boolean jump = methodName.contains("Detail") || methodName.contains("detail")
-                        || methodName.contains("Jump") || methodName.contains("jump")
-                        || "A".equals(methodName) || "x".equals(methodName);
-                if (cardAction && !jump) return;
-                if (!stealJump(ret) && !jump) return;
-                if (!openNativePanel(context, deviceId)) return;
-                if (ret == boolean.class || ret == Boolean.class) param.setResult(Boolean.TRUE);
-                else if (Bundle.class.isAssignableFrom(ret)) param.setResult(new Bundle());
-                else param.setResult(null);
-            }
-        };
-        for (String name : types) {
-            Class<?> type;
-            try {
-                type = Class.forName(name, false, loader);
-            } catch (ClassNotFoundException missing) {
-                continue;
-            }
-            boolean cardAction = name.endsWith("QuickAppCardAction");
-            for (Method method : type.getDeclaredMethods()) {
-                if (Modifier.isStatic(method.getModifiers())) continue;
-                Class<?>[] params = method.getParameterTypes();
-                if (params.length == 0) continue;
-                boolean hasString = false;
-                for (Class<?> paramType : params) {
-                    if (paramType == String.class) { hasString = true; break; }
-                }
-                if (!hasString) continue;
-                String methodName = method.getName();
-                boolean named = methodName.contains("Detail") || methodName.contains("detail")
-                        || methodName.contains("Jump") || methodName.contains("jump");
-                if (!named && !cardAction) continue;
-                XposedBridge.hookMethod(method, open);
-                if (cardAction) {
-                    Log.i(TAG, "DETAIL_HOOKED " + method.getName()
-                            + " args=" + params.length + " ret=" + method.getReturnType().getSimpleName());
-                }
-            }
-        }
-        XC_MethodHook rewrite = new XC_MethodHook() {
-            @Override protected void beforeHookedMethod(MethodHookParam param) {
-                if (Boolean.TRUE.equals(OPENING_PANEL.get())) return;
-                Intent intent = null;
+                if (param.args == null) return;
                 for (Object arg : param.args) {
-                    if (arg instanceof Intent found) {
-                        intent = found;
-                        break;
+                    if (!(arg instanceof Intent intent)) continue;
+                    if (NativePanel.redirect(context, intent)) Log.i(TAG, "DETAIL_JUMP_NATIVE");
+                    return;
+                }
+            }
+        });
+    }
+
+    /**
+     * 设备中心按「提供这台设备的包名」找图标插件。桥接包没有插件，就落到默认手机图。
+     * 控制中心不走这条，直接按设备类型用自带的手表图。
+     * 查到的是这只手环时，改用健康的包名，这样用到的是健康已经登记的那套图。
+     */
+    private static void hookIconPackage(ClassLoader loader) {
+        Class<?> type;
+        try {
+            type = Class.forName("com.oplus.mydevices.domain.entities.device.DeviceInfoKt", false, loader);
+        } catch (ClassNotFoundException missing) {
+            Log.i(TAG, "ICON_PACKAGE_HOOK_UNAVAILABLE");
+            return;
+        }
+        Method found = null;
+        for (Method method : type.getDeclaredMethods()) {
+            if (!Modifier.isStatic(method.getModifiers()) || method.getReturnType() != String.class) continue;
+            Class<?>[] params = method.getParameterTypes();
+            if (params.length != 1 || params[0].isPrimitive()) continue;
+            String name = method.getName();
+            if (!name.contains("Plugin") && !name.contains("plugin") && !name.contains("Package")) continue;
+            found = method;
+            if ("getPluginLookupPackage".equals(name)) break;
+        }
+        if (found == null) {
+            Log.i(TAG, "ICON_PACKAGE_HOOK_UNAVAILABLE");
+            return;
+        }
+        XposedBridge.hookMethod(found, new XC_MethodHook() {
+            @Override protected void afterHookedMethod(MethodHookParam param) {
+                if (param.hasThrowable() || param.args.length == 0 || !ourBand(param.args[0])) return;
+                param.setResult(NativePanel.HEALTH);
+            }
+        });
+        Log.i(TAG, "ICON_PACKAGE_HOOK " + found.getName());
+    }
+
+    private static boolean ourBand(Object device) {
+        if (device == null) return false;
+        for (String name : new String[]{"getDeviceAppPackage", "getPackageName"}) {
+            try {
+                if (PACKAGE.equals(String.valueOf(XposedHelpers.callMethod(device, name)))) return true;
+            } catch (Throwable ignored) { }
+        }
+        for (String name : new String[]{"getMyDeviceId", "getDeviceId", "getId"}) {
+            try {
+                String id = String.valueOf(XposedHelpers.callMethod(device, name));
+                if (id.startsWith("miband11_")) return true;
+            } catch (Throwable ignored) { }
+        }
+        return false;
+    }
+
+    /**
+     * 设备中心的占位图方法签名是 {@code (String, DeviceType, Integer) -> int}，类名会随版本变。
+     * 插件没登记时它返回 {@code icon_default_device}。这只手环改成设备空间自带的手表图。
+     */
+    private static void hookPlaceholderIcon(Context context, ClassLoader loader) {
+        Class<?> deviceType;
+        try {
+            deviceType = Class.forName("com.oplus.mydevices.domain.entities.device.DeviceType", false, loader);
+        } catch (ClassNotFoundException missing) {
+            Log.i(TAG, "ICON_PLACEHOLDER_HOOK_UNAVAILABLE");
+            return;
+        }
+        int watch = context.getResources().getIdentifier("default_watch", "drawable", "com.heytap.mydevices");
+        if (watch == 0) {
+            Log.i(TAG, "ICON_PLACEHOLDER_HOOK_UNAVAILABLE");
+            return;
+        }
+        int hooked = 0;
+        android.content.pm.ApplicationInfo info = context.getApplicationInfo();
+        java.util.List<String> apks = new java.util.ArrayList<>();
+        if (info.sourceDir != null) apks.add(info.sourceDir);
+        if (info.splitSourceDirs != null) {
+            for (String split : info.splitSourceDirs) apks.add(split);
+        }
+        for (String apk : apks) {
+            dalvik.system.DexFile dex = null;
+            try {
+                dex = new dalvik.system.DexFile(apk);
+                for (java.util.Enumeration<String> entries = dex.entries(); entries.hasMoreElements();) {
+                    String name = entries.nextElement();
+                    if (!name.startsWith("aa.") || name.indexOf('$') >= 0 || name.length() > 6) continue;
+                    Class<?> type;
+                    try {
+                        type = Class.forName(name, false, loader);
+                    } catch (Throwable ignored) {
+                        continue;
+                    }
+                    for (Method method : type.getDeclaredMethods()) {
+                        if (method.getReturnType() != int.class) continue;
+                        Class<?>[] params = method.getParameterTypes();
+                        if (params.length != 3 || params[0] != String.class || params[1] != deviceType
+                                || params[2] != Integer.class) continue;
+                        XposedBridge.hookMethod(method, new XC_MethodHook() {
+                            @Override protected void beforeHookedMethod(MethodHookParam param) {
+                                if (!wearableLookup(param.args)) return;
+                                param.setResult(watch);
+                            }
+                        });
+                        hooked++;
                     }
                 }
-                if (intent == null) return;
-                ComponentName cmp = intent.getComponent();
-                if (cmp != null) {
-                    String cls = cmp.getClassName();
-                    if (cls.endsWith(".BandDetailsActivity") || cls.endsWith(".DeviceDetailsPanelActivity")) return;
-                }
-                String pkg = intent.getPackage();
-                if (pkg == null && cmp != null) pkg = cmp.getPackageName();
-                if (!PACKAGE.equals(pkg)) return;
-                String action = intent.getAction();
-                if (!"com.oplus.mydevices.ACTION_DEVICE_DETAILED_PANEL".equals(action)
-                        && !"com.oplus.mydevices.ACTION_DEVICE_DETAILED_PAGE".equals(action)) return;
-                String deviceId = intent.getStringExtra("device_id");
-                if (deviceId == null) deviceId = intent.getStringExtra("key_device_id");
-                if (!openNativePanel(context, deviceId)) return;
-                param.setResult(null);
-            }
-        };
-        XposedBridge.hookAllMethods(Instrumentation.class, "execStartActivity", rewrite);
-    }
-
-    private static boolean stealJump(Class<?> ret) {
-        if (ret == null || ret == void.class || ret == Void.class) return true;
-        if (ret == boolean.class || ret == Boolean.class) return true;
-        if (Bundle.class.isAssignableFrom(ret)) return true;
-        if (ret == Object.class) return true;
-        return "kotlin.Unit".equals(ret.getName());
-    }
-
-    private static String bandDeviceId(Object[] args) {
-        if (args == null) return null;
-        for (Object arg : args) {
-            if (arg instanceof String id && id.matches("miband11_[0-9a-f]{64}")) return id;
-        }
-        return null;
-    }
-    private static boolean openNativePanel(Context context, String deviceId) {
-        if (deviceId == null || !deviceId.matches("miband11_[0-9a-f]{64}")) return false;
-        return openBridgeDetails(context, deviceId);
-    }
-
-
-    private static boolean openBridgeDetails(Context context, String deviceId) {
-        if (Boolean.TRUE.equals(OPENING_PANEL.get())) return false;
-        String mac = "";
-        String name = "";
-        try (Cursor cursor = context.getContentResolver().query(DeviceCardProvider.URI,
-                new String[]{"device_mac", "device_data"}, "device_id=?", new String[]{deviceId}, null)) {
-            if (cursor != null && cursor.moveToFirst()) {
-                mac = cursor.getString(cursor.getColumnIndexOrThrow("device_mac"));
-                name = new JSONObject(cursor.getString(cursor.getColumnIndexOrThrow("device_data")))
-                        .optString("mDeviceName", "");
-            }
-        } catch (RuntimeException | org.json.JSONException ignored) {
-            mac = "";
-        }
-        if (mac == null || mac.isBlank()) return false;
-        try {
-            Intent intent = new Intent("com.oplus.mydevices.ACTION_DEVICE_DETAILED_PANEL");
-            intent.setClassName(HEALTH, NATIVE_PANEL);
-            intent.putExtra("device_id", deviceId);
-            intent.putExtra("device_title", name);
-            intent.putExtra("model_id", OPPO_BAND_MODEL);
-            intent.putExtra("device_mac_info", mac);
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-            OPENING_PANEL.set(Boolean.TRUE);
-            try {
-                context.getApplicationContext().startActivity(intent);
+            } catch (Throwable ignored) {
             } finally {
-                OPENING_PANEL.remove();
+                if (dex != null) {
+                    try { dex.close(); } catch (Throwable ignored) { }
+                }
             }
-            Log.i(TAG, "DETAIL_JUMP_NATIVE");
-            return true;
-        } catch (RuntimeException failure) {
-            Log.i(TAG, "DETAIL_JUMP_NATIVE_UNAVAILABLE " + failure.getClass().getSimpleName());
+        }
+        Log.i(TAG, hooked == 0 ? "ICON_PLACEHOLDER_HOOK_UNAVAILABLE" : "ICON_PLACEHOLDER_HOOK " + hooked);
+    }
+
+    private static boolean wearableLookup(Object[] args) {
+        if (args == null || args.length < 2 || args[1] == null) return false;
+        String pkg = args[0] instanceof String text ? text : "";
+        if (!PACKAGE.equals(pkg) && !NativePanel.HEALTH.equals(pkg)) return false;
+        try {
+            String typeName = String.valueOf(XposedHelpers.callMethod(args[1], "getTypeName"));
+            return "watch".equals(typeName) || "wristband".equals(typeName);
+        } catch (Throwable ignored) {
             return false;
         }
     }
+
 
     private static synchronized void register(Context context, Object observer,
                                                Method removed, Method added, Method updated) {

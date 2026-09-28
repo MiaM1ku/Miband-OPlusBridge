@@ -148,8 +148,12 @@ public final class DeviceCardProvider extends ContentProvider {
                 .put("mDeviceName", BandCatalog.displayName(
                         state.getString("modelId", ""), state.getString("name", "")))
                 .put("mMacAddress", mac)
-                .put("modelId", "OB19B1")
-                .put("mDeviceType", "WRISTBAND")
+                .put("modelId", NativePanel.BAND_MODEL)
+                // 设备中心图片地址为空时用 icon_default_device，看起来像手机。
+                // 控制中心不读这张图，只按类型画自带的手环标。
+                .put("mDeviceType", "WATCH")
+                .put("iconUrl", "android.resource://com.heytap.mydevices/drawable/default_watch")
+                .put("mIconUrl", "android.resource://com.heytap.mydevices/drawable/default_watch")
                 .put("mBatteryInfoList", batteries)
                 .put("mBatteryList", levels)
                 .put("connection", connection)
@@ -157,8 +161,6 @@ public final class DeviceCardProvider extends ContentProvider {
                 .put("mAuthority", AUTHORITY)
                 .put("isActive", connected)
                 .put("cardStyle", 1)
-                .put("mIconUrl", "OB19B1")
-                .put("iconUrl", "OB19B1")
                 .put("timestamp", state.getLong("lastUpdateMs", 0))
                 .put("versionCode", 1L)
                 .put("feature", 0)
