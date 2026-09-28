@@ -148,6 +148,11 @@ public final class OHealthHealthImportHook {
         scheduled.set(false);
         boolean retrySoon = false;
         try {
+            ensureAccount();
+            if (!usableAccount(host.account())) {
+                scheduleRetry(5_000);
+                return;
+            }
             if (sleep != null) {
                 try {
                     sleep.write(context);
@@ -166,6 +171,30 @@ public final class OHealthHealthImportHook {
             scheduleRetry(transientImport(failure) ? 2_000 : FAILURE_COOLDOWN_MS);
             logImportFailure(failure);
             if (failure instanceof InterruptedException) Thread.currentThread().interrupt();
+        }
+    }
+
+    /** The app can already be signed in without calling getSsoId. Read it once per import pass. */
+    private void ensureAccount() {
+        if (usableAccount(host.account())) return;
+        try {
+            Object value = host.accountGetter.invoke(host.companion);
+            String account = value instanceof String ? (String) value : null;
+            if (!usableAccount(account)) {
+                if (!"OHEALTH_ACCOUNT_UNAVAILABLE".equals(lastFailure)) {
+                    Log.i("OplusBandBridge", "OHEALTH_ACCOUNT_UNAVAILABLE");
+                    lastFailure = "OHEALTH_ACCOUNT_UNAVAILABLE";
+                }
+                return;
+            }
+            if (!usableAccount(host.account())) {
+                String previous = observedAccount.getAndSet(account);
+                host.publishedAccount = account;
+                if (!Objects.equals(previous, account)) accountEpoch.incrementAndGet();
+            }
+            Log.i("OplusBandBridge", "OHEALTH_ACCOUNT_OBSERVED");
+        } catch (Throwable failure) {
+            Log.i("OplusBandBridge", "OHEALTH_ACCOUNT_READ_FAILED " + failure.getClass().getSimpleName());
         }
     }
 
@@ -355,7 +384,7 @@ public final class OHealthHealthImportHook {
                 && !"com.heytap.health".equals(account);
     }
 
-    /** Bind the account OHealth already returned. Do not switch or pause an existing binding. */
+    /** Bind whatever real account OHealth already returned, including after a switch or a pause. */
     private void adoptAccount(String account) {
         try {
             Bundle data = new Bundle();

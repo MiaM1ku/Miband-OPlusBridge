@@ -100,8 +100,12 @@ public final class HealthQueueProvider extends ContentProvider {
         switch (method) {
             case "adoptAccount": {
                 if (self || extras == null) throw new SecurityException("OHEALTH_CALLER_REQUIRED");
-                if (!"ACCOUNT_UNCONFIRMED".equals(store.accountState())) return status(store.accountState());
-                store.confirmAccountHash(HealthRecordStore.hashAccount(extras.getString("account")));
+                String account = extras.getString("account");
+                if (account == null || account.isBlank() || account.length() > 512
+                        || "com.heytap.health".equals(account)) {
+                    return status(store.accountState());
+                }
+                store.confirmAccountHash(HealthRecordStore.hashAccount(account));
                 notifyRecordsChanged();
                 return status("HEALTH_ACCOUNT_CONFIRMED");
             }
@@ -110,7 +114,7 @@ public final class HealthQueueProvider extends ContentProvider {
                 String account = extras.getString("account");
                 proposedFingerprint = HealthRecordStore.hashAccount(account);
                 proposedAtMs = SystemClock.elapsedRealtime();
-                store.authorizedAccount(account); // Mismatch latches pause without moving old rows.
+                store.authorizedAccount(account); // Presented account becomes the write target.
                 notifyRecordsChanged();
                 return status("ACCOUNT_PROPOSED");
             }

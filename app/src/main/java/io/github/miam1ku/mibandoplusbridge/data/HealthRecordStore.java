@@ -102,7 +102,7 @@ public final class HealthRecordStore extends SQLiteOpenHelper {
         }
     }
 
-    /** Switching the confirmed account never moves any previously owned history or file. */
+    /** Unsent archives and the outbox follow the current account. Stored measurements stay put. */
     public synchronized void confirmAccountHash(String hash) {
         if (hash == null || !hash.matches("[0-9a-f]{64}")) throw new IllegalArgumentException("ACCOUNT_HASH_INVALID");
         SQLiteDatabase db = getWritableDatabase();
@@ -117,7 +117,13 @@ public final class HealthRecordStore extends SQLiteOpenHelper {
             }
             ContentValues owner = new ContentValues(1);
             owner.put("account_hash", hash);
-            db.update("files", owner, "account_hash IS NULL", null);
+            db.update("files", owner,
+                    "account_hash IS NULL OR (account_hash!=? AND next_record_index<record_count)",
+                    new String[]{hash});
+            db.execSQL("DELETE FROM records WHERE account_hash!=? AND EXISTS ("
+                    + "SELECT 1 FROM records existing WHERE existing.account_hash=? "
+                    + "AND existing.record_id=records.record_id)", new Object[]{hash, hash});
+            db.update("records", owner, "account_hash IS NULL OR account_hash!=?", new String[]{hash});
             db.setTransactionSuccessful();
         } finally {
             db.endTransaction();
@@ -274,20 +280,20 @@ public final class HealthRecordStore extends SQLiteOpenHelper {
         return row;
     }
 
-    /** A mismatch latches pause; only another explicit confirmation can clear it. */
+    /** Any real OHealth account becomes the write target. A blank or tourist id does not pause collection. */
     public synchronized boolean authorizedAccount(String account) {
-        String hash = account == null || account.isBlank() || account.length() > 512 ? null : hashAccount(account);
-        SQLiteDatabase db = getWritableDatabase();
-        try (Cursor binding = db.rawQuery("SELECT account_hash, paused FROM binding WHERE id=1", null)) {
-            if (!binding.moveToFirst()) return false;
-            if (hash == null || !hash.equals(binding.getString(0))) {
-                ContentValues values = new ContentValues(1);
-                values.put("paused", 1);
-                db.update("binding", values, "id=1", null);
-                return false;
-            }
-            return binding.getInt(1) == 0;
+        if (account == null || account.isBlank() || account.length() > 512 || "com.heytap.health".equals(account)) {
+            return false;
         }
+        String hash = hashAccount(account);
+        try (Cursor binding = getReadableDatabase().rawQuery(
+                "SELECT account_hash, paused FROM binding WHERE id=1", null)) {
+            if (binding.moveToFirst() && hash.equals(binding.getString(0)) && binding.getInt(1) == 0) {
+                return true;
+            }
+        }
+        confirmAccountHash(hash);
+        return true;
     }
 
     public synchronized Cursor pending(String account) {
@@ -447,7 +453,7 @@ public final class HealthRecordStore extends SQLiteOpenHelper {
             row.put("device_id", deviceId);
             row.put("firmware", firmware);
             row.put("captured_at_ms", capturedAtMs);
-            // During a latched account mismatch, preserve the original confirmed owner, not NULL.
+            // Unsent files are claimed by the next real account. Do not wait out a paused binding.
             try (Cursor binding = db.rawQuery("SELECT account_hash FROM binding WHERE id=1", null)) {
                 row.put("account_hash", binding.moveToFirst() ? binding.getString(0) : null);
             }
