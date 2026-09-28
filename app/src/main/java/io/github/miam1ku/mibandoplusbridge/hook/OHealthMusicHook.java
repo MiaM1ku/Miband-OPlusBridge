@@ -32,7 +32,9 @@ public final class OHealthMusicHook {
     private OHealthMusicHook() {}
 
     public static void install(Context context, ClassLoader loader) {
-        if (!"com.heytap.health".equals(android.app.Application.getProcessName())) return;
+        String process = android.app.Application.getProcessName();
+        if (process == null || !process.startsWith("com.heytap.health")) return;
+        if (!process.equals("com.heytap.health:transport")) return;
         app = context.getApplicationContext() == null ? context : context.getApplicationContext();
         Class<?> presenter;
         try {

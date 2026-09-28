@@ -51,8 +51,10 @@ public final class OHealthAccountHook {
                     if (account != null && !account.isBlank() && account.length() <= 512) {
                         data.putString("account", account);
                         context.getContentResolver().call(HealthQueueProvider.URI, "proposeAccount", null, data);
-                    } else {
+                    } else if (previous != null && !previous.isBlank()) {
                         context.getContentResolver().call(HealthQueueProvider.URI, "accountSignedOut", null, null);
+                    } else {
+                        return;
                     }
                     data.clear();
                     lastProposedAt = android.os.SystemClock.elapsedRealtime();
@@ -78,6 +80,7 @@ public final class OHealthAccountHook {
         });
         XC_MethodHook refreshAccount = new XC_MethodHook() {
             @Override protected void afterHookedMethod(MethodHookParam param) {
+                if (!"com.heytap.health".equals(Application.getProcessName())) return;
                 try {
                     Class<?> owner = Class.forName("com.heytap.device.data.storage.DataRepositoryHelper", false, loader);
                     Object companion = owner.getField("Companion").get(null);

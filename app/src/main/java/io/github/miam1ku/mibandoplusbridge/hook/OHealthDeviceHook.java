@@ -1073,7 +1073,7 @@ public final class OHealthDeviceHook {
 
     /** OHealth already applied its own allowlist. Translate in this process, send via the bridge provider. */
     private static boolean forwardHostNotification(Object bean, boolean removed) {
-        Bundle shown = snapshot;
+        Bundle shown = liveSnapshot();
         if (bean == null || hostContext == null || shown == null || !shown.getBoolean("registered", false)) {
             return false;
         }
@@ -1084,6 +1084,10 @@ public final class OHealthDeviceHook {
             boolean call = isIncomingCall(bean);
             if (!removed && !call && !hostAllows(bean)) {
                 Log.i("OplusBandBridge", "OHEALTH_NOTIFICATION_BLOCKED pkg=" + pkg);
+                return false;
+            }
+            if (!removed && !call && screenOnBlocks(bean)) {
+                Log.i("OplusBandBridge", "OHEALTH_NOTIFICATION_SCREEN pkg=" + pkg);
                 return false;
             }
             int id = HOST_NOTIFICATIONS.computeIfAbsent(key, ignored -> {
@@ -1139,6 +1143,27 @@ public final class OHealthDeviceHook {
                     "INSTANCE");
             return Boolean.TRUE.equals(XposedHelpers.callMethod(holder, "isDial", text(bean, "getPackageName")));
         } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    /** Health switch {@code screen_on_push} false means do not push while the screen is on. */
+    private static boolean screenOnBlocks(Object bean) {
+        try {
+            ClassLoader loader = bean.getClass().getClassLoader();
+            Object holder = XposedHelpers.getStaticObjectField(loader.loadClass(
+                    "com.heytap.health.watch.notification.impl.whitelist.NotificationRoomHolder"), "INSTANCE");
+            if (io.github.miam1ku.mibandoplusbridge.notify.NotifySwitch.on(
+                    XposedHelpers.callMethod(holder, "getPackageSwitchStatus", "screen_on_push"))) {
+                return false;
+            }
+            Object utils = XposedHelpers.getStaticObjectField(loader.loadClass(
+                    "com.heytap.health.watch.notification.impl.utils.NotificationScreenUtils"), "INSTANCE");
+            Object offOrLocked = XposedHelpers.callMethod(utils, "isScreenOffOrLocked", hostContext);
+            return !Boolean.TRUE.equals(offOrLocked);
+        } catch (Throwable failure) {
+            Log.i("OplusBandBridge", "OHEALTH_NOTIFICATION_SCREEN_UNAVAILABLE "
+                    + failure.getClass().getSimpleName());
             return false;
         }
     }
