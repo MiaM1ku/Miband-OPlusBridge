@@ -22,6 +22,7 @@ public final class HostNotifyProvider extends ContentProvider {
 
     @Override public Bundle call(String method, String arg, Bundle extras) {
         HostIdentity.requireCaller(getContext(), HostIdentity.HEALTH_PACKAGE);
+        if ("trace".equals(method)) return trace(extras);
         if ("findWatch".equals(method)) return findWatch(extras);
         if ("music".equals(method)) return music(extras);
         if (!"forward".equals(method) || extras == null) {
@@ -52,9 +53,21 @@ public final class HostNotifyProvider extends ContentProvider {
                                     blankTo(extras.getString("app"), pkg),
                                     key, id, extras.getString("title", ""), extras.getString("body", ""),
                                     when, ZoneId.systemDefault()));
-            BandLiveService.forwardHostNotification(getContext(), command);
+            var pending = BandLiveService.forwardHostNotification(getContext(), command);
+            String status = "QUEUED";
+            if (pending.toCompletableFuture().isCompletedExceptionally()) {
+                try {
+                    pending.toCompletableFuture().getNow(null);
+                } catch (Throwable failure) {
+                    Throwable cause = failure.getCause() == null ? failure : failure.getCause();
+                    status = cause.getMessage() == null ? cause.getClass().getSimpleName() : cause.getMessage();
+                    Log.i("OplusBandBridge", "NOTIFY_SEND_FAILED " + status + " pkg=" + pkg);
+                    io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(getContext(),
+                            "NOTIFY_SEND_FAILED " + status + " pkg=" + pkg);
+                }
+            }
             Bundle result = new Bundle();
-            result.putString("status", "QUEUED");
+            result.putString("status", status);
             return result;
         } catch (RuntimeException failure) {
             Log.i("OplusBandBridge", "HOST_NOTIFY_IPC_FAILED " + failure.getClass().getSimpleName());
@@ -65,6 +78,15 @@ public final class HostNotifyProvider extends ContentProvider {
             Binder.restoreCallingIdentity(identity);
         }
     }
+    private Bundle trace(Bundle extras) {
+        String line = extras == null ? "" : extras.getString("line", "");
+        if (line.length() > 240) line = line.substring(0, 240);
+        io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(getContext(), "health " + line);
+        Bundle result = new Bundle();
+        result.putString("status", "LOGGED");
+        return result;
+    }
+
 
     private Bundle findWatch(Bundle extras) {
         long identity = Binder.clearCallingIdentity();
@@ -89,6 +111,7 @@ public final class HostNotifyProvider extends ContentProvider {
         long identity = Binder.clearCallingIdentity();
         try {
             if (extras == null || !BandLiveService.notificationSessionReady(getContext())) {
+                io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(getContext(), "MUSIC_DROP reason=session");
                 Bundle result = new Bundle();
                 result.putString("status", "FAILED");
                 return result;
@@ -105,11 +128,16 @@ public final class HostNotifyProvider extends ContentProvider {
             BandLiveService.sendSessionCommand(command);
             Log.i("OplusBandBridge", "MUSIC_OUT state=" + command.getMusic().getMusicInfo().getState()
                     + " volume=" + command.getMusic().getMusicInfo().getVolume());
+            io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(getContext(),
+                    "MUSIC_OUT state=" + command.getMusic().getMusicInfo().getState()
+                    + " volume=" + command.getMusic().getMusicInfo().getVolume());
             Bundle result = new Bundle();
             result.putString("status", "QUEUED");
             return result;
         } catch (RuntimeException failure) {
             Log.i("OplusBandBridge", "MUSIC_IPC_FAILED " + failure.getClass().getSimpleName());
+            io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(getContext(),
+                    "MUSIC_IPC_FAILED " + failure.getClass().getSimpleName());
             Bundle result = new Bundle();
             result.putString("status", "FAILED");
             return result;

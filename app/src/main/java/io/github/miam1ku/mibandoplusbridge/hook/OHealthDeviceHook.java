@@ -557,6 +557,21 @@ public final class OHealthDeviceHook {
                     param.setResult(combined);
                 }
             });
+            XposedBridge.hookAllMethods(api.getType(), "getCurrActiveMacByRole", new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam param) {
+                    Object result = param.getResult();
+                    if (result != null && !String.valueOf(result).isBlank()
+                            && !"null".equals(String.valueOf(result))) return;
+                    Bundle shown = liveSnapshot();
+                    String mac = shown == null ? "" : shown.getString("mac", "");
+                    if (mac.isBlank()) {
+                        Log.i("OplusBandBridge", "OHEALTH_ACTIVE_MAC empty");
+                        return;
+                    }
+                    param.setResult(mac);
+                    Log.i("OplusBandBridge", "OHEALTH_ACTIVE_MAC filled");
+                }
+            });
             java.lang.reflect.Field business = hey.getField("businessApi");
             XposedBridge.hookAllMethods(business.getType(), "getDeviceBattery", new XC_MethodHook() {
                 @Override protected void beforeHookedMethod(MethodHookParam param) {
@@ -627,6 +642,27 @@ public final class OHealthDeviceHook {
                         "com.heytap.health.devicemanager.deviceability.DeviceInfo", loader,
                         method, bandFalse);
             } catch (Throwable ignored) { }
+        }
+        try {
+            Class<?> fragment = XposedHelpers.findClass(
+                    "com.heytap.health.watch.notification.impl.ui.NotificationSyncFragment", loader);
+            XposedBridge.hookAllMethods(fragment, "showScreen", new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam param) {
+                    try {
+                        Object vm = XposedHelpers.callMethod(param.thisObject, "getVm");
+                        if (!(XposedHelpers.callMethod(vm, "successData") instanceof java.util.List<?>)) {
+                            Log.i("OplusBandBridge", "OHEALTH_NOTIFY_SCREEN empty");
+                            param.setResult(null);
+                        }
+                    } catch (Throwable failure) {
+                        Log.i("OplusBandBridge", "OHEALTH_NOTIFY_SCREEN "
+                                + failure.getClass().getSimpleName());
+                    }
+                }
+            });
+        } catch (Throwable failure) {
+            Log.i("OplusBandBridge", "OHEALTH_NOTIFY_SCREEN_UNAVAILABLE "
+                    + failure.getClass().getSimpleName());
         }
     }
 
@@ -1022,6 +1058,8 @@ public final class OHealthDeviceHook {
                     forwardHostNotification(param.args[0], false);
                 }
             });
+            Log.i("OplusBandBridge", "OHEALTH_NOTIFICATION_HOOK process="
+                    + android.app.Application.getProcessName());
             XposedHelpers.findAndHookMethod(center, loader, "onNotificationRemoved", bean, new XC_MethodHook() {
                 @Override protected void afterHookedMethod(MethodHookParam param) {
                     forwardHostNotification(param.args[0], true);
@@ -1073,22 +1111,36 @@ public final class OHealthDeviceHook {
 
     /** OHealth already applied its own allowlist. Translate in this process, send via the bridge provider. */
     private static boolean forwardHostNotification(Object bean, boolean removed) {
+        String process = android.app.Application.getProcessName();
         Bundle shown = liveSnapshot();
         if (bean == null || hostContext == null || shown == null || !shown.getBoolean("registered", false)) {
+            notifyDrop("snapshot bean=" + (bean != null) + " context=" + (hostContext != null)
+                    + " registered=" + (shown != null && shown.getBoolean("registered", false)), "", process);
             return false;
         }
         try {
             String pkg = text(bean, "getPackageName");
             String key = text(bean, "getKey");
-            if (pkg.isBlank() || key.isBlank()) return false;
-            boolean call = isIncomingCall(bean);
-            if (!removed && !call && !hostAllows(bean)) {
-                Log.i("OplusBandBridge", "OHEALTH_NOTIFICATION_BLOCKED pkg=" + pkg);
+            if (pkg.isBlank() || key.isBlank()) {
+                notifyDrop("identity pkg=" + !pkg.isBlank() + " key=" + !key.isBlank(), pkg, process);
                 return false;
             }
-            if (!removed && !call && screenOnBlocks(bean)) {
-                Log.i("OplusBandBridge", "OHEALTH_NOTIFICATION_SCREEN pkg=" + pkg);
-                return false;
+            boolean call = isIncomingCall(bean);
+            if (!removed && !call) {
+                String blocked = allowBlock(bean);
+                if (blocked != null) {
+                    notifyDrop(blocked, pkg, process);
+                    return false;
+                }
+                if (screenOnBlocks(bean)) {
+                    notifyDrop("screen", pkg, process);
+                    return false;
+                }
+                Object importance = XposedHelpers.callMethod(bean, "getImportance");
+                if (importance instanceof Number level && level.intValue() <= 2) {
+                    notifyDrop("importance level=" + level.intValue(), pkg, process);
+                    return false;
+                }
             }
             int id = HOST_NOTIFICATIONS.computeIfAbsent(key, ignored -> {
                 int hash = key.hashCode() & 0x7fffffff;
@@ -1098,10 +1150,6 @@ public final class OHealthDeviceHook {
             Object posted = XposedHelpers.callMethod(bean, "getPostTimeMillis");
             long when = posted instanceof Number time && time.longValue() > 0
                     ? time.longValue() : System.currentTimeMillis();
-            if (!removed && !call) {
-                Object importance = XposedHelpers.callMethod(bean, "getImportance");
-                if (importance instanceof Number level && level.intValue() <= 2) return false;
-            }
             Bundle extras = new Bundle();
             extras.putBoolean("removed", removed);
             extras.putBoolean("call", call);
@@ -1167,23 +1215,54 @@ public final class OHealthDeviceHook {
             return false;
         }
     }
-    private static boolean hostAllows(Object bean) {
+    /** Null means the health allowlist permits this package. */
+    private static String allowBlock(Object bean) {
         try {
             Object holder = XposedHelpers.getStaticObjectField(bean.getClass().getClassLoader()
                     .loadClass("com.heytap.health.watch.notification.impl.whitelist.NotificationRoomHolder"),
                     "INSTANCE");
-            if (!io.github.miam1ku.mibandoplusbridge.notify.NotifySwitch.on(
-                    XposedHelpers.callMethod(holder, "getPackageSwitchStatus", "main_switch"))) {
-                return false;
+            Object mainSwitch = XposedHelpers.callMethod(holder, "getPackageSwitchStatus", "main_switch");
+            if (!io.github.miam1ku.mibandoplusbridge.notify.NotifySwitch.on(mainSwitch)) {
+                return "main_switch value=" + String.valueOf(mainSwitch);
             }
             String pkg = text(bean, "getPackageName");
-            return io.github.miam1ku.mibandoplusbridge.notify.NotifySwitch.on(
-                    XposedHelpers.callMethod(holder, "getPackageSwitchStatus", pkg));
+            Object appSwitch = XposedHelpers.callMethod(holder, "getPackageSwitchStatus", pkg);
+            if (!io.github.miam1ku.mibandoplusbridge.notify.NotifySwitch.on(appSwitch)) {
+                return "package value=" + String.valueOf(appSwitch);
+            }
+            return null;
         } catch (Throwable unavailable) {
-            android.util.Log.i("OplusBandBridge", "OHEALTH_NOTIFY_ALLOWLIST_UNAVAILABLE "
-                    + unavailable.getClass().getSimpleName());
-            return false;
+            return "allowlist " + unavailable.getClass().getSimpleName();
         }
+    }
+
+    private static String lastNotifyDrop = "";
+
+    private static void notifyDrop(String reason, String pkg, String process) {
+        String line = reason + "|" + pkg + "|" + process;
+        if (line.equals(lastNotifyDrop)) return;
+        lastNotifyDrop = line;
+        Log.i("OplusBandBridge", "OHEALTH_NOTIFICATION_DROP reason=" + reason
+                + " pkg=" + (pkg == null || pkg.isBlank() ? "none" : pkg)
+                + " process=" + process);
+        trace("OHEALTH_NOTIFICATION_DROP reason=" + reason
+                + " pkg=" + (pkg == null || pkg.isBlank() ? "none" : pkg)
+                + " process=" + process);
+    }
+
+    private static void trace(String line) {
+        if (hostContext == null || line == null || line.isBlank()) return;
+        try {
+            android.os.Bundle extras = new android.os.Bundle();
+            extras.putString("line", line.length() > 240 ? line.substring(0, 240) : line);
+            hostContext.getContentResolver().call(
+                    io.github.miam1ku.mibandoplusbridge.integration.HostNotifyProvider.URI,
+                    "trace", null, extras);
+        } catch (RuntimeException ignored) { }
+    }
+
+    private static boolean hostAllows(Object bean) {
+        return allowBlock(bean) == null;
     }
 
 

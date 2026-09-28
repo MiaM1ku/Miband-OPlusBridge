@@ -193,6 +193,17 @@ public final class BandLiveService extends Service {
         return "NATIVE".equals(owner.getString("mode", "OFFICIAL"))
                 && owner.getBoolean("ownsDisable", false) && !owner.getBoolean("officialRestored", false);
     }
+    private static String sessionReason(Context context) {
+        BandLiveService live = instance;
+        if (live == null || live.stopRequested || live.commands == null) return "service";
+        boolean registered = new BandStateRepository(context).isRegistered();
+        var owner = io.github.miam1ku.mibandoplusbridge.data.LocalPrefs.open(context, "ownership");
+        return "session registered=" + registered
+                + " mode=" + owner.getString("mode", "OFFICIAL")
+                + " ownsDisable=" + owner.getBoolean("ownsDisable", false)
+                + " restored=" + owner.getBoolean("officialRestored", false);
+    }
+
 
     public static long notificationSessionId() {
         BandLiveService live = instance;
@@ -266,12 +277,17 @@ public final class BandLiveService extends Service {
         var queue = live == null ? null : live.commands;
         if (queue == null || !notificationSessionReady(context) || command == null || command.getType() != 7
                 || (command.getSubtype() != 0 && command.getSubtype() != 1) || !command.hasNotification()) {
+            String reason = queue == null ? "service" : !notificationSessionReady(context) ? sessionReason(context)
+                    : command == null ? "empty" : "command type=" + command.getType() + " subtype=" + command.getSubtype();
+            android.util.Log.i("OplusBandBridge", "NOTIFY_DROP reason=" + reason);
+            io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(context, "NOTIFY_DROP reason=" + reason);
             return java.util.concurrent.CompletableFuture.failedFuture(
                     new IllegalStateException("NOTIFICATION_SESSION_UNAVAILABLE"));
         }
         if (ordinaryPost(command) && io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.blocksNotifications(
                 io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.currentFilter(context))) {
             android.util.Log.i("OplusBandBridge", "NOTIFY_SUPPRESSED_DND");
+            io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(context, "NOTIFY_SUPPRESSED_DND");
             return java.util.concurrent.CompletableFuture.completedFuture(null);
         }
         try {
@@ -280,8 +296,11 @@ public final class BandLiveService extends Service {
             android.util.Log.i("OplusBandBridge", "NOTIFY_OUT type=" + fitted.getType()
                     + " subtype=" + fitted.getSubtype() + " bytes=" + fitted.getSerializedSize()
                     + " limit=" + notificationPayloadLimit());
+            io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(context, "NOTIFY_OUT type=" + fitted.getType()
+                    + " subtype=" + fitted.getSubtype() + " bytes=" + fitted.getSerializedSize());
             return queue.send(fitted);
         } catch (IllegalArgumentException tooLarge) {
+            io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(context, "NOTIFY_DROP reason=too-large");
             return java.util.concurrent.CompletableFuture.failedFuture(
                     new IllegalStateException("NOTIFICATION_IDENTITY_TOO_LARGE"));
         }
@@ -313,6 +332,8 @@ public final class BandLiveService extends Service {
 
     @Override public void onCreate() {
         super.onCreate();
+        io.github.miam1ku.mibandoplusbridge.data.SessionLog.start(this);
+        io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this, "module start");
         weatherSync = new WeatherSync(this, () -> commands, coordinator);
         healthReplay = new HealthReplay(this, this::healthCollectionStatus, () -> {
             try {

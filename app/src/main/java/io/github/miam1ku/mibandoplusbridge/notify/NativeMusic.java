@@ -21,15 +21,18 @@ public final class NativeMusic {
     public static void onBandCommand(Context context, XiaomiProto.Command command) {
         if (command == null || command.getType() != 18) return;
         int subtype = command.getSubtype();
-        if (subtype == 0) dispatch(context, 0, 0, true);
-        else if (subtype == 2 && command.hasMusic() && command.getMusic().hasMediaKey()) {
+        if (subtype == 0) {
+            if (!PhoneMusic.handle(0, 0, true)) dispatch(context, 0, 0, true);
+        } else if (subtype == 2 && command.hasMusic() && command.getMusic().hasMediaKey()) {
             var key = command.getMusic().getMediaKey();
-            dispatch(context, key.getKey(), key.getVolume(), false);
+            if (!PhoneMusic.handle(key.getKey(), key.getVolume(), false)) {
+                dispatch(context, key.getKey(), key.getVolume(), false);
+            }
         }
     }
 
     public static void requestRefresh(Context context) {
-        dispatch(context, 0, 0, true);
+        if (!PhoneMusic.handle(0, 0, true)) dispatch(context, 0, 0, true);
     }
 
     private static void dispatch(Context context, int key, int volume, boolean refresh) {

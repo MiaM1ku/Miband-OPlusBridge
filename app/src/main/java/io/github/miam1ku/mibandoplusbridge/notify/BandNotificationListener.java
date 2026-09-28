@@ -78,9 +78,11 @@ public final class BandNotificationListener extends NotificationListenerService 
     @Override public void onListenerConnected() {
         listenerConnected = true;
         resetSession();
+        PhoneMusic.attach(this, main);
     }
 
     @Override public void onListenerDisconnected() {
+        PhoneMusic.detach();
         appliedSession = 0;
         listenerConnected = false;
         relay.disconnected();
