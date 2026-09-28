@@ -39,6 +39,13 @@ public final class HostNotifyProvider extends ContentProvider {
                 result.putString("status", "NOTIFY_IDENTITY_REQUIRED");
                 return result;
             }
+            if (extras.getBoolean("phoneAlarm", false)) {
+                io.github.miam1ku.mibandoplusbridge.notify.PhoneAlarmNotice.send(getContext(),
+                        extras.getInt("alarmOp", removed ? 1 : 0), extras.getString("title", ""));
+                Bundle alarm = new Bundle();
+                alarm.putString("status", "QUEUED");
+                return alarm;
+            }
             int id = extras.getInt("id", 0);
             if (id == 0) id = Math.max(1, key.hashCode() & 0x7fffffff);
             boolean call = extras.getBoolean("call", false);

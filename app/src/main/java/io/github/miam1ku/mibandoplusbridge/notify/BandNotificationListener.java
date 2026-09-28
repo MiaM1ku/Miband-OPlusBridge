@@ -155,6 +155,10 @@ public final class BandNotificationListener extends NotificationListenerService 
             return;
         }
         Notification n = item.getNotification();
+        if (io.github.miam1ku.mibandoplusbridge.notify.PhoneAlarmNotice.ringing(item)) {
+            io.github.miam1ku.mibandoplusbridge.notify.PhoneAlarmNotice.posted(this, item);
+            return;
+        }
         Ranking ranking = new Ranking();
         if (getPackageName().equals(item.getPackageName())
                 || !settings.getStringSet("packages", Set.of()).contains(item.getPackageName())
@@ -205,6 +209,7 @@ public final class BandNotificationListener extends NotificationListenerService 
     }
 
     @Override public void onNotificationRemoved(StatusBarNotification item, RankingMap rankings, int reason) {
+        io.github.miam1ku.mibandoplusbridge.notify.PhoneAlarmNotice.removed(this, item);
         if (item != null) relay.removed(item.getKey());
     }
 

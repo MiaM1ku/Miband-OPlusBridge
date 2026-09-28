@@ -34,20 +34,23 @@ public final class ClockAlarmHook {
             String[] splits = context.getApplicationInfo().splitSourceDirs;
             if (splits != null) for (String split : splits) if (split != null) apks.add(split);
         }
+        int ring = 0;
+        int stop = 0;
         try {
-            hookRing(apks, loader);
+            ring = hookRing(apks, loader);
         } catch (Throwable failure) {
             skip(failure);
         }
         try {
-            hookStop(apks, loader);
+            stop = hookStop(apks, loader);
         } catch (Throwable failure) {
             skip(failure);
         }
+        report(context, ring, stop);
     }
 
-    private static void hookRing(List<String> apks, ClassLoader loader) throws Exception {
-        List<Method> methods = resolve(apks, loader, RING_ANCHOR);
+    private static int hookRing(List<String> apks, ClassLoader loader) throws Exception {
+        List<Method> methods = anchored(apks, loader, RING_ANCHOR);
         if (methods.isEmpty()) methods = named(loader, "com.oplus.alarmclock.alert.AlarmKlaxon", "start");
         if (methods.isEmpty()) throw new NoSuchMethodException(RING_ANCHOR);
         for (Method method : methods) {
@@ -61,10 +64,11 @@ public final class ClockAlarmHook {
                 }
             });
         }
+        return methods.size();
     }
 
-    private static void hookStop(List<String> apks, ClassLoader loader) throws Exception {
-        List<Method> methods = resolve(apks, loader, STOP_ANCHOR);
+    private static int hookStop(List<String> apks, ClassLoader loader) throws Exception {
+        List<Method> methods = anchored(apks, loader, STOP_ANCHOR);
         if (methods.isEmpty()) methods = named(loader, "com.oplus.alarmclock.alert.AlarmService", "onStartCommand");
         if (methods.isEmpty()) throw new NoSuchMethodException(STOP_ANCHOR);
         for (Method method : methods) {
@@ -78,6 +82,7 @@ public final class ClockAlarmHook {
                 }
             });
         }
+        return methods.size();
     }
 
 
@@ -179,7 +184,7 @@ public final class ClockAlarmHook {
                         int bandOp = message.arg1;
                         int bandId = message.arg2;
                         if (bandOp != 1 && bandOp != 2) return;
-                        if (bandId >= 0) ringingScheduleId = bandId;
+                        if (bandId >= 0 && ringingScheduleId < 0) ringingScheduleId = bandId;
                         android.util.Log.i("OplusBandBridge", "CLOCK_ALARM_REPLY op=" + bandOp
                                 + " id=" + ringingScheduleId);
                         stopRinging(context, bandOp);
@@ -188,8 +193,9 @@ public final class ClockAlarmHook {
                 }));
         try {
             context.getContentResolver().call(AUTHORITY, "operation", null, extras);
-        } catch (SecurityException denied) {
-            android.util.Log.i("OplusBandBridge", "CLOCK_ALARM_CALL_DENIED");
+        } catch (RuntimeException denied) {
+            android.util.Log.i("OplusBandBridge", "CLOCK_ALARM_CALL_FAILED "
+                    + denied.getClass().getSimpleName());
         }
     }
 
@@ -219,6 +225,30 @@ public final class ClockAlarmHook {
             android.util.Log.i("OplusBandBridge", "CLOCK_ALARM_STOP op=" + op + " id=" + id);
         } catch (RuntimeException failure) {
             android.util.Log.i("OplusBandBridge", "CLOCK_ALARM_STOP_FAILED "
+                    + failure.getClass().getSimpleName());
+        }
+    }
+
+    private static List<Method> anchored(List<String> apks, ClassLoader loader, String anchor) {
+        try {
+            return resolve(apks, loader, anchor);
+        } catch (Throwable failure) {
+            skip(failure);
+            return List.of();
+        }
+    }
+
+    private static void report(Context context, int ring, int stop) {
+        String version = "unknown";
+        try {
+            version = context.getPackageManager().getPackageInfo(context.getPackageName(), 0).versionName;
+        } catch (Exception ignored) { }
+        Bundle extras = new Bundle();
+        extras.putString("hook", "version=" + version + " ring=" + ring + " stop=" + stop);
+        try {
+            context.getContentResolver().call(AUTHORITY, "status", null, extras);
+        } catch (RuntimeException failure) {
+            android.util.Log.i("OplusBandBridge", "CLOCK_HOOK_REPORT_FAILED "
                     + failure.getClass().getSimpleName());
         }
     }

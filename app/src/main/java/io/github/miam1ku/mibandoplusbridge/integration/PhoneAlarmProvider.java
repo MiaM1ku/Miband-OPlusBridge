@@ -36,7 +36,15 @@ public final class PhoneAlarmProvider extends ContentProvider {
 
 
     @Override public Bundle call(String method, String arg, Bundle extras) {
-        if (!clockCaller() || extras == null) return null;
+        if (!clockCaller()) return null;
+        if ("status".equals(method)) {
+            io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(getContext(),
+                    "CLOCK_HOOK " + (extras == null ? "" : extras.getString("hook", "")));
+            Bundle status = new Bundle();
+            status.putString("status", "QUEUED");
+            return status;
+        }
+        if (extras == null) return null;
         android.os.Messenger reply = extras.getParcelable("reply", android.os.Messenger.class);
         if (reply != null) replyTo = reply;
         int op = extras.getInt("op", -1);
@@ -45,7 +53,11 @@ public final class PhoneAlarmProvider extends ContentProvider {
         String label = extras.getString("label");
         long identity = Binder.clearCallingIdentity();
         try {
-            BandLiveService.sendSessionCommand(BandAlarmCommand.operation(op, id, alertTimeSec, label));
+            if (io.github.miam1ku.mibandoplusbridge.notify.PhoneAlarmNotice.claim(op)) {
+                io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(getContext(),
+                        "ALARM_PHONE op=" + op + " id=" + id);
+                BandLiveService.sendSessionCommand(BandAlarmCommand.operation(op, id, alertTimeSec, label));
+            }
             Bundle result = new Bundle();
             result.putString("status", "QUEUED");
             return result;

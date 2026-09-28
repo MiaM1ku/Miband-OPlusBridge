@@ -1126,6 +1126,7 @@ public final class OHealthDeviceHook {
                 notifyDrop("identity pkg=" + !pkg.isBlank() + " key=" + !key.isBlank(), pkg, process);
                 return false;
             }
+            if (deliverPhoneAlarm(bean, pkg, key, removed)) return true;
             boolean call = isIncomingCall(bean);
             if (!removed && !call) {
                 String blocked = allowBlock(bean);
@@ -1179,6 +1180,47 @@ public final class OHealthDeviceHook {
                     + failure.getClass().getSimpleName());
             return false;
         }
+    }
+
+    private static final java.util.Set<String> phoneAlarmKeys = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    /** Ringing is a foreground clock notification. Send the phone-alarm packet before the allowlist can drop it. */
+    private static boolean deliverPhoneAlarm(Object bean, String pkg, String key, boolean removed) {
+        if (!io.github.miam1ku.mibandoplusbridge.notify.PhoneAlarmNotice.CLOCK.equals(pkg)) return false;
+        if (!removed) {
+            if (!clockRinging(bean)) return false;
+            phoneAlarmKeys.add(key);
+        } else if (!phoneAlarmKeys.remove(key)) {
+            return false;
+        }
+        if (hostContext == null) return false;
+        android.os.Bundle extras = new android.os.Bundle();
+        extras.putBoolean("removed", removed);
+        extras.putBoolean("phoneAlarm", true);
+        extras.putInt("alarmOp", removed ? 1 : 0);
+        extras.putString("pkg", pkg);
+        extras.putString("key", key);
+        extras.putString("title", removed ? "" : text(bean, "getTitle"));
+        try {
+            hostContext.getContentResolver().call(
+                    io.github.miam1ku.mibandoplusbridge.integration.HostNotifyProvider.URI,
+                    "forward", null, extras);
+            return true;
+        } catch (RuntimeException failure) {
+            android.util.Log.i("OplusBandBridge", "CLOCK_ALARM_FORWARD_FAILED "
+                    + failure.getClass().getSimpleName());
+            return false;
+        }
+    }
+
+    private static boolean clockRinging(Object bean) {
+        try {
+            Object origin = de.robv.android.xposed.XposedHelpers.callMethod(bean, "getOrigin");
+            if (origin instanceof android.service.notification.StatusBarNotification posted) {
+                return io.github.miam1ku.mibandoplusbridge.notify.PhoneAlarmNotice.ringing(posted);
+            }
+        } catch (Throwable ignored) { }
+        return false;
     }
 
     private static boolean isIncomingCall(Object bean) {

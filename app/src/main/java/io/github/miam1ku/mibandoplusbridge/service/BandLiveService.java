@@ -234,6 +234,21 @@ public final class BandLiveService extends Service {
                 + " calls=" + settings.getBoolean("callsEnabled", false)
                 + " callOwner=" + (calls != null && calls.ownsCalls())
                 + " music=" + io.github.miam1ku.mibandoplusbridge.notify.PhoneMusic.attached());
+        io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this, "hosts "
+                + hostVersion("com.coloros.alarmclock")
+                + " " + hostVersion("com.heytap.health")
+                + " " + hostVersion("com.heytap.mydevices")
+                + " " + hostVersion(getPackageName()));
+    }
+
+    private String hostVersion(String pkg) {
+        String name = pkg == null ? "" : pkg.substring(pkg.lastIndexOf('.') + 1);
+        try {
+            android.content.pm.PackageInfo info = getPackageManager().getPackageInfo(pkg, 0);
+            return name + "=" + info.versionName + "/" + info.getLongVersionCode();
+        } catch (android.content.pm.PackageManager.NameNotFoundException missing) {
+            return name + "=absent";
+        }
     }
 
 
