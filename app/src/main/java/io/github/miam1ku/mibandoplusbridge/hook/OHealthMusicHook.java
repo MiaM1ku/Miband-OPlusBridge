@@ -59,6 +59,20 @@ public final class OHealthMusicHook {
                 else key(loader, intent.getIntExtra("key", -1), intent.getIntExtra("volume", 0));
             }
         }, new IntentFilter(NativeMusic.ACTION), FindPhone.PERMISSION, null, Context.RECEIVER_EXPORTED);
+        try {
+            Class<?> service = XposedHelpers.findClass(
+                    "com.heytap.health.watch.music.control.MusicService", loader);
+            XposedBridge.hookAllMethods(service, "handleNoControllers", new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam param) {
+                    publish(true, 0, Math.max(0, lastVolume), "", "", 0, 0);
+                }
+            });
+            // The manager's static block is what registers the media-session listener.
+            // Nothing else loads it until an OPPO watch message arrives.
+            XposedHelpers.getStaticObjectField(XposedHelpers.findClass(MANAGER, loader), "INSTANCE");
+        } catch (Throwable failure) {
+            android.util.Log.i("OplusBandBridge", "MUSIC native unavailable");
+        }
     }
 
     private static void mirror(String method, Object[] args) {

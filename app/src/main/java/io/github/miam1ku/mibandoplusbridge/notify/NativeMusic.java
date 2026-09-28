@@ -28,6 +28,10 @@ public final class NativeMusic {
         }
     }
 
+    public static void requestRefresh(Context context) {
+        dispatch(context, 0, 0, true);
+    }
+
     private static void dispatch(Context context, int key, int volume, boolean refresh) {
         Context app = context.getApplicationContext();
         Intent event = new Intent(ACTION).setPackage(HEALTH)

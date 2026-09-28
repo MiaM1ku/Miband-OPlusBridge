@@ -425,6 +425,7 @@ public final class BandLiveService extends Service {
                         commands = queue;
                         calls.connected();
                         io.github.miam1ku.mibandoplusbridge.notify.BandNotificationListener.connectionChanged();
+                        io.github.miam1ku.mibandoplusbridge.notify.NativeMusic.requestRefresh(this);
                         historySync = new LiveHistorySync(queue, coordinator, () -> {
                             try { repository.recordSyncCompleted(); }
                             catch (RuntimeException unavailable) { healthCollectionStatus("HEALTH_STORAGE_UNAVAILABLE"); }
