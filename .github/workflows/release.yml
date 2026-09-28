@@ -54,9 +54,9 @@ jobs:
           set -euo pipefail
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
             git fetch origin tag "$GITHUB_REF_NAME" --force
-            # contents includes the PGP signature; subject and body do not.
-            git tag -l --format='%(contents:subject)%n%n%(contents:body)' "$GITHUB_REF_NAME" \
-              | awk 'BEGIN{skip=0} /-----BEGIN PGP SIGNATURE-----/{skip=1} skip{next} {print}' \
+            # %(contents) appends the PGP signature. Cut it off before the release page.
+            git tag -l --format='%(contents)' "$GITHUB_REF_NAME" \
+              | awk '/-----BEGIN PGP SIGNATURE-----/{exit} {print}' \
               > release-notes.md
           fi
           if [[ ! -s release-notes.md ]]; then
