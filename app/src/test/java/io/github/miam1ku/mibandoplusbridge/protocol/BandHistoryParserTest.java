@@ -53,6 +53,22 @@ public final class BandHistoryParserTest {
                 changedHeartRate.get(1).sourceFingerprint);
     }
 
+    @Test public void versionTwoMinuteRecordsStillExposeHeartRate() throws Exception {
+        byte[] body = new byte[8];
+        int base = 31;
+        for (int bit : new int[] {base, base - 3, base - 16, base - 17}) {
+            body[1 + (base - bit) / 8] |= (byte) (1 << (bit % 8));
+        }
+        put16(body, 5, 6);
+        body[7] = 80;
+        var records = parser().parseFile(file(2, 0, body)).measurements;
+        assertEquals(2, records.size());
+        assertEquals("steps_interval", records.get(0).kind);
+        assertEquals(6, records.get(0).value.intValue());
+        assertEquals("heart_rate", records.get(1).kind);
+        assertEquals(80, records.get(1).value.intValue());
+    }
+
     @Test public void todayStepsPreferTheDailyReportAndIgnoreOtherDays() throws Exception {
         long day = 1_000_000L;
         var minutes = List.of(

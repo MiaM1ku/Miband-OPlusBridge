@@ -24,6 +24,7 @@ import java.util.Objects;
 
 /** SPP V2 framing only; payloads remain encrypted where the data opcode requires it. */
 public final class SppV2Codec {
+    public static final int TYPE_NAK = 0;
     public static final int TYPE_ACK = 1;
     public static final int TYPE_SESSION_CONFIG = 2;
     public static final int TYPE_DATA = 3;
@@ -39,37 +40,41 @@ public final class SppV2Codec {
     public static final class Frame {
         private final int type;
         private final int sequence;
+        private final boolean frx;
         private final byte[] payload;
 
         public Frame(int type, int sequence, byte[] payload) {
-            this(type, sequence, payload, 0, payload.length);
+            this(type, sequence, payload, 0, payload.length, false);
         }
 
-        private Frame(int type, int sequence, byte[] source, int offset, int length) {
-            this(type, sequence, length);
+        private Frame(int type, int sequence, byte[] source, int offset, int length, boolean frx) {
+            this(type, sequence, length, frx);
             System.arraycopy(source, offset, payload, 0, length);
         }
 
-        private Frame(int type, int sequence, int length) {
+        private Frame(int type, int sequence, int length, boolean frx) {
             requireType(type);
             requireByte(sequence, "Sequence must be an unsigned byte");
-            if (length > MAX_PAYLOAD_LENGTH || (type == TYPE_ACK && length != 0)) {
+            if (length > MAX_PAYLOAD_LENGTH || ((type == TYPE_ACK || type == TYPE_NAK) && length != 0)) {
                 throw new IllegalArgumentException("Invalid SPP V2 payload length");
             }
             this.type = type;
             this.sequence = sequence;
+            this.frx = frx;
             this.payload = new byte[length];
         }
 
         public int type() { return type; }
         public int sequence() { return sequence; }
+        /** Bit 4 of the type byte. Official TransportL1 accepts these without an equality check. */
+        public boolean frx() { return frx; }
         public byte[] payload() { return payload.clone(); }
     }
 
     public static byte[] encode(Frame frame) {
         byte[] bytes = new byte[HEADER_LENGTH + frame.payload.length];
         bytes[0] = bytes[1] = (byte) 0xa5;
-        bytes[2] = (byte) frame.type;
+        bytes[2] = (byte) (frame.type | (frame.frx ? 0x10 : 0));
         bytes[3] = (byte) frame.sequence;
         putU16(bytes, 4, frame.payload.length);
         putU16(bytes, 6, crc16Arc(frame.payload, 0, frame.payload.length));
@@ -109,12 +114,14 @@ public final class SppV2Codec {
                     if (pending[0] != (byte) 0xa5 || pending[1] != (byte) 0xa5) {
                         throw reject("Invalid SPP V2 preamble");
                     }
-                    int type = pending[2] & 0xff;
-                    if (type < TYPE_ACK || type > TYPE_DATA) {
+                    int header = pending[2] & 0xff;
+                    int type = header & 0x0f;
+                    if ((header & 0xE0) != 0 || type > TYPE_DATA) {
                         throw reject("Unsupported SPP V2 type or header flags");
                     }
                     int payloadLength = u16(pending, 4);
-                    if (payloadLength > maxPayloadLength || (type == TYPE_ACK && payloadLength != 0)) {
+                    if (payloadLength > maxPayloadLength
+                            || ((type == TYPE_ACK || type == TYPE_NAK) && payloadLength != 0)) {
                         throw reject("Invalid SPP V2 payload length");
                     }
                     expected = HEADER_LENGTH + payloadLength;
@@ -124,8 +131,9 @@ public final class SppV2Codec {
                 if (u16(pending, 6) != crc16Arc(pending, HEADER_LENGTH, expected - HEADER_LENGTH)) {
                     throw reject("SPP V2 payload checksum mismatch");
                 }
-                frames.add(new Frame(pending[2] & 0xff, pending[3] & 0xff,
-                        pending, HEADER_LENGTH, expected - HEADER_LENGTH));
+                int header = pending[2] & 0xff;
+                frames.add(new Frame(header & 0x0f, pending[3] & 0xff,
+                        pending, HEADER_LENGTH, expected - HEADER_LENGTH, (header & 0x10) != 0));
                 Arrays.fill(pending, 0, used, (byte) 0);
                 used = 0;
                 expected = HEADER_LENGTH;
@@ -180,11 +188,47 @@ public final class SppV2Codec {
             throw new IllegalArgumentException("Invalid SPP V2 data envelope");
         }
         requireByte(opcode, "Opcode must be an unsigned byte");
-        Frame frame = new Frame(TYPE_DATA, sequence, 2 + payload.length);
+        Frame frame = new Frame(TYPE_DATA, sequence, 2 + payload.length, false);
+
         frame.payload[0] = (byte) channel;
         frame.payload[1] = (byte) opcode;
         System.arraycopy(payload, 0, frame.payload, 2, payload.length);
         return frame;
+    }
+    /**
+     * An ahead packet is NAK'd once. The same sequence again, or one more than
+     * half a window behind, is accepted and the cursor resyncs. Channels 7 and 10
+     * are outside this counter.
+     */
+    public static final class ReceiveCursor {
+        public enum Decision { TAKE, DROP, NAK }
+
+        private int receivedCount;
+        private int aheadSequence = -1;
+
+        public int expected() { return receivedCount & 255; }
+        public int count() { return receivedCount; }
+
+        public Decision offer(int sequence, boolean frx, int channel) {
+            if (channel == 7 || channel == 10) return Decision.DROP;
+            int expected = expected();
+            if (frx || sequence == expected) {
+                advanceTo(sequence + 1);
+                return Decision.TAKE;
+            }
+            int ahead = (sequence - expected) & 255;
+            if (ahead >= 128 || aheadSequence == sequence) {
+                advanceTo(sequence + 1);
+                return Decision.TAKE;
+            }
+            aheadSequence = sequence;
+            return Decision.NAK;
+        }
+
+        private void advanceTo(int next) {
+            receivedCount += (next - (receivedCount & 255)) & 255;
+            aheadSequence = -1;
+        }
     }
 
     public record Parameter(int key, byte[] value) {
@@ -265,7 +309,7 @@ public final class SppV2Codec {
     }
 
     private static void requireType(int type) {
-        if (type < TYPE_ACK || type > TYPE_DATA) {
+        if (type < TYPE_NAK || type > TYPE_DATA) {
             throw new IllegalArgumentException("Unsupported SPP V2 packet type");
         }
     }

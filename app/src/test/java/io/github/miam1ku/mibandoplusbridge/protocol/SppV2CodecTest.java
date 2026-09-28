@@ -10,6 +10,7 @@ import java.util.List;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertThrows;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 public final class SppV2CodecTest {
@@ -76,6 +77,42 @@ public final class SppV2CodecTest {
         assertArrayEquals(new byte[0], frames.get(1).payload());
         assertEquals(SppV2Codec.TYPE_SESSION_CONFIG, frames.get(2).type());
         assertArrayEquals(hex("0101030001000002020000fc03020020000402001027"), frames.get(2).payload());
+    }
+
+    @Test public void frxAndNakUseTheTypeNibble() {
+        byte[] frx = hex("a5a51300020000000102");
+        // checksum of {1, 2}
+        int crc = 0;
+        for (byte value : new byte[] {1, 2}) {
+            crc = (crc ^ (value & 0xff)) & 0xffff;
+            for (int bit = 0; bit < 8; bit++) crc = (crc & 1) == 0 ? crc >>> 1 : (crc >>> 1) ^ 0xa001;
+        }
+        frx[6] = (byte) crc;
+        frx[7] = (byte) (crc >>> 8);
+        SppV2Codec.Frame frame = new SppV2Codec.Decoder().feed(frx, 0, frx.length).get(0);
+        assertEquals(SppV2Codec.TYPE_DATA, frame.type());
+        assertTrue(frame.frx());
+        assertEquals(0, frame.sequence());
+        byte[] nak = hex("a5a5000400000000");
+        SppV2Codec.Frame nakFrame = new SppV2Codec.Decoder().feed(nak, 0, nak.length).get(0);
+        assertEquals(SppV2Codec.TYPE_NAK, nakFrame.type());
+        assertEquals(4, nakFrame.sequence());
+        assertFalse(nakFrame.frx());
+    }
+
+    @Test public void aheadPacketIsNakedOnceThenAccepted() {
+        SppV2Codec.ReceiveCursor cursor = new SppV2Codec.ReceiveCursor();
+        assertEquals(SppV2Codec.ReceiveCursor.Decision.TAKE, cursor.offer(0, false, 1));
+        assertEquals(SppV2Codec.ReceiveCursor.Decision.NAK, cursor.offer(2, false, 1));
+        assertEquals(1, cursor.expected());
+        assertEquals(SppV2Codec.ReceiveCursor.Decision.TAKE, cursor.offer(2, false, 1));
+        assertEquals(3, cursor.expected());
+        assertEquals(SppV2Codec.ReceiveCursor.Decision.DROP, cursor.offer(9, false, 7));
+        assertEquals(3, cursor.expected());
+        assertEquals(SppV2Codec.ReceiveCursor.Decision.TAKE, cursor.offer(0, false, 1));
+        assertEquals(1, cursor.expected());
+        assertEquals(SppV2Codec.ReceiveCursor.Decision.TAKE, cursor.offer(7, true, 1));
+        assertEquals(8, cursor.expected());
     }
 
     private static byte[] join(byte[]... packets) {

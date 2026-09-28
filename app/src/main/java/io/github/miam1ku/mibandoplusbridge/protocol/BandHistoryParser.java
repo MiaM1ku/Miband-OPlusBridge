@@ -132,8 +132,8 @@ public final class BandHistoryParser {
             String timezone = String.format(java.util.Locale.ROOT, "%c%02d:%02d",
                     quarterHours < 0 ? '-' : '+', absMinutes / 60, absMinutes % 60);
             List<Measurement> measurements;
-            if (dailyType == 0 && fileType == 0 && version == 4) {
-                measurements = decodeRecords(bytes, u32(bytes, 0), timezone);
+            if (dailyType == 0 && fileType == 0 && version >= 1 && version <= 4) {
+                measurements = decodeRecords(bytes, u32(bytes, 0), timezone, version);
             } else if (dailyType == 0 && fileType == 1 && version == 5) {
                 measurements = decodeReport(bytes, u32(bytes, 0), offsetSeconds, timezone);
             } else if (dailyType == 6 && fileType == 0 && version == 2) {
@@ -150,46 +150,49 @@ public final class BandHistoryParser {
         }
     }
 
-    private List<Measurement> decodeRecords(byte[] bytes, long seconds, String timezone) {
+    private List<Measurement> decodeRecords(byte[] bytes, long seconds, String timezone, int version) {
+        int headerBytes = version < 3 ? 4 : version == 3 ? 5 : 6;
         Cursor cursor = new Cursor(bytes, 8);
-        long validity = cursor.flags(6);
-        int width = 0;
-        for (int i = 0; i < PRESENT_FIELDS.length; i++) {
-            if (bit(validity, PRESENT_FIELDS[i])) width += FIELD_WIDTHS[i];
-        }
-        if (width == 0) {
-            if (cursor.remaining() != 0) throw new SemanticException("UNSUPPORTED_EMPTY_ACTIVITY_LAYOUT");
-            return List.of();
-        }
+        long validity = cursor.flags(headerBytes);
+        int base = headerBytes * 8 - 1;
         List<Measurement> records = new ArrayList<>();
         long firstMinute = seconds / 60 * MINUTE_MS;
         boolean tooManyRecords = false;
         for (int index = 0; cursor.remaining() > 0; index++) {
             long minute = firstMinute + index * MINUTE_MS;
-            int steps = bit(validity, 47) ? cursor.uint(2) : 0;
-            if (bit(validity, 43)) cursor.skip(1);
-            if (bit(validity, 39)) cursor.skip(1);
-            if (bit(validity, 35)) cursor.skip(2);
-            int heart = bit(validity, 31) ? cursor.uint(1) : -1;
-            if (bit(validity, 27)) cursor.skip(1);
-            if (bit(validity, 23)) cursor.skip(2);
-            int oxygen = bit(validity, 19) ? cursor.uint(1) : -1;
-            int stress = bit(validity, 15) ? cursor.uint(1) : -1;
-            // The rise flag changes framing even if its independent validity bit is clear.
+            int steps = flag(validity, base) ? cursor.uint(2) : 0;
+            if (flag(validity, base - 4)) cursor.skip(1);
+            if (flag(validity, base - 8)) cursor.skip(1);
+            if (flag(validity, base - 12)) cursor.skip(2);
+            int heart = flag(validity, base - 16) ? cursor.uint(1) : -1;
+            if (flag(validity, base - 20)) cursor.skip(1);
+            if (flag(validity, base - 24)) cursor.skip(2);
+            int oxygen = -1;
+            int stress = -1;
+            if (version >= 3) {
+                oxygen = flag(validity, base - 28) ? cursor.uint(1) : -1;
+                stress = flag(validity, base - 32) ? cursor.uint(1) : -1;
+            }
             if ((steps & 0x4000) != 0) cursor.skip(1);
-            if (bit(validity, 11)) cursor.skip(2);
-            if (bit(validity, 7)) cursor.skip(2);
+            if (version >= 4) {
+                if (flag(validity, base - 36)) cursor.skip(2);
+                if (flag(validity, base - 40)) cursor.skip(2);
+            }
             if (index >= 1440) {
                 tooManyRecords = true;
                 continue;
             }
-            if (bit(validity, 47) && bit(validity, 44)) {
+            if (flag(validity, base) && flag(validity, base - 3)) {
                 records.add(measurement("steps_interval", minute, minute + MINUTE_MS,
                         steps & 0x3fff, timezone, "continuous", false));
             }
-            if (bit(validity, 30)) addMetric(records, "heart_rate", minute, heart, timezone, "continuous");
-            if (bit(validity, 18)) addMetric(records, "spo2", minute, oxygen, timezone, "continuous");
-            if (bit(validity, 14)) addMetric(records, "stress", minute, stress, timezone, "continuous");
+            if (flag(validity, base - 17)) addMetric(records, "heart_rate", minute, heart, timezone, "continuous");
+            if (version >= 3 && flag(validity, base - 29)) {
+                addMetric(records, "spo2", minute, oxygen, timezone, "continuous");
+            }
+            if (version >= 3 && flag(validity, base - 33)) {
+                addMetric(records, "stress", minute, stress, timezone, "continuous");
+            }
         }
         if (tooManyRecords) throw new SemanticException("INVALID_ACTIVITY_RECORD_COUNT");
         return records;
@@ -368,6 +371,7 @@ public final class BandHistoryParser {
     }
 
     private static boolean bit(long flags, int bit) { return (flags & 1L << bit) != 0; }
+    private static boolean flag(long flags, int bit) { return bit >= 0 && bit < 64 && bit(flags, bit); }
 
     private static final class SemanticException extends IllegalArgumentException {
         SemanticException(String status) { super(status); }

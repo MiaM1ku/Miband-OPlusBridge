@@ -60,7 +60,7 @@ public final class SppDiagnosticClient implements AutoCloseable {
     private OutputStream output;
     private XiaomiSessionCrypto.Session session;
     private int sentSequence;
-    private int receivedCount;
+    private final SppV2Codec.ReceiveCursor receive = new SppV2Codec.ReceiveCursor();
     private int frameCount;
     private boolean authenticated;
     private int peerPayloadLimit;
@@ -376,6 +376,10 @@ public final class SppDiagnosticClient implements AutoCloseable {
                     if (liveCommands != null) liveCommands.onAck(frame.sequence());
                     continue;
                 }
+                if (frame.type() == SppV2Codec.TYPE_NAK) {
+                    SessionLog.line(context, "rx spp2 nak seq=" + frame.sequence());
+                    continue;
+                }
                 return decodeAndAck(frame);
             }
         }
@@ -563,13 +567,29 @@ public final class SppDiagnosticClient implements AutoCloseable {
         if (peerPayloadLimit <= 0 || rawPayload.length > peerPayloadLimit) {
             throw new Failure("RECEIVE_SIZE_EXCEEDS_NEGOTIATED_LIMIT");
         }
-        if (sequence != (receivedCount & 255)) {
-            if (receivedAt[sequence] >= 0 && receivedCount - receivedAt[sequence] <= 32
-                    && Arrays.equals(rawPayload, receivedPayloads[sequence])) {
-                sendFrame(new SppV2Codec.Frame(SppV2Codec.TYPE_ACK, sequence, new byte[0]));
-                return null;
-            }
-            throw new Failure("RECEIVE_SEQUENCE_MISMATCH");
+        int channel = rawPayload.length == 0 ? -1 : rawPayload[0] & 0x0f;
+        int expected = receive.expected();
+        if (!frame.frx() && channel != 7 && channel != 10 && sequence != expected
+                && receivedAt[sequence] >= 0 && receive.count() - receivedAt[sequence] <= 32
+                && Arrays.equals(rawPayload, receivedPayloads[sequence])) {
+            sendFrame(new SppV2Codec.Frame(SppV2Codec.TYPE_ACK, sequence, new byte[0]));
+            return null;
+        }
+        SppV2Codec.ReceiveCursor.Decision decision = receive.offer(sequence, frame.frx(), channel);
+        if (decision == SppV2Codec.ReceiveCursor.Decision.DROP) {
+            SessionLog.line(context, "rx spp2 seq=" + sequence + " expected=" + expected
+                    + " channel=" + channel + " action=drop");
+            return null;
+        }
+        if (decision == SppV2Codec.ReceiveCursor.Decision.NAK) {
+            SessionLog.line(context, "rx spp2 seq=" + sequence + " expected=" + expected
+                    + " channel=" + channel + " action=nak");
+            sendFrame(new SppV2Codec.Frame(SppV2Codec.TYPE_NAK, expected, new byte[0]));
+            return null;
+        }
+        if (sequence != expected) {
+            SessionLog.line(context, "rx spp2 seq=" + sequence + " expected=" + expected
+                    + " channel=" + channel + " frx=" + frame.frx() + " action=resync");
         }
         var data = SppV2Codec.parseData(frame);
         if (data.flags() != 0) throw new Failure("UNSUPPORTED_DATA_CHANNEL");
@@ -590,7 +610,7 @@ public final class SppDiagnosticClient implements AutoCloseable {
         }
         if (receivedPayloads[sequence] != null) Arrays.fill(receivedPayloads[sequence], (byte) 0);
         receivedPayloads[sequence] = rawPayload;
-        receivedAt[sequence] = receivedCount++;
+        receivedAt[sequence] = receive.count() - 1;
         sendFrame(new SppV2Codec.Frame(SppV2Codec.TYPE_ACK, sequence, new byte[0]));
         publishBattery(command);
         return command;
@@ -606,19 +626,22 @@ public final class SppDiagnosticClient implements AutoCloseable {
     }
 
     private void acceptActivity(SppV2Codec.Data data, int sequence, byte[] rawPayload) throws Exception {
-        if (history == null || data.opcode() != SppV2Codec.OPCODE_ENCRYPTED) {
-            throw new Failure("UNSUPPORTED_DATA_CHANNEL");
-        }
-        byte[] plain = session.decryptV2(data.payload());
         BandHistoryParser.FileResult result = null;
-        try {
-            result = history.acceptFragment(plain);
-            progress.accept("HISTORY_FRAGMENT_RECEIVED");
-        } catch (IllegalArgumentException malformed) {
-            history.reset();
-            progress.accept("HISTORY_FILE_REJECTED");
-        } finally {
-            Arrays.fill(plain, (byte) 0);
+        if (history == null) {
+            SessionLog.line(context, "rx spp2 activity before history seq=" + sequence);
+        } else if (data.opcode() != SppV2Codec.OPCODE_ENCRYPTED) {
+            throw new Failure("UNSUPPORTED_DATA_CHANNEL");
+        } else {
+            byte[] plain = session.decryptV2(data.payload());
+            try {
+                result = history.acceptFragment(plain);
+                progress.accept("HISTORY_FRAGMENT_RECEIVED");
+            } catch (IllegalArgumentException malformed) {
+                history.reset();
+                progress.accept("HISTORY_FILE_REJECTED");
+            } finally {
+                Arrays.fill(plain, (byte) 0);
+            }
         }
         byte[] fileId = null;
         if (result != null) {
@@ -638,7 +661,7 @@ public final class SppDiagnosticClient implements AutoCloseable {
         }
         if (receivedPayloads[sequence] != null) Arrays.fill(receivedPayloads[sequence], (byte) 0);
         receivedPayloads[sequence] = rawPayload;
-        receivedAt[sequence] = receivedCount++;
+        receivedAt[sequence] = receive.count() - 1;
         sendFrame(new SppV2Codec.Frame(SppV2Codec.TYPE_ACK, sequence, new byte[0]));
         if (fileId == null) return;
         byte[] savedId = fileId;
@@ -740,6 +763,10 @@ public final class SppDiagnosticClient implements AutoCloseable {
                 if (frame.sequence() == sequence) return;
                 continue;
             }
+            if (frame.type() == SppV2Codec.TYPE_NAK) {
+                SessionLog.line(context, "rx spp2 nak seq=" + frame.sequence());
+                continue;
+            }
             XiaomiProto.Command command = decodeAndAck(frame);
             if (command != null && command.getType() == 10 && command.hasStatus()
                     && command.getStatus() != 0) throw new Failure("WEATHER_DEVICE_REJECTED");
@@ -755,6 +782,8 @@ public final class SppDiagnosticClient implements AutoCloseable {
                     SppV2Codec.Frame frame = readFrame();
                     if (frame.type() == SppV2Codec.TYPE_ACK) {
                         liveCommands.onAck(frame.sequence());
+                    } else if (frame.type() == SppV2Codec.TYPE_NAK) {
+                        SessionLog.line(context, "rx spp2 nak seq=" + frame.sequence());
                     } else {
                         XiaomiProto.Command command = decodeAndAck(frame);
                         if (command != null) {
