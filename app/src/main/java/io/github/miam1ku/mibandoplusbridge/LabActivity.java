@@ -13,6 +13,8 @@ import androidx.appcompat.app.AppCompatActivity;
 import io.github.miam1ku.mibandoplusbridge.data.BandStateRepository;
 import io.github.miam1ku.mibandoplusbridge.data.LocalPrefs;
 import io.github.miam1ku.mibandoplusbridge.protocol.BandNotificationCommand;
+import io.github.miam1ku.mibandoplusbridge.notify.FindPhone;
+import io.github.miam1ku.mibandoplusbridge.protocol.BandMusicCommand;
 import io.github.miam1ku.mibandoplusbridge.service.BandLiveService;
 import io.github.miam1ku.mibandoplusbridge.ui.BridgeScreen;
 import java.time.Instant;
@@ -61,17 +63,31 @@ public final class LabActivity extends AppCompatActivity {
         screen.setLastChildMargin(notify, 0);
         screen.filled("发送测试通知", () -> send("测试通知", BandNotificationCommand.post(
                 getPackageName(), "桥接测试", "lab-notify", 1,
-                "测试通知", "这是一条发往手环的测试消息。", Instant.now(), ZoneId.systemDefault())));
+                "测试通知", "这是一条发往手环的测试消息。", Instant.now(), ZoneId.systemDefault()), false));
         screen.outlined("撤回测试通知", () -> send("撤回通知",
-                BandNotificationCommand.dismiss(getPackageName(), "lab-notify", 1)));
+                BandNotificationCommand.dismiss(getPackageName(), "lab-notify", 1), false));
 
         LinearLayout call = screen.card();
         screen.overline(call, "来电");
         screen.caption(call, "手环应显示来电界面。点结束来电可关掉。");
         screen.setLastChildMargin(call, 0);
         screen.filled("发送测试来电", () -> send("测试来电",
-                BandNotificationCommand.incomingCall("测试来电", Instant.now(), ZoneId.systemDefault())));
-        screen.outlined("结束测试来电", () -> send("来电结束", BandNotificationCommand.endCall()));
+                BandNotificationCommand.incomingCall("测试来电", Instant.now(), ZoneId.systemDefault()), false));
+        screen.outlined("结束测试来电", () -> send("来电结束", BandNotificationCommand.endCall(), false));
+
+        LinearLayout find = screen.card();
+        screen.overline(find, "查找手机");
+        screen.caption(find, "调用 OPPO 健康自己的查找手机响铃，不向手环发命令。");
+        screen.setLastChildMargin(find, 0);
+        screen.filled("测试查找手机", () -> FindPhone.start(this));
+        screen.outlined("停止查找", () -> FindPhone.stop(this));
+
+        LinearLayout music = screen.card();
+        screen.overline(music, "音乐");
+        screen.caption(music, "把手环上的播放信息刷成一条测试曲目。真正播放时会自动同步，手环按键会控制手机。");
+        screen.setLastChildMargin(music, 0);
+        screen.filled("发送测试音乐", () -> send("测试音乐", BandMusicCommand.playback(
+                50, "测试音乐", "桥接", 12, 180, true), true));
 
         LinearLayout extra = screen.card();
         screen.overline(extra, "其他");
@@ -95,7 +111,7 @@ public final class LabActivity extends AppCompatActivity {
         int battery = state.getInt("battery", -1);
         info.setText(deviceText(state, registered, connected, battery));
         session.setText(ready
-                ? "会话就绪，可以发通知和来电。"
+                ? "会话就绪，可以发通知、来电和音乐。"
                 : (connected ? "已连接，会话尚未就绪。点立即同步。" : "未连接。点立即同步后再测。"));
     }
 
@@ -129,7 +145,8 @@ public final class LabActivity extends AppCompatActivity {
         return value == null || value.isBlank() ? fallback : value;
     }
 
-    private void send(String label, nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto.Command command) {
+    private void send(String label, nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto.Command command,
+                      boolean sessionCommand) {
         if (!BandLiveService.notificationSessionReady(this)) {
             try { BandLiveService.start(this); } catch (RuntimeException ignored) { }
             setResultText("会话未就绪，无法发送" + label + "。请先点立即同步，等手环连上后再试。");
@@ -137,7 +154,10 @@ public final class LabActivity extends AppCompatActivity {
             return;
         }
         setResultText("正在发送" + label + "…");
-        BandLiveService.forwardHostNotification(this, command).whenComplete((ignored, error) -> main.post(() -> {
+        var pending = sessionCommand
+                ? BandLiveService.sendSessionCommand(command)
+                : BandLiveService.forwardHostNotification(this, command);
+        pending.whenComplete((ignored, error) -> main.post(() -> {
             if (isDestroyed()) return;
             String detail = error == null ? "已确认送达手环。"
                     : ("发送失败：" + (error.getMessage() == null ? error.getClass().getSimpleName() : error.getMessage()));

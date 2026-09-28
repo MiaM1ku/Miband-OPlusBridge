@@ -22,6 +22,7 @@ public final class HostNotifyProvider extends ContentProvider {
 
     @Override public Bundle call(String method, String arg, Bundle extras) {
         HostIdentity.requireCaller(getContext(), HostIdentity.HEALTH_PACKAGE);
+        if ("findWatch".equals(method)) return findWatch(extras);
         if (!"forward".equals(method) || extras == null) {
             throw new SecurityException("NOTIFY_METHOD_UNSUPPORTED");
         }
@@ -56,6 +57,25 @@ public final class HostNotifyProvider extends ContentProvider {
             return result;
         } catch (RuntimeException failure) {
             Log.i("OplusBandBridge", "HOST_NOTIFY_IPC_FAILED " + failure.getClass().getSimpleName());
+            Bundle result = new Bundle();
+            result.putString("status", "FAILED");
+            return result;
+        } finally {
+            Binder.restoreCallingIdentity(identity);
+        }
+    }
+
+    private Bundle findWatch(Bundle extras) {
+        long identity = Binder.clearCallingIdentity();
+        try {
+            boolean start = extras == null || extras.getBoolean("start", true);
+            BandLiveService.sendSessionCommand(
+                    io.github.miam1ku.mibandoplusbridge.protocol.BandSystemCommand.findWatch(start));
+            Bundle result = new Bundle();
+            result.putString("status", "QUEUED");
+            return result;
+        } catch (RuntimeException failure) {
+            Log.i("OplusBandBridge", "FIND_WATCH_IPC_FAILED " + failure.getClass().getSimpleName());
             Bundle result = new Bundle();
             result.putString("status", "FAILED");
             return result;

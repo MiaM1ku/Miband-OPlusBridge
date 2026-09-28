@@ -1,4 +1,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <permission android:name="io.github.miam1ku.mibandoplusbridge.permission.FIND_PHONE"
+        android:protectionLevel="signature" />
+    <uses-permission android:name="io.github.miam1ku.mibandoplusbridge.permission.FIND_PHONE" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
@@ -7,6 +10,7 @@
     <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS" />
     <uses-permission android:name="android.permission.SEND_SMS" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <uses-permission android:name="android.permission.INTERNET" />
     <queries>
         <package android:name="com.mi.health" />
@@ -37,6 +41,7 @@
         </activity>
         <activity android:name=".DiagnosticActivity" android:exported="false" />
         <activity android:name=".LabActivity" android:exported="false" />
+
         <activity android:name=".WeatherActivity" android:exported="false" />
         <activity android:name=".HealthAccountActivity" android:exported="false" />
         <activity android:name=".integration.BandDetailsActivity" android:exported="true">
@@ -49,7 +54,7 @@
         <service android:name=".service.BandLiveService" android:exported="false"
             android:foregroundServiceType="connectedDevice" />
         <service android:name=".notify.BandNotificationListener" android:exported="false"
-            android:enabled="false"
+            android:enabled="true"
             android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
             <intent-filter>
                 <action android:name="android.service.notification.NotificationListenerService" />

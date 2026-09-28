@@ -589,13 +589,7 @@ public final class MainActivity extends AppCompatActivity {
         updateControls();
         boolean bluetooth = hasBluetoothPermission();
         boolean notify = getSystemService(NotificationManager.class).areNotificationsEnabled();
-        if (bluetooth && notify) {
-            permissionStatus.setVisibility(View.GONE);
-        } else {
-            permissionStatus.setVisibility(View.VISIBLE);
-            permissionStatus.setText("附近设备权限：" + (bluetooth ? "已授权" : "未授权")
-                    + "\n本应用通知：" + (notify ? "已开启" : "未开启"));
-        }
+        publishPermissionStatus(bluetooth, notify);
         if (!isUnlocked()) {
             deviceName.setText("请先解锁手机以读取绑定信息。");
             connectionLine.setVisibility(View.GONE);
@@ -681,6 +675,18 @@ public final class MainActivity extends AppCompatActivity {
         boolean show = value != null && !value.isBlank();
         view.setVisibility(show ? View.VISIBLE : View.GONE);
         view.setText(show ? value : "");
+    }
+
+    private void publishPermissionStatus(boolean bluetooth, boolean notify) {
+        if (bluetooth && notify) {
+            permissionStatus.setVisibility(View.GONE);
+            permissionStatus.setOnClickListener(null);
+            return;
+        }
+        permissionStatus.setVisibility(View.VISIBLE);
+        permissionStatus.setOnClickListener(null);
+        permissionStatus.setText("附近设备权限：" + (bluetooth ? "已授权" : "未授权")
+                + "\n本应用通知：" + (notify ? "已开启" : "未开启"));
     }
 
     private static String safeIdentity(String value, String fallback) {
@@ -866,9 +872,8 @@ public final class MainActivity extends AppCompatActivity {
             }
             confirmBindingImport();
         } catch (SecurityException denied) {
-            permissionStatus.setVisibility(View.VISIBLE);
-            permissionStatus.setText("附近设备权限：未授权\n本应用通知："
-                    + (getSystemService(NotificationManager.class).areNotificationsEnabled() ? "已开启" : "未开启"));
+            publishPermissionStatus(false,
+                    getSystemService(NotificationManager.class).areNotificationsEnabled());
             requestPermissions(new String[]{Manifest.permission.BLUETOOTH_CONNECT}, BLUETOOTH_PERMISSION);
         }
     }

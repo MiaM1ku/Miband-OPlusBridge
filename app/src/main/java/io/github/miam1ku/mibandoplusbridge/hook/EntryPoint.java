@@ -100,6 +100,12 @@ public final class EntryPoint implements IXposedHookLoadPackage {
             android.util.Log.i("OplusBandBridge", "OHEALTH_DEVICE_HOOK_UNAVAILABLE");
         }
         try {
+            OHealthFindPhoneHook.install(context, loader);
+            android.util.Log.i("OplusBandBridge", "OHEALTH_FIND_PHONE_HOOK_INSTALLED");
+        } catch (Throwable incompatible) {
+            android.util.Log.i("OplusBandBridge", "OHEALTH_FIND_PHONE_HOOK_UNAVAILABLE");
+        }
+        try {
             OHealthHealthImportHook.install(context, loader);
             android.util.Log.i("OplusBandBridge", "OHEALTH_IMPORT_HOOK_INSTALLED");
         } catch (Throwable incompatible) {

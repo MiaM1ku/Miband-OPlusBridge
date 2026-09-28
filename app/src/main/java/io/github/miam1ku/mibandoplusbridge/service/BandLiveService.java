@@ -456,6 +456,24 @@ public final class BandLiveService extends Service {
                             }
                             if (calls != null) calls.onBandCommand(command);
                         }
+                        if (command.getType() == 2 && command.getSubtype() == 17) {
+                            main.post(() -> io.github.miam1ku.mibandoplusbridge.notify.FindPhone
+                                    .onBandCommand(BandLiveService.this, command));
+                        }
+                        if (command.getType() == 18) {
+                            int musicSubtype = command.getSubtype();
+                            if (musicSubtype == 0 || musicSubtype == 2) {
+                                main.post(() -> {
+                                    if (musicSubtype == 0) {
+                                        io.github.miam1ku.mibandoplusbridge.notify.PhoneMusic
+                                                .requestRefresh(BandLiveService.this);
+                                    } else {
+                                        io.github.miam1ku.mibandoplusbridge.notify.PhoneMusic
+                                                .onMediaKey(BandLiveService.this, command);
+                                    }
+                                });
+                            }
+                        }
                         weatherSync.onCommand(command);
                         if (command.getType() == 8 && command.getSubtype() == 47 && command.hasHealth()
                                 && command.getHealth().hasRealTimeStats()) {
