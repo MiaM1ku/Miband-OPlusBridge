@@ -163,7 +163,17 @@ public final class SppDiagnosticClient implements AutoCloseable {
             var adapter = context.getSystemService(BluetoothManager.class).getAdapter();
             if (adapter == null || !adapter.isEnabled()) throw new Failure("BLUETOOTH_DISABLED");
             BluetoothDevice device = adapter.getRemoteDevice(binding.address());
-            if (device.getBondState() != BluetoothDevice.BOND_BONDED) throw new Failure("OFFICIAL_PAIRING_REQUIRED");
+            // SPP opens a secure RFCOMM socket and needs the system bond. GATT auth is the
+            // captured key; ColorOS drops the BLE bond after 小米运动健康 is frozen.
+            int bond = device.getBondState();
+            boolean gatt = "GATT".equals(binding.transport());
+            if (!gatt && bond != BluetoothDevice.BOND_BONDED) {
+                SessionLog.line(context, "bond rejected state=" + bond + " transport=" + safe(binding.transport()));
+                throw new Failure("OFFICIAL_PAIRING_REQUIRED");
+            }
+            if (gatt && bond != BluetoothDevice.BOND_BONDED) {
+                SessionLog.line(context, "gatt without system bond state=" + bond);
+            }
             progress.accept("CONNECTING");
             if ("GATT".equals(binding.transport())) {
                 framing = 2;

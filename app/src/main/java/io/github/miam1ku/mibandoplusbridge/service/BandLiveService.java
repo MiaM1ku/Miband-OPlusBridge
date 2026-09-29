@@ -70,6 +70,8 @@ public final class BandLiveService extends Service {
     private static final int NOTICE = 7;
     private static final long INITIAL_BACKOFF_MS = 3_000;
     private static final long MAX_BACKOFF_MS = 30_000;
+    /** Config errors stay in this process. Exiting is what makes health launch the app. */
+    private static final long QUIET_BACKOFF_MS = 120_000;
     private final ExecutorService worker = Executors.newSingleThreadExecutor(r -> {
         Thread thread = new Thread(r, "OplusBandLive");
         thread.setDaemon(false);
@@ -87,6 +89,7 @@ public final class BandLiveService extends Service {
             new io.github.miam1ku.mibandoplusbridge.notify.SleepMusic();
     private volatile boolean sleepPauseOn;
     private volatile boolean retryNow;
+    private String noticeTitle = "";
     private volatile SppDiagnosticClient client;
     private boolean receiverRegistered;
     private boolean dndReceiverRegistered;
@@ -166,6 +169,10 @@ public final class BandLiveService extends Service {
         BandLiveService live = instance;
         if (live != null && !live.stopRequested) {
             live.syncRequested = true;
+            synchronized (live.stopLock) {
+                live.retryNow = true;
+                live.stopLock.notifyAll();
+            }
             try {
                 live.coordinator.execute(live::tick);
                 return "ACCEPTED";
@@ -456,7 +463,7 @@ public final class BandLiveService extends Service {
         if (intent != null && ACTION_SYNC.equals(intent.getAction())) syncRequested = true;
         if (running.compareAndSet(false, true)) {
             stopped = new java.util.concurrent.CountDownLatch(1);
-            show("正在连接手环", "等待手环响应");
+            show("正在连接手环");
             worker.execute(this::supervise);
         }
         return START_STICKY;
@@ -484,7 +491,7 @@ public final class BandLiveService extends Service {
                             + repository.isRegistered() + " mode=" + owner.mode()
                             + " ready=" + owner.nativeReady();
                     android.util.Log.i("OplusBandBridge", status);
-                    show("连接已停止", "请在配置应用添加设备并接管");
+                    show("连接已停止");
                     break;
                 }
                 bindHealthHost();
@@ -500,7 +507,7 @@ public final class BandLiveService extends Service {
                         });
                     } else if ("HISTORY_FILE_ARCHIVED".equals(code)) {
                         healthReplay.request();
-                        show("手环已连接", "已保存 " + stored.incrementAndGet() + " 个健康文件");
+                        stored.incrementAndGet();
                     } else if ("HISTORY_FORMAT_UNSUPPORTED".equals(code)) {
                         healthCollectionStatus(code);
                     } else if ("HISTORY_FILE_REJECTED".equals(code) || "HISTORY_STORAGE_FAILED".equals(code)
@@ -522,7 +529,7 @@ public final class BandLiveService extends Service {
                             throw new IllegalStateException(failure.getMessage(), failure);
                         }
                         if (!repository.isRegistered() || stopRequested) return;
-                        show("手环已连接", "电量 " + result.batteryPercent() + "%，正在同步活动");
+                        show("手环已连接");
                     }, queue -> coordinator.execute(() -> {
                         if (client != active || stopRequested) {
                             queue.close(new IllegalStateException("SESSION_CLOSED"));
@@ -615,11 +622,7 @@ public final class BandLiveService extends Service {
                 } catch (Exception failure) {
                     status = failure instanceof SppDiagnosticClient.Failure typed
                             ? typed.code : failure.getClass().getSimpleName();
-                    if (!retryable(status)) {
-                        show("连接已结束", status);
-                        break;
-                    }
-                    show("连接已断开", status + "，即将重连");
+                    show(retryable(status) ? "正在重连" : "等待重连");
                 } finally {
                     client = null;
                     commands = null;
@@ -637,10 +640,10 @@ public final class BandLiveService extends Service {
                     try { repository.markSessionClosed(); } catch (RuntimeException ignored) { }
                 }
                 if (authenticated.get()) backoff = INITIAL_BACKOFF_MS;
-                if (stopRequested || !retryable(status)) break;
-                show("正在重连", "等待 " + (backoff / 1000) + " 秒");
-                if (!waitForRetry(backoff)) break;
-                if (!authenticated.get()) backoff = Math.min(backoff * 2, MAX_BACKOFF_MS);
+                if (stopRequested) break;
+                long delay = retryable(status) ? backoff : QUIET_BACKOFF_MS;
+                if (!waitForRetry(delay)) break;
+                if (!authenticated.get() && retryable(status)) backoff = Math.min(backoff * 2, MAX_BACKOFF_MS);
             }
         } finally {
             writeStatus(stopRequested ? "STOPPED" : status);
@@ -897,16 +900,22 @@ public final class BandLiveService extends Service {
                 + " bytes=" + raw.length + rules + " hex=" + hex;
     }
 
-    private void show(String title, String text) {
+    private void show(String title) {
         NotificationManager manager = getSystemService(NotificationManager.class);
-        manager.createNotificationChannel(new NotificationChannel(CHANNEL, "手环连接", NotificationManager.IMPORTANCE_LOW));
+        NotificationChannel channel = new NotificationChannel(CHANNEL, "手环连接", NotificationManager.IMPORTANCE_LOW);
+        channel.setShowBadge(false);
+        manager.createNotificationChannel(channel);
         Notification notice = new Notification.Builder(this, CHANNEL)
                 .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
                 .setContentTitle(title)
-                .setContentText(text)
+                .setOnlyAlertOnce(true)
                 .setOngoing(true)
                 .build();
-        startForeground(NOTICE, notice, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE);
+        synchronized (this) {
+            if (title.equals(noticeTitle)) return;
+            startForeground(NOTICE, notice, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE);
+            noticeTitle = title;
+        }
     }
 
     @Override public void onDestroy() {

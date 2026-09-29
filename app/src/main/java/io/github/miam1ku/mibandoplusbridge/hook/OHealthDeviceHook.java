@@ -34,7 +34,7 @@ public final class OHealthDeviceHook {
     private static volatile Bundle snapshot;
     private static int snapshotAttempts;
     private static boolean snapshotTraced;
-    private static boolean bridgeWoken;
+
     private static Handler worker;
     private static Handler main;
     private static final List<WeakReference<Object>> CONTROLLERS = new ArrayList<>();
@@ -214,24 +214,10 @@ public final class OHealthDeviceHook {
             if (detail.length() > 180) detail = detail.substring(0, 180);
             Log.i("OplusBandBridge", "OHEALTH_PROVIDER_UNAVAILABLE " + failure.getClass().getSimpleName()
                     + " " + detail);
-            if (detail.contains("Unknown authority")) wakeBridge();
             return null;
         }
     }
 
-    /** A stopped bridge package hides its provider until an explicit start. */
-    private static void wakeBridge() {
-        if (hostContext == null || main == null || bridgeWoken) return;
-        bridgeWoken = true;
-        main.post(() -> {
-            try {
-                hostContext.startActivity(new Intent().setClassName("io.github.miam1ku.mibandoplusbridge",
-                        "io.github.miam1ku.mibandoplusbridge.MainActivity").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
-            } catch (RuntimeException ignored) {
-                bridgeWoken = false;
-            }
-        });
-    }
 
     private static void remember(Object controller) {
         synchronized (CONTROLLERS) {
@@ -304,14 +290,9 @@ public final class OHealthDeviceHook {
             } catch (Throwable failure) {
                 Log.i("OplusBandBridge", "OHEALTH_SYNC_UNAVAILABLE " + failure.getClass().getSimpleName());
             }
-            if ("OPEN_CONFIG_REQUIRED".equals(status)) main.post(() -> {
-                try {
-                    hostContext.startActivity(new Intent().setClassName("io.github.miam1ku.mibandoplusbridge",
-                            "io.github.miam1ku.mibandoplusbridge.MainActivity").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
-                } catch (RuntimeException failure) {
-                    Log.i("OplusBandBridge", "OHEALTH_CONFIG_UNAVAILABLE " + failure.getClass().getSimpleName());
-                }
-            });
+            if ("OPEN_CONFIG_REQUIRED".equals(status)) {
+                Log.i("OplusBandBridge", "OHEALTH_SYNC_DEFERRED");
+            }
         });
     }
 
