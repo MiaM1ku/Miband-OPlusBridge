@@ -29,6 +29,7 @@ import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
+import com.google.android.material.materialswitch.MaterialSwitch;
 import com.google.android.material.color.MaterialColors;
 import io.github.miam1ku.mibandoplusbridge.ui.BridgeScreen;
 import io.github.miam1ku.mibandoplusbridge.ui.SetupProgress;
@@ -37,6 +38,7 @@ import io.github.miam1ku.mibandoplusbridge.integration.HealthQueueProvider;
 import io.github.miam1ku.mibandoplusbridge.data.BandStateRepository;
 import io.github.miam1ku.mibandoplusbridge.service.OwnershipController;
 import io.github.miam1ku.mibandoplusbridge.service.BandLiveService;
+import io.github.miam1ku.mibandoplusbridge.notify.SleepMusic;
 import io.github.miam1ku.mibandoplusbridge.protocol.BandNotificationCommand;
 import io.github.miam1ku.mibandoplusbridge.protocol.SppDiagnosticClient;
 import java.time.Instant;
@@ -136,6 +138,31 @@ public final class MainActivity extends AppCompatActivity {
         screen.navRow(shortcuts, "天气同步", () -> startActivity(new Intent(this, WeatherActivity.class)));
         screen.navRow(shortcuts, "发送调试日志到 QQ", this::shareDebugLog);
         screen.setLastChildMargin(shortcuts, 0);
+        LinearLayout sleepCard = screen.card();
+        MaterialSwitch sleepPause = new MaterialSwitch(this);
+        sleepPause.setText("入睡后暂停音乐");
+        sleepPause.setTextSize(16);
+        sleepPause.setTextColor(MaterialColors.getColor(this,
+                com.google.android.material.R.attr.colorOnSurface, 0));
+        sleepPause.setMinHeight(BridgeScreen.dp(this, 48));
+        LinearLayout.LayoutParams sleepParams = new LinearLayout.LayoutParams(-1, -2);
+        sleepParams.bottomMargin = BridgeScreen.dp(this, 8);
+        sleepCard.addView(sleepPause, sleepParams);
+        screen.caption(sleepCard, "手环检测到入睡后，暂停手机正在播放的音乐。醒来不会自动继续。刚打开时先记下当前状态，不会立刻暂停。");
+        screen.setLastChildMargin(sleepCard, 0);
+        final boolean[] writingSleepPause = {false};
+        sleepPause.setChecked(SleepMusic.enabled(this));
+        sleepPause.setOnCheckedChangeListener((button, checked) -> {
+            if (writingSleepPause[0]) return;
+            if (SleepMusic.setEnabled(this, checked)) {
+                BandLiveService.sleepPauseChanged(this);
+                return;
+            }
+            writingSleepPause[0] = true;
+            button.setChecked(!checked);
+            writingSleepPause[0] = false;
+            ownershipStatus.setText("入睡暂停开关未能保存。");
+        });
         screen.textButton("系统权限设置", () -> startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
                 Uri.parse("package:" + getPackageName()))));
         screen.textButton("使用说明", this::showSetupGuide);

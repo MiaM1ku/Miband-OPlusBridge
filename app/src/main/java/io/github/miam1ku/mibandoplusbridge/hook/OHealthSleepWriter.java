@@ -85,42 +85,53 @@ final class OHealthSleepWriter {
         Log.i("OplusBandBridge", "OHEALTH_SLEEP_BEGIN nights=" + nights.size());
         int inserted = 0;
         int skipped = 0;
+        int held = 0;
         for (OHealthSleepPlan.Night night : nights) {
             if (!account.equals(host.account())) throw new SecurityException("IMPORT_ACCOUNT_CHANGED");
-            long statStart = night.fallAsleepMs() - 86_400_000L;
-            long statEnd = night.wakeMs() + 3_600_000L;
-            List<?> stats = host.readRows(api, account, TABLE_STAT, null, statStart, statEnd, 4, false);
-            if (ownedByOther(stats, night.date(), device)) {
-                skipped++;
-                continue;
+            try {
+                if (writeNight(api, account, device, night)) inserted++;
+                else skipped++;
+            } catch (IllegalStateException heldNight) {
+                String reason = heldNight.getMessage();
+                if (reason == null || !reason.startsWith("SLEEP_SEGMENT_UNCONFIRMED")) throw heldNight;
+                held++;
+                Log.i("OplusBandBridge", "OHEALTH_SLEEP_NIGHT_HELD date=" + night.date());
             }
-            List<?> existing = host.readRows(api, account, TABLE_SLEEP, device, night.fallAsleepMs() - 1,
-                    night.wakeMs() + 1, 0, true);
-            List<Object> missing = new ArrayList<>();
-            for (OHealthSleepPlan.Segment segment : night.segments()) {
-                if (!hasSegment(existing, device, segment)) missing.add(segmentRow(account, device, segment));
-            }
-            if (!missing.isEmpty()) {
-                host.insertRows(api, TABLE_SLEEP, missing);
-                inserted += missing.size();
-                existing = host.readRows(api, account, TABLE_SLEEP, device, night.fallAsleepMs() - 1,
-                        night.wakeMs() + 1, 0, true);
-                for (OHealthSleepPlan.Segment segment : night.segments()) {
-                    if (!hasSegment(existing, device, segment)) {
-                        throw new IllegalStateException("SLEEP_SEGMENT_UNCONFIRMED");
-                    }
-                }
-            }
-            if (hasStat(stats, device, night)) continue;
-            host.insertRows(api, TABLE_STAT, List.of(statRow(account, device, night)));
-            List<?> written = host.readRows(api, account, TABLE_STAT, device, statStart, statEnd, 4, false);
-            if (!hasStat(written, device, night)) {
-                throw new IllegalStateException("SLEEP_STAT_UNCONFIRMED_" + written.size());
-            }
-            inserted++;
         }
         Log.i("OplusBandBridge", "OHEALTH_SLEEP_IMPORT nights=" + nights.size()
-                + " inserted=" + inserted + " skipped=" + skipped);
+                + " inserted=" + inserted + " skipped=" + skipped + " held=" + held);
+    }
+
+    /** @return false when this date already belongs to another device or already has our stat. */
+    private boolean writeNight(Object api, String account, String device, OHealthSleepPlan.Night night)
+            throws Exception {
+        long statStart = night.fallAsleepMs() - 86_400_000L;
+        long statEnd = night.wakeMs() + 3_600_000L;
+        List<?> stats = host.readRows(api, account, TABLE_STAT, null, statStart, statEnd, 4, false);
+        if (ownedByOther(stats, night.date(), device)) return false;
+        List<?> existing = host.readRows(api, account, TABLE_SLEEP, device, night.fallAsleepMs() - 1,
+                night.wakeMs() + 1, 0, true);
+        List<Object> missing = new ArrayList<>();
+        for (OHealthSleepPlan.Segment segment : night.segments()) {
+            if (!hasSegment(existing, device, segment)) missing.add(segmentRow(account, device, segment));
+        }
+        if (!missing.isEmpty()) {
+            host.insertRows(api, TABLE_SLEEP, missing);
+            existing = host.readRows(api, account, TABLE_SLEEP, device, night.fallAsleepMs() - 1,
+                    night.wakeMs() + 1, 0, true);
+            for (OHealthSleepPlan.Segment segment : night.segments()) {
+                if (!hasSegment(existing, device, segment)) {
+                    throw new IllegalStateException("SLEEP_SEGMENT_UNCONFIRMED");
+                }
+            }
+        }
+        if (hasStat(stats, device, night)) return false;
+        host.insertRows(api, TABLE_STAT, List.of(statRow(account, device, night)));
+        List<?> written = host.readRows(api, account, TABLE_STAT, device, statStart, statEnd, 4, false);
+        if (!hasStat(written, device, night)) {
+            throw new IllegalStateException("SLEEP_STAT_UNCONFIRMED_" + written.size());
+        }
+        return true;
     }
 
     private List<HealthRecord> history(Context context, String account, String device) throws Exception {
@@ -180,10 +191,11 @@ final class OHealthSleepWriter {
             throws ReflectiveOperationException {
         for (Object row : rows) {
             if (!sleepClass.isInstance(row)) continue;
-            if (device.equals(sleepGetDevice.invoke(row))
-                    && segment.startMs() == (Long) sleepGetStart.invoke(row)
-                    && segment.endMs() == (Long) sleepGetEnd.invoke(row)
-                    && segment.sleepState() == (Integer) sleepGetState.invoke(row)) return true;
+            if (!device.equals(sleepGetDevice.invoke(row))) continue;
+            if (segment.startMs() != (Long) sleepGetStart.invoke(row)) continue;
+            if (segment.sleepState() != (Integer) sleepGetState.invoke(row)) continue;
+            // SleepMerge keeps the previous end when this start minute already exists.
+            if ((Long) sleepGetEnd.invoke(row) > segment.startMs()) return true;
         }
         return false;
     }

@@ -35,6 +35,11 @@ public final class NativeMusic {
         if (!PhoneMusic.handle(0, 0, true)) dispatch(context, 0, 0, true);
     }
 
+    /** Same pause key the band sends. Listener first, then the Health controller. */
+    public static void pause(Context context) {
+        if (!PhoneMusic.handle(1, 0, false)) dispatch(context, 1, 0, false);
+    }
+
     private static void dispatch(Context context, int key, int volume, boolean refresh) {
         Context app = context.getApplicationContext();
         Intent event = new Intent(ACTION).setPackage(HEALTH)

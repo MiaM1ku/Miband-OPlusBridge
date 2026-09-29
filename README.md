@@ -4,7 +4,7 @@
 
 把小米运动健康能用 **SPP** 连上的手环接到 ColorOS **设备空间** 和 **OPPO 健康**。
 
-在设备空间里管理这只手环，查看连接与电量，并把步数、心率、睡眠写入 OPPO 健康；手机通知和来电可以转到手环，当前播放走 OPPO 健康自己的音乐控制。手环查找手机会走 OPPO 健康自己的响铃，健康设备页也可以让这只手环响。日常不必再打开小米运动健康。小米手环 11 已实机验证。手环 8 / 8 Pro / 9 / 9 Pro / 10 / 10 Pro 及 NFC、活力版只要官方重连是 SPP 或 GATT + WearAuthV2、且没有 OOB 额外认证，即可导入接管。SPP V2、SPP V1（8 Pro）和纯 BLE（fe95）在连接时按采集 profile 分支。
+在设备空间里管理这只手环，查看连接与电量，并把步数、心率、睡眠写入 OPPO 健康；手机通知和来电可以转到手环，当前播放走 OPPO 健康自己的音乐控制。首页可打开「入睡后暂停音乐」：手环报入睡后暂停手机播放，醒来不自动续播。手环查找手机会走 OPPO 健康自己的响铃，健康设备页也可以让这只手环响。日常不必再打开小米运动健康。小米手环 11 已实机验证。手环 8 / 8 Pro / 9 / 9 Pro / 10 / 10 Pro 及 NFC、活力版只要官方重连是 SPP 或 GATT + WearAuthV2、且没有 OOB 额外认证，即可导入接管。SPP V2、SPP V1（8 Pro）和纯 BLE（fe95）在连接时按采集 profile 分支。
 
 
 包名：`io.github.miam1ku.mibandoplusbridge`
@@ -46,8 +46,8 @@
 打 tag 后 GitHub Actions 会构建，并把同一个 `app-release.apk` 发到两个仓库：
 
 ```
-git tag 31-1.2.8
-git push origin 31-1.2.8
+git tag 32-1.2.9
+git push origin 32-1.2.9
 ```
 
 - 源仓库：https://github.com/MiaM1ku/Miband-OPlusBridge

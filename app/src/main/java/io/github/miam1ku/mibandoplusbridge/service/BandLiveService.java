@@ -38,6 +38,8 @@ public final class BandLiveService extends Service {
     private long nextBatteryAt;
     private long nextHealthAt;
     private long nextWeatherAt;
+    /** Classic BT stays awake while these run. Notifications do not use this timer. */
+    private static final long IDLE_POLL_MINUTES = 30;
     private WeatherSync weatherSync;
     private HealthReplay healthReplay;
     private volatile long sessionEpoch;
@@ -77,7 +79,9 @@ public final class BandLiveService extends Service {
     private final Object stopLock = new Object();
     private volatile boolean stopRequested;
     private volatile long lastDndSentNanos;
-    private int dndPollGeneration;
+    private final io.github.miam1ku.mibandoplusbridge.notify.SleepMusic sleepMusic =
+            new io.github.miam1ku.mibandoplusbridge.notify.SleepMusic();
+    private volatile boolean sleepPauseOn;
     private volatile boolean retryNow;
     private volatile SppDiagnosticClient client;
     private boolean receiverRegistered;
@@ -171,6 +175,15 @@ public final class BandLiveService extends Service {
         } catch (RuntimeException backgroundRejected) {
             return "OPEN_CONFIG_REQUIRED";
         }
+    }
+
+    /** Switch-on starts a new baseline. An asleep report already in hand does not pause. */
+    public static void sleepPauseChanged(Context context) {
+        BandLiveService live = instance;
+        if (live == null || live.stopRequested) return;
+        live.sleepPauseOn = io.github.miam1ku.mibandoplusbridge.notify.SleepMusic.enabled(context);
+        live.sleepMusic.reset();
+        if (live.sleepPauseOn) live.requestSleepState();
     }
 
     public static java.util.concurrent.CompletionStage<Void> requestWeather(Context context,
@@ -405,6 +418,7 @@ public final class BandLiveService extends Service {
         calls = new io.github.miam1ku.mibandoplusbridge.notify.PhoneCallMonitor(this, coordinator);
         io.github.miam1ku.mibandoplusbridge.notify.BandNotificationListener.ensureEnabled(this);
         instance = this;
+        sleepPauseOn = io.github.miam1ku.mibandoplusbridge.notify.SleepMusic.enabled(this);
         coordinator.scheduleAtFixedRate(this::tick, 1, 1, TimeUnit.MINUTES);
         try {
             registerReceiver(bluetoothEvents,
@@ -445,7 +459,6 @@ public final class BandLiveService extends Service {
     }
 
     private void requestStop() {
-        dndPollGeneration++;
         synchronized (stopLock) {
             stopRequested = true;
             stopLock.notifyAll();
@@ -521,8 +534,8 @@ public final class BandLiveService extends Service {
                             catch (RuntimeException unavailable) { healthCollectionStatus("HEALTH_STORAGE_UNAVAILABLE"); }
                         }, this::healthCollectionStatus, healthReplay::hasCapacity);
                         long now = System.nanoTime();
-                        nextBatteryAt = now + TimeUnit.MINUTES.toNanos(3);
-                        nextHealthAt = now + TimeUnit.MINUTES.toNanos(5);
+                        nextBatteryAt = now + TimeUnit.MINUTES.toNanos(IDLE_POLL_MINUTES);
+                        nextHealthAt = now + TimeUnit.MINUTES.toNanos(IDLE_POLL_MINUTES);
                         nextWeatherAt = now + TimeUnit.MINUTES.toNanos(30);
                         weatherSync.refreshAndSend();
                         syncRequested = false;
@@ -531,7 +544,7 @@ public final class BandLiveService extends Service {
                                 .setType(8).setSubtype(45).build());
                         historySync.request(true);
                         syncDnd();
-                        startDndPoll();
+                        requestSleepState();
                     }), fileId -> coordinator.execute(() -> {
                         if (client == active && !stopRequested && historySync != null) historySync.saved(fileId);
                     }), command -> {
@@ -539,6 +552,7 @@ public final class BandLiveService extends Service {
                             io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(BandLiveService.this,
                                     describeSystem(command));
                             applyBandManual(command);
+                            noteSleep(command);
                         } else if (command.getType() == 7 || command.getType() == 18) {
                             io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(BandLiveService.this,
                                     "rx type=" + command.getType() + " subtype=" + command.getSubtype()
@@ -688,7 +702,7 @@ public final class BandLiveService extends Service {
         }
         long now = System.nanoTime();
         if (now >= nextBatteryAt) {
-            nextBatteryAt = now + TimeUnit.MINUTES.toNanos(3);
+            nextBatteryAt = now + TimeUnit.MINUTES.toNanos(IDLE_POLL_MINUTES);
             queue.request(nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto.Command
                     .newBuilder().setType(2).setSubtype(1).build(), 2, 1)
                     .whenComplete((ignored, error) -> {
@@ -698,7 +712,7 @@ public final class BandLiveService extends Service {
         if (syncRequested || now >= nextHealthAt) {
             boolean historical = syncRequested;
             syncRequested = false;
-            nextHealthAt = now + TimeUnit.MINUTES.toNanos(5);
+            nextHealthAt = now + TimeUnit.MINUTES.toNanos(IDLE_POLL_MINUTES);
             historySync.request(historical);
             if (historical) {
                 bindHealthHost();
@@ -776,19 +790,6 @@ public final class BandLiveService extends Service {
         main.postDelayed(this::sendDndRulesAgain, 2000);
     }
 
-    private void startDndPoll() {
-        int generation = ++dndPollGeneration;
-        main.postDelayed(new Runnable() {
-            @Override public void run() {
-                if (generation != dndPollGeneration || stopRequested) return;
-                var queue = commands;
-                if (queue != null && System.nanoTime() - lastDndSentNanos >= 3_000_000_000L) {
-                    sendQuietly(queue, io.github.miam1ku.mibandoplusbridge.protocol.BandDndCommand.queryRules());
-                }
-                main.postDelayed(this, 5_000);
-            }
-        }, 5_000);
-    }
 
     private void applyBandManual(nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto.Command command) {
         Boolean bandOn = io.github.miam1ku.mibandoplusbridge.protocol.BandDndCommand.manualState(command);
@@ -805,6 +806,37 @@ public final class BandLiveService extends Service {
             io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this, "DND_FROM_BAND on=" + on
                     + " applied=" + applied);
             if (!applied) android.util.Log.i("OplusBandBridge", "PHONE_DND_POLICY_REQUIRED");
+        });
+    }
+
+    private void requestSleepState() {
+        var queue = commands;
+        if (stopRequested || queue == null || !sleepPauseOn) return;
+        queue.send(io.github.miam1ku.mibandoplusbridge.notify.SleepMusic.query()).exceptionally(error -> {
+            android.util.Log.i("OplusBandBridge", "SLEEP_MUSIC_QUERY_FAILED");
+            return null;
+        });
+    }
+
+    private void noteSleep(nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto.Command command) {
+        if (!sleepPauseOn) return;
+        Boolean asleep = io.github.miam1ku.mibandoplusbridge.notify.SleepMusic.asleep(command);
+        if (asleep == null) return;
+        var report = sleepMusic.observe(asleep);
+        String line = switch (report.effect()) {
+            case PAUSE -> "SLEEP_MUSIC pause";
+            case BASELINE -> "SLEEP_MUSIC baseline asleep=" + asleep;
+            case WOKE -> "SLEEP_MUSIC awake";
+            case UNCHANGED -> null;
+        };
+        if (line == null) return;
+        io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this, line);
+        android.util.Log.i("OplusBandBridge", line);
+        if (report.effect() != io.github.miam1ku.mibandoplusbridge.notify.SleepMusic.Effect.PAUSE) return;
+        int generation = report.generation();
+        main.post(() -> {
+            if (!sleepPauseOn || sleepMusic.generation() != generation) return;
+            io.github.miam1ku.mibandoplusbridge.notify.NativeMusic.pause(this);
         });
     }
 
