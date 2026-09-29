@@ -23,10 +23,18 @@ public final class HostIdentity {
     }
 
     public static void requireCaller(Context context, String packageName) {
-        String[] packages = context.getPackageManager().getPackagesForUid(Binder.getCallingUid());
-        if (packages == null || packages.length != 1 || !packageName.equals(packages[0])) {
+        if (!uidHas(context, Binder.getCallingUid(), packageName)) {
             throw new SecurityException("CALLER_NOT_AUTHORIZED");
         }
+    }
+
+    /** True when this UID owns {@code packageName}. A shared UID may list more than one package. */
+    public static boolean uidHas(Context context, int uid, String packageName) {
+        if (context == null || packageName == null) return false;
+        String[] packages = context.getPackageManager().getPackagesForUid(uid);
+        if (packages == null) return false;
+        for (String name : packages) if (packageName.equals(name)) return true;
+        return false;
     }
 
     public static boolean installed(Context context, String packageName) {

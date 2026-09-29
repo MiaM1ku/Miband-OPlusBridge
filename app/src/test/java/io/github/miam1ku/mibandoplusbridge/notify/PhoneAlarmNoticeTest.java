@@ -18,5 +18,15 @@ public final class PhoneAlarmNoticeTest {
                 Notification.FLAG_FOREGROUND_SERVICE, "com.oplus.alarmclock.channel", 1, true));
         assertFalse(PhoneAlarmNotice.ringing(PhoneAlarmNotice.CLOCK,
                 Notification.FLAG_FOREGROUND_SERVICE, "clock_widget", 1, false));
+        assertTrue(PhoneAlarmNotice.ringing(PhoneAlarmNotice.CLOCK,
+                Notification.FLAG_FOREGROUND_SERVICE, "clock_foreground_service_channel_id", -1017, false));
+        assertFalse(PhoneAlarmNotice.ringing(PhoneAlarmNotice.CLOCK,
+                Notification.FLAG_FOREGROUND_SERVICE, "clock_foreground_service_channel_id", -1018, false));
+        assertFalse(PhoneAlarmNotice.ringing(PhoneAlarmNotice.CLOCK,
+                0, "clock_foreground_service_channel_id", -1017, false));
+        assertFalse(PhoneAlarmNotice.ringing(PhoneAlarmNotice.CLOCK,
+                0, "com.oplus.alarmclock.next.alarm", -1011, false));
+        assertFalse(PhoneAlarmNotice.ringing(PhoneAlarmNotice.CLOCK,
+                Notification.FLAG_FOREGROUND_SERVICE, "com.oplus.alarmclock.next.alarm", -1011, true));
     }
 }

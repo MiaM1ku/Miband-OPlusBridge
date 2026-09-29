@@ -33,6 +33,7 @@ public final class OHealthDeviceHook {
 
     private static volatile Bundle snapshot;
     private static int snapshotAttempts;
+    private static boolean snapshotTraced;
     private static boolean bridgeWoken;
     private static Handler worker;
     private static Handler main;
@@ -170,6 +171,13 @@ public final class OHealthDeviceHook {
                 }
             });
             // The first provider call often races process start. A miss used to leave the device tab empty.
+            boolean giveUp = result == null && snapshotAttempts >= 14;
+            if (!snapshotTraced && (result != null || giveUp)) {
+                snapshotTraced = true;
+                trace(result == null ? "OHEALTH_DEVICE_SNAPSHOT missing"
+                        : "OHEALTH_DEVICE_SNAPSHOT registered=" + result.getBoolean("registered")
+                        + " connected=" + result.getBoolean("connected"));
+            }
             if (result == null && snapshotAttempts < 15) {
                 if (snapshotAttempts == 0) Log.i("OplusBandBridge", "OHEALTH_DEVICE_SNAPSHOT_RETRY");
                 snapshotAttempts++;
@@ -1184,16 +1192,18 @@ public final class OHealthDeviceHook {
 
     private static final java.util.Set<String> phoneAlarmKeys = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
-    /** Clock notifications skip the health main switch. A post is the ring; its removal closes the band. */
+    /** Only the klaxon foreground notification is a ring. Next-alarm ticks stay off the band. */
     private static boolean deliverPhoneAlarm(Object bean, String pkg, String key, boolean removed) {
         if (!io.github.miam1ku.mibandoplusbridge.notify.PhoneAlarmNotice.CLOCK.equals(pkg)) return false;
+        boolean live = io.github.miam1ku.mibandoplusbridge.notify.PhoneAlarmNotice.ringing(clockNotification(bean));
         if (!removed) {
             trace("ALARM_CLOCK_POST " + clockShape(bean));
-            phoneAlarmKeys.add(key);
+            if (!live) return true;
+            if (!phoneAlarmKeys.add(key)) return true;
         } else if (!phoneAlarmKeys.remove(key)) {
-            return false;
+            return true;
         }
-        if (hostContext == null) return false;
+        if (hostContext == null) return true;
         android.os.Bundle extras = new android.os.Bundle();
         extras.putBoolean("removed", removed);
         extras.putBoolean("phoneAlarm", true);
@@ -1209,8 +1219,16 @@ public final class OHealthDeviceHook {
         } catch (RuntimeException failure) {
             android.util.Log.i("OplusBandBridge", "CLOCK_ALARM_FORWARD_FAILED "
                     + failure.getClass().getSimpleName());
-            return false;
+            return true;
         }
+    }
+
+    private static android.service.notification.StatusBarNotification clockNotification(Object bean) {
+        try {
+            Object origin = de.robv.android.xposed.XposedHelpers.callMethod(bean, "getOrigin");
+            if (origin instanceof android.service.notification.StatusBarNotification posted) return posted;
+        } catch (Throwable ignored) { }
+        return null;
     }
 
     private static String clockShape(Object bean) {

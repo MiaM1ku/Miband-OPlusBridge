@@ -53,6 +53,7 @@ public final class PhoneAlarmProvider extends ContentProvider {
         String label = extras.getString("label");
         long identity = Binder.clearCallingIdentity();
         try {
+            if (op == 0) io.github.miam1ku.mibandoplusbridge.notify.PhoneAlarmNotice.noteClockRing();
             if (io.github.miam1ku.mibandoplusbridge.notify.PhoneAlarmNotice.claim(op)) {
                 io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(getContext(),
                         "ALARM_PHONE op=" + op + " id=" + id);

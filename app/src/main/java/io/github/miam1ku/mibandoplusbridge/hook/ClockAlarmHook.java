@@ -23,6 +23,8 @@ public final class ClockAlarmHook {
     private static final Pattern SCHEDULE_LABEL = Pattern.compile("mLabel='([^']*)'");
     private static final AtomicBoolean installed = new AtomicBoolean();
     private static volatile int ringingScheduleId = -1;
+    private static volatile Object ringingSchedule;
+    private static volatile boolean snoozed;
 
     private ClockAlarmHook() {}
 
@@ -105,6 +107,7 @@ public final class ClockAlarmHook {
             android.util.Log.i("OplusBandBridge", "CLOCK_ALARM_ID_MISSING");
             return;
         }
+        ringingSchedule = schedule;
         ringingScheduleId = id;
         Context app = context.getApplicationContext() == null ? context : context.getApplicationContext();
         call(app, 0, id, labelOf(schedule, text));
@@ -126,8 +129,12 @@ public final class ClockAlarmHook {
             return;
         }
         if (raw < 0 || raw > Integer.MAX_VALUE) return;
-        ringingScheduleId = -1;
         int op = intent.getBooleanExtra("IS_ALARM_DISMISSED", false) ? 1 : 2;
+        snoozed = op == 2;
+        if (op == 1) {
+            ringingSchedule = null;
+            ringingScheduleId = -1;
+        }
         call(context, op, (int) raw, "");
     }
 
@@ -184,11 +191,15 @@ public final class ClockAlarmHook {
                         int bandOp = message.arg1;
                         int bandId = message.arg2;
                         if (bandOp != 1 && bandOp != 2) return;
-                        if (bandId >= 0 && ringingScheduleId < 0) ringingScheduleId = bandId;
+                        if (ringingScheduleId < 0 && bandId > 0) ringingScheduleId = bandId;
                         android.util.Log.i("OplusBandBridge", "CLOCK_ALARM_REPLY op=" + bandOp
                                 + " id=" + ringingScheduleId);
                         stopRinging(context, bandOp);
-                        ringingScheduleId = -1;
+                        if (bandOp == 1) {
+                            snoozed = false;
+                            ringingSchedule = null;
+                            ringingScheduleId = -1;
+                        }
                     }
                 }));
         try {
@@ -214,6 +225,7 @@ public final class ClockAlarmHook {
             android.util.Log.i("OplusBandBridge", "CLOCK_ALARM_STOP_NO_ID");
             return;
         }
+        if (op == 1 && snoozed) cancelSnooze(context);
         Intent stop = new Intent();
         stop.setClassName(CLOCK, "com.oplus.alarmclock.alert.AlarmService");
         stop.setAction("STOP_ALARM");
@@ -228,6 +240,20 @@ public final class ClockAlarmHook {
                     + failure.getClass().getSimpleName());
         }
     }
+    /** AlarmReceiver cancels the snooze timer when the schedule extra is present and both flags are false. */
+    private static void cancelSnooze(Context context) {
+        if (!(ringingSchedule instanceof android.os.Parcelable schedule)) return;
+        Intent cancel = new Intent("com.oplus.alarmclock.alarmclock.cancel_snooze");
+        cancel.setPackage(CLOCK);
+        cancel.putExtra("intent.extra.alarm", schedule);
+        try {
+            context.sendBroadcast(cancel);
+        } catch (RuntimeException failure) {
+            android.util.Log.i("OplusBandBridge", "CLOCK_SNOOZE_CANCEL_FAILED "
+                    + failure.getClass().getSimpleName());
+        }
+    }
+
 
     private static List<Method> anchored(List<String> apks, ClassLoader loader, String anchor) {
         try {

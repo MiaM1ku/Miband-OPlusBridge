@@ -37,19 +37,17 @@ public final class DeviceCardProvider extends ContentProvider {
     private void requireReader() {
         int uid = Binder.getCallingUid();
         if (uid == Process.myUid() || uid == 0 || uid == 2000) return; // self, root, developer shell
-        String[] packages = getContext().getPackageManager().getPackagesForUid(uid);
-        if (packages == null || packages.length != 1 || !allowed(packages[0])) {
-            throw new SecurityException("DEVICE_CARD_CALLER_NOT_AUTHORIZED");
-        }
+        if (!uidHas(HOST) && !uidHas(HEALTH)) throw new SecurityException("DEVICE_CARD_CALLER_NOT_AUTHORIZED");
     }
 
     private void requireSyncCaller() {
         int uid = Binder.getCallingUid();
         if (uid == Process.myUid()) return;
-        String[] packages = getContext().getPackageManager().getPackagesForUid(uid);
-        if (packages == null || packages.length != 1 || !HEALTH.equals(packages[0])) {
-            throw new SecurityException("DEVICE_SYNC_CALLER_NOT_AUTHORIZED");
-        }
+        if (!uidHas(HEALTH)) throw new SecurityException("DEVICE_SYNC_CALLER_NOT_AUTHORIZED");
+    }
+
+    private boolean uidHas(String packageName) {
+        return io.github.miam1ku.mibandoplusbridge.HostIdentity.uidHas(getContext(), Binder.getCallingUid(), packageName);
     }
 
     private io.github.miam1ku.mibandoplusbridge.data.LocalPrefs state() {
@@ -58,10 +56,6 @@ public final class DeviceCardProvider extends ContentProvider {
         return io.github.miam1ku.mibandoplusbridge.data.LocalPrefs.open(getContext(), "band-state");
     }
 
-    private boolean allowed(String caller) {
-        if (HOST.equals(caller) || HEALTH.equals(caller)) return true;
-        return false;
-    }
 
     private static void requireUri(Uri uri) {
         if (!URI.equals(uri)) throw new IllegalArgumentException("UNSUPPORTED_DEVICE_CARD_URI");

@@ -40,8 +40,7 @@ public final class HealthQueueProvider extends ContentProvider {
     private boolean requireCaller() {
         int uid = Binder.getCallingUid();
         if (uid == Process.myUid()) return true;
-        String[] packages = getContext().getPackageManager().getPackagesForUid(uid);
-        if (packages == null || packages.length != 1 || !HOST.equals(packages[0])) {
+        if (!io.github.miam1ku.mibandoplusbridge.HostIdentity.uidHas(getContext(), uid, HOST)) {
             throw new SecurityException("HEALTH_CALLER_NOT_AUTHORIZED");
         }
         return false;
