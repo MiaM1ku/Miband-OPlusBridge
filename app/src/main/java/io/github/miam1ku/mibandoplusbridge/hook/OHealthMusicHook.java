@@ -28,6 +28,7 @@ public final class OHealthMusicHook {
     private static int lastDuration = Integer.MIN_VALUE;
     private static String lastTrack = "";
     private static String lastArtist = "";
+    private static long lastPublishedNanos;
 
     private OHealthMusicHook() {}
 
@@ -121,8 +122,9 @@ public final class OHealthMusicHook {
     private static void publish(boolean force, int state, int volume, String track, String artist,
                                 int position, int duration) {
         volume = Math.max(0, Math.min(100, volume));
-        if (!force && state == lastState && volume == lastVolume && duration == lastDuration
-                && track.equals(lastTrack) && artist.equals(lastArtist)) return;
+        boolean same = state == lastState && volume == lastVolume && duration == lastDuration
+                && java.util.Objects.equals(track, lastTrack) && java.util.Objects.equals(artist, lastArtist);
+        if (MusicRepeat.suppress(force, same, System.nanoTime() - lastPublishedNanos)) return;
         if (app == null) return;
         Bundle extras = new Bundle();
         extras.putInt("state", state);
@@ -139,6 +141,7 @@ public final class OHealthMusicHook {
             lastDuration = duration;
             lastTrack = track;
             lastArtist = artist;
+            lastPublishedNanos = System.nanoTime();
         } catch (RuntimeException failure) {
             android.util.Log.i("OplusBandBridge", "MUSIC native unavailable");
             trace("MUSIC_HOOK publish-failed " + failure.getClass().getSimpleName());

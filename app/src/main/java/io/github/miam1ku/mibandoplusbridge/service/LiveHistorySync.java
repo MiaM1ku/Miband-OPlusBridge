@@ -20,6 +20,8 @@ final class LiveHistorySync {
     private final java.util.function.BooleanSupplier capacity;
     private final ArrayDeque<byte[]> remaining = new ArrayDeque<>();
     private final Set<String> pending = new HashSet<>();
+    /** File ids already stored this session. The band keeps listing them; do not download again. */
+    private final Set<String> stored = new HashSet<>();
     private boolean busy;
     private boolean includeHistory;
     private boolean historical;
@@ -62,7 +64,9 @@ final class LiveHistorySync {
             Set<String> unique = new HashSet<>();
             for (int offset = 0; offset < ids.length; offset += 7) {
                 byte[] id = java.util.Arrays.copyOfRange(ids, offset, offset + 7);
-                if (unique.add(HexFormat.of().formatHex(id))) remaining.addLast(id);
+                String hex = HexFormat.of().formatHex(id);
+                if (stored.contains(hex) || !unique.add(hex)) continue;
+                remaining.addLast(id);
             }
             nextBatch(round);
         }, worker);
@@ -99,7 +103,9 @@ final class LiveHistorySync {
     }
 
     void saved(byte[] fileId) {
-        if (busy && pending.remove(HexFormat.of().formatHex(fileId))) {
+        String hex = HexFormat.of().formatHex(fileId);
+        if (busy && pending.remove(hex)) {
+            stored.add(hex);
             if (pending.isEmpty()) {
                 cancelDeadline();
                 nextBatch(generation);

@@ -80,6 +80,9 @@ public final class HealthQueueProvider extends ContentProvider {
                     || selectionArgs == null || selectionArgs.length != 5) {
                 throw new IllegalArgumentException("HEALTH_RECORD_SELECTION_REQUIRED");
             }
+            if ("steps_day".equals(selectionArgs[2]) || "steps_interval".equals(selectionArgs[2])) {
+                new io.github.miam1ku.mibandoplusbridge.data.RawFitnessFileStore(getContext()).refreshStepMetrics();
+            }
             cursor = store.records(selectionArgs[0], selectionArgs[1], selectionArgs[2],
                     Long.parseLong(selectionArgs[4]), Long.parseLong(selectionArgs[3]), uri.getQueryParameter("after"));
         } else {

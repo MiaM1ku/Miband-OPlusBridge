@@ -21,4 +21,12 @@ public final class PhoneDndTest {
         assertTrue(PhoneDnd.acceptBandManual(true, PhoneDnd.ALL, 1_000_000_000L, 5_000_000_000L));
         assertTrue(PhoneDnd.acceptBandManual(false, PhoneDnd.NONE, 0, 1L));
     }
+
+    @Test public void oneDndChangeDoesNotSyncTwiceInsideASecond() {
+        assertFalse(PhoneDnd.repeatSync(Integer.MIN_VALUE, -1, PhoneDnd.PRIORITY));
+        assertTrue(PhoneDnd.repeatSync(PhoneDnd.PRIORITY, 504_000_000L, PhoneDnd.PRIORITY));
+        assertFalse(PhoneDnd.repeatSync(PhoneDnd.PRIORITY, 1_000_000_000L, PhoneDnd.PRIORITY));
+        assertFalse(PhoneDnd.repeatSync(PhoneDnd.PRIORITY, 100_000_000L, PhoneDnd.ALL));
+        assertFalse(PhoneDnd.repeatSync(PhoneDnd.ALL, -1, PhoneDnd.ALL));
+    }
 }

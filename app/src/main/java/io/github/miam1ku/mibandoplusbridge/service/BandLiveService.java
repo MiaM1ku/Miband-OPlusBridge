@@ -38,7 +38,7 @@ public final class BandLiveService extends Service {
     private long nextBatteryAt;
     private long nextHealthAt;
     private long nextWeatherAt;
-    /** Classic BT stays awake while these run. Notifications do not use this timer. */
+    /** Battery and a today-file list. Unchanged files and weather stay off the radio so the ACL can sniff. */
     private static final long IDLE_POLL_MINUTES = 30;
     private WeatherSync weatherSync;
     private HealthReplay healthReplay;
@@ -79,6 +79,10 @@ public final class BandLiveService extends Service {
     private final Object stopLock = new Object();
     private volatile boolean stopRequested;
     private volatile long lastDndSentNanos;
+    private int lastDndFilter = Integer.MIN_VALUE;
+    private long dndSyncAtNanos;
+    private final Object dndSyncLock = new Object();
+    private final Runnable dndRulesAgain = this::sendDndRulesAgain;
     private final io.github.miam1ku.mibandoplusbridge.notify.SleepMusic sleepMusic =
             new io.github.miam1ku.mibandoplusbridge.notify.SleepMusic();
     private volatile boolean sleepPauseOn;
@@ -722,7 +726,7 @@ public final class BandLiveService extends Service {
         }
         if (now >= nextWeatherAt) {
             nextWeatherAt = now + TimeUnit.MINUTES.toNanos(30);
-            weatherSync.refreshAndSend();
+            weatherSync.sendIfChanged();
         }
     }
 
@@ -764,6 +768,15 @@ public final class BandLiveService extends Service {
         var queue = commands;
         if (stopRequested || queue == null) return;
         int filter = io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.currentFilter(this);
+        long now = System.nanoTime();
+        synchronized (dndSyncLock) {
+            long elapsed = dndSyncAtNanos == 0 ? -1 : now - dndSyncAtNanos;
+            if (io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.repeatSync(lastDndFilter, elapsed, filter)) {
+                return;
+            }
+            lastDndFilter = filter;
+            dndSyncAtNanos = now;
+        }
         boolean on = io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.blocksNotifications(filter);
         android.util.Log.i("OplusBandBridge", "DND_SYNC filter=" + filter + " on=" + on);
         io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this, "DND_SYNC filter=" + filter + " on=" + on);
@@ -787,7 +800,8 @@ public final class BandLiveService extends Service {
         sendQuietly(queue, io.github.miam1ku.mibandoplusbridge.protocol.BandDndCommand.state(on));
         sendQuietly(queue, io.github.miam1ku.mibandoplusbridge.protocol.BandDndCommand.queryRules());
         sendQuietly(queue, io.github.miam1ku.mibandoplusbridge.protocol.BandDndCommand.phoneRules(on, activatedAt));
-        main.postDelayed(this::sendDndRulesAgain, 2000);
+        main.removeCallbacks(dndRulesAgain);
+        main.postDelayed(dndRulesAgain, 2000);
     }
 
 

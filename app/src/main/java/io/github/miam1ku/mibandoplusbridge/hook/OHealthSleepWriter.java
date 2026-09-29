@@ -89,8 +89,14 @@ final class OHealthSleepWriter {
         for (OHealthSleepPlan.Night night : nights) {
             if (!account.equals(host.account())) throw new SecurityException("IMPORT_ACCOUNT_CHANGED");
             try {
-                if (writeNight(api, account, device, night)) inserted++;
-                else skipped++;
+                String skip = writeNight(api, account, device, night);
+                if (skip == null) inserted++;
+                else {
+                    skipped++;
+                    String line = "OHEALTH_SLEEP_NIGHT_SKIPPED date=" + night.date() + " reason=" + skip;
+                    Log.i("OplusBandBridge", line);
+                    OHealthDeviceHook.traceLine(context, line);
+                }
             } catch (IllegalStateException heldNight) {
                 String reason = heldNight.getMessage();
                 if (reason == null || !reason.startsWith("SLEEP_SEGMENT_UNCONFIRMED")) throw heldNight;
@@ -102,13 +108,13 @@ final class OHealthSleepWriter {
                 + " inserted=" + inserted + " skipped=" + skipped + " held=" + held);
     }
 
-    /** @return false when this date already belongs to another device or already has our stat. */
-    private boolean writeNight(Object api, String account, String device, OHealthSleepPlan.Night night)
+    /** @return null when the night was inserted; otherwise {@code other-device} or {@code already-ours}. */
+    private String writeNight(Object api, String account, String device, OHealthSleepPlan.Night night)
             throws Exception {
         long statStart = night.fallAsleepMs() - 86_400_000L;
         long statEnd = night.wakeMs() + 3_600_000L;
         List<?> stats = host.readRows(api, account, TABLE_STAT, null, statStart, statEnd, 4, false);
-        if (ownedByOther(stats, night.date(), device)) return false;
+        if (ownedByOther(stats, night.date(), device)) return "other-device";
         List<?> existing = host.readRows(api, account, TABLE_SLEEP, device, night.fallAsleepMs() - 1,
                 night.wakeMs() + 1, 0, true);
         List<Object> missing = new ArrayList<>();
@@ -125,13 +131,13 @@ final class OHealthSleepWriter {
                 }
             }
         }
-        if (hasStat(stats, device, night)) return false;
+        if (hasStat(stats, device, night)) return "already-ours";
         host.insertRows(api, TABLE_STAT, List.of(statRow(account, device, night)));
         List<?> written = host.readRows(api, account, TABLE_STAT, device, statStart, statEnd, 4, false);
         if (!hasStat(written, device, night)) {
             throw new IllegalStateException("SLEEP_STAT_UNCONFIRMED_" + written.size());
         }
-        return true;
+        return null;
     }
 
     private List<HealthRecord> history(Context context, String account, String device) throws Exception {

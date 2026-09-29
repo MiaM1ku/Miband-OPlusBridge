@@ -21,6 +21,7 @@ public final class RawFitnessFileStore {
     private static final int MAX_FILES = 2048;
     private static final int MAX_FILE_BYTES = 1024 * 1024;
     private static final Object FILE_LOCK = new Object();
+    private static volatile boolean stepMetricsCurrent;
     private final Context context;
     private final File directory;
 
@@ -178,6 +179,67 @@ public final class RawFitnessFileStore {
                 }
             }
             return migrated;
+        }
+    }
+
+    /** One pass so step rows saved before calories and stand hours were parsed pick them up. */
+    public void refreshStepMetrics() {
+        if (stepMetricsCurrent) return;
+        synchronized (FILE_LOCK) {
+            if (stepMetricsCurrent) return;
+            SharedPreferences prefs = context.getSharedPreferences("oplusband-history", Context.MODE_PRIVATE);
+            if (prefs.getBoolean("step-metrics-v1", false)) {
+                stepMetricsCurrent = true;
+                return;
+            }
+            try {
+                rewriteStepMetrics();
+                if (!prefs.edit().putBoolean("step-metrics-v1", true).commit()) {
+                    throw new IllegalStateException("STEP_METRIC_MEMORY_FAILED");
+                }
+                stepMetricsCurrent = true;
+            } catch (Exception ignored) {
+                // Identity or a file can be unready. The next step read tries again.
+            }
+        }
+    }
+
+    private void rewriteStepMetrics() throws Exception {
+        var state = LocalPrefs.open(context, "band-state");
+        String deviceId = state.getString("deviceId", "");
+        String identity = requireMatchingIdentity(context, deviceId);
+        String firmware = state.getString("verifiedFirmware", "");
+        if (firmware.isBlank()) throw new IllegalStateException("HISTORY_FIRMWARE_UNCONFIRMED");
+        BandHistoryParser parser = new BandHistoryParser(firmware, deviceId, identity);
+        File[] existing = directory.listFiles((parent, name) -> name.matches("[0-9a-f]{64}\\.dat"));
+        if (existing == null) return;
+        try (HealthRecordStore store = new HealthRecordStore(context)) {
+            for (File file : existing) {
+                String hash = file.getName().substring(0, 64);
+                if (!store.isFileIndexed(hash)) continue;
+                byte[] bytes;
+                try {
+                    bytes = readFile(hash);
+                } catch (IllegalArgumentException invalid) {
+                    continue;
+                }
+                try {
+                    int descriptor = bytes.length > 6 ? bytes[6] & 0xff : 0;
+                    if (((descriptor & 0x7f) >>> 2) != 0) continue;
+                    BandHistoryParser.FileResult result = parser.parseFile(bytes);
+                    if (!"PARSED".equals(result.parseStatus)) continue;
+                    for (BandHistoryParser.Measurement measurement : result.measurements) {
+                        if (!"steps_day".equals(measurement.kind) && !"steps_interval".equals(measurement.kind)) {
+                            continue;
+                        }
+                        store.enqueueMeasurement(measurement);
+                    }
+                } catch (IllegalArgumentException invalid) {
+                    continue;
+                } finally {
+                    Arrays.fill(bytes, (byte) 0);
+                }
+            }
         }
     }
 

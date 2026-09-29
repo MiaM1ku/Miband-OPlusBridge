@@ -53,6 +53,42 @@ public final class BandHistoryParserTest {
                 changedHeartRate.get(1).sourceFingerprint);
     }
 
+    @Test public void dailyReportCarriesCaloriesAndStandHours() throws Exception {
+        byte[] body = reportBody(2052);
+        put16(body, 9, 183);
+        body[27] = 0x0c;
+        body[28] = 0x30;
+        var daily = parser().parseFile(file(5, 1, body)).measurements.get(0);
+        assertEquals(2052, daily.value.intValue());
+        assertEquals(Integer.valueOf(183), daily.calories);
+        assertEquals(Integer.valueOf(4), daily.moveAbout);
+        assertNull(daily.distance);
+        long day = java.time.LocalDate.of(2026, 9, 29).atStartOfDay(java.time.ZoneId.of("+05:30"))
+                .toInstant().toEpochMilli();
+        var saved = BandHistoryParser.stepDays(java.util.List.of(
+                new io.github.miam1ku.mibandoplusbridge.data.HealthRecord("day", "device", "steps_day",
+                        day, day + 86_400_000L, 2052, null, 1, "+05:30", "continuous", false, 183, null, 4),
+                new io.github.miam1ku.mibandoplusbridge.data.HealthRecord("minute", "device", "steps_interval",
+                        day, day + 60_000L, 21, null, 1, "+05:30", "continuous", false, 1, 13, null)));
+        assertEquals(1, saved.size());
+        assertEquals(2052, saved.get(0).steps);
+        assertEquals(183, saved.get(0).calories);
+        assertEquals(4, saved.get(0).moveAbout);
+        assertEquals(13, saved.get(0).distance);
+    }
+
+    @Test public void minuteRecordCarriesCaloriesAndDistanceBesideSteps() throws Exception {
+        byte[] body = recordBody(9, 5, 72, 0);
+        body[9] = 4;
+        put16(body, 11, 13);
+        var steps = parser().parseFile(file(4, 0, body)).measurements.get(0);
+        assertEquals("steps_interval", steps.kind);
+        assertEquals(9, steps.value.intValue());
+        assertEquals(Integer.valueOf(4), steps.calories);
+        assertEquals(Integer.valueOf(13), steps.distance);
+        assertNull(steps.moveAbout);
+    }
+
     @Test public void versionTwoMinuteRecordsStillExposeHeartRate() throws Exception {
         byte[] body = new byte[8];
         int base = 31;

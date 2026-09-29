@@ -25,7 +25,7 @@ public final class WeatherSync implements AutoCloseable {
         public Failure(String code) { super(code); this.code = code; }
     }
 
-    private enum Operation { REFRESH, INSPECT, SEND }
+    private enum Operation { REFRESH, IF_CHANGED, INSPECT, SEND }
     private final Context context;
     private final Supplier<LiveCommandQueue> queue;
     private final ScheduledExecutorService coordinator;
@@ -42,6 +42,7 @@ public final class WeatherSync implements AutoCloseable {
     private Operation operation;
     private ScheduledFuture<?> expiry;
     private LiveCommandQueue transactionQueue;
+    private BandWeatherEncoder.Sample lastSent;
 
     public WeatherSync(Context context, Supplier<LiveCommandQueue> queue,
                        ScheduledExecutorService coordinator) {
@@ -61,6 +62,8 @@ public final class WeatherSync implements AutoCloseable {
     }
 
     public CompletionStage<Void> refreshAndSend() { return submit(Operation.REFRESH, null); }
+    /** Idle poll. The watch's own weather request still uses {@link #refreshAndSend()}. */
+    public CompletionStage<Void> sendIfChanged() { return submit(Operation.IF_CHANGED, null); }
     public CompletionStage<Void> inspectCities(BandWeatherEncoder.Sample sample) {
         return submit(Operation.INSPECT, sample);
     }
@@ -81,7 +84,7 @@ public final class WeatherSync implements AutoCloseable {
                 transactionQueue = queue.get();
                 if (transactionQueue == null) { finish("WEATHER_DISCONNECTED"); return; }
                 try {
-                    if (requested == Operation.REFRESH) {
+                    if (requested == Operation.REFRESH || requested == Operation.IF_CHANGED) {
                         Bundle response;
                         try {
                             response = context.getContentResolver().call(WeatherSnapshotProvider.URI,
@@ -91,7 +94,7 @@ public final class WeatherSync implements AutoCloseable {
                         }
                         if (response == null || !"WEATHER_REQUESTED".equals(response.getString("status"))) {
                             // A source failure does not invalidate a previously fresh snapshot.
-                            queryCities(freshSnapshot(null));
+                            deliver(freshSnapshot(null));
                             return;
                         }
                         waitingSnapshot = true;
@@ -154,8 +157,22 @@ public final class WeatherSync implements AutoCloseable {
             }
             waitingSnapshot = false;
             cancelExpiry();
-            queryCities(freshSample(response));
+            deliver(freshSample(response));
         } catch (Exception failure) { finish(code(failure)); }
+    }
+
+    private void deliver(BandWeatherEncoder.Sample sample) {
+        if (operation == Operation.IF_CHANGED && !transmitForecast(false, lastSent, sample)) {
+            skipUnchanged();
+            return;
+        }
+        queryCities(sample);
+    }
+
+    /** A watch request always transmits. An idle poll does not repeat the same forecast. */
+    static boolean transmitForecast(boolean forced, BandWeatherEncoder.Sample lastSent,
+                                    BandWeatherEncoder.Sample current) {
+        return forced || lastSent == null || current == null || !lastSent.equals(current);
     }
 
     private void queryCities(BandWeatherEncoder.Sample sample) {
@@ -232,7 +249,7 @@ public final class WeatherSync implements AutoCloseable {
     private void sendFrame(CompletableFuture<Void> transaction, BandWeatherEncoder.Sample sample,
                            XiaomiProto.WeatherLocations cities, List<XiaomiProto.Command> frames, int index) {
         if (active != transaction) return;
-        if (index == frames.size()) { finish(null); return; }
+        if (index == frames.size()) { lastSent = sample; finish(null); return; }
         try {
             bind(freshSnapshot(sample), cities);
             if (transactionQueue != queue.get()) throw new Failure("WEATHER_DISCONNECTED");
@@ -278,6 +295,18 @@ public final class WeatherSync implements AutoCloseable {
 
     private void cancelExpiry() { if (expiry != null) { expiry.cancel(false); expiry = null; } }
 
+    private void skipUnchanged() {
+        if (active == null) return;
+        CompletableFuture<Void> result = active;
+        active = null;
+        awaitingCities = false;
+        waitingSnapshot = false;
+        transactionQueue = null;
+        cancelExpiry();
+        record("WEATHER_UNCHANGED");
+        result.complete(null);
+    }
+
     private void finish(String error) {
         if (active == null) return;
         CompletableFuture<Void> result = active;
@@ -290,7 +319,6 @@ public final class WeatherSync implements AutoCloseable {
         record(error == null ? completed == Operation.INSPECT ? "WEATHER_CITIES_READY" : "WEATHER_TRANSPORT_CONFIRMED" : error);
         if (error == null) result.complete(null); else result.completeExceptionally(new Failure(error));
     }
-
     private void record(String status) {
         try {
             var edit = context.getSharedPreferences("weather-sync", 0).edit().putString("status", status);

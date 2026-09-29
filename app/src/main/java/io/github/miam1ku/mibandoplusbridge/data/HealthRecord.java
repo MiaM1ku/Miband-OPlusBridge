@@ -11,7 +11,8 @@ import org.json.JSONObject;
 /** A normalized measurement; source identifiers and values never enter diagnostic logs. */
 public final class HealthRecord {
     private static final Set<String> FIELDS = Set.of("recordId", "deviceId", "kind", "startMs",
-            "endMs", "value", "stage", "revision", "timezone", "measurementMode", "complete");
+            "endMs", "value", "stage", "revision", "timezone", "measurementMode", "complete",
+            "calories", "distance", "moveAbout");
 
     public final String recordId;
     public final String deviceId;
@@ -24,10 +25,24 @@ public final class HealthRecord {
     public final String timezone;
     public final String measurementMode;
     public final boolean complete;
+    /** Activity kilocalories. Null when this record does not carry them. */
+    public final Integer calories;
+    /** Meters. Null when this record does not carry distance. */
+    public final Integer distance;
+    /** Stand-hours in the daily report. Null except on a parsed steps_day. */
+    public final Integer moveAbout;
 
     public HealthRecord(String recordId, String deviceId, String kind, long startMs, long endMs,
             Number value, Integer stage, int revision, String timezone,
             String measurementMode, boolean complete) {
+        this(recordId, deviceId, kind, startMs, endMs, value, stage, revision, timezone,
+                measurementMode, complete, null, null, null);
+    }
+
+    public HealthRecord(String recordId, String deviceId, String kind, long startMs, long endMs,
+            Number value, Integer stage, int revision, String timezone,
+            String measurementMode, boolean complete, Integer calories, Integer distance,
+            Integer moveAbout) {
         if (recordId == null || recordId.isBlank() || deviceId == null || deviceId.isBlank()
                 || startMs < 0 || endMs <= startMs || revision <= 0) {
             throw new IllegalArgumentException("INVALID_HEALTH_RECORD");
@@ -47,7 +62,11 @@ public final class HealthRecord {
                 || steps && !"continuous".equals(measurementMode)
                 || sleepInterval && !"sleep".equals(measurementMode)
                 || sleepStage && "manual".equals(measurementMode)
-                || complete && !sleepInterval) {
+                || complete && !sleepInterval
+                || (calories != null || distance != null || moveAbout != null) && !steps
+                || calories != null && (calories < 0 || calories > 100_000)
+                || distance != null && (distance < 0 || distance > 1_000_000)
+                || moveAbout != null && (moveAbout < 0 || moveAbout > 24 || !reportDay(kind))) {
             throw new IllegalArgumentException("INVALID_MEASUREMENT_MODE");
         }
         if (sleepStage ? stage == null || value != null
@@ -89,6 +108,9 @@ public final class HealthRecord {
         this.timezone = timezone;
         this.measurementMode = measurementMode;
         this.complete = complete;
+        this.calories = calories;
+        this.distance = distance;
+        this.moveAbout = moveAbout;
     }
     /** OHealth 6.9.37 drops these values and still reports insert success. */
     public boolean hostAccepts() {
@@ -117,6 +139,9 @@ public final class HealthRecord {
             json.put("measurementMode", measurementMode);
             json.put("complete", complete);
             if (timezone != null) json.put("timezone", timezone);
+            if (calories != null) json.put("calories", calories);
+            if (distance != null) json.put("distance", distance);
+            if (moveAbout != null) json.put("moveAbout", moveAbout);
         } catch (JSONException e) {
             throw new IllegalStateException("HEALTH_RECORD_SERIALIZATION_FAILED", e);
         }
@@ -143,6 +168,20 @@ public final class HealthRecord {
                 value == JSONObject.NULL ? null : (Number) value,
                 stage == JSONObject.NULL ? null : (Integer) stage, json.getInt("revision"),
                 json.has("timezone") ? json.getString("timezone") : null,
-                json.getString("measurementMode"), json.getBoolean("complete"));
+                json.getString("measurementMode"), json.getBoolean("complete"),
+                optional(json, "calories"), optional(json, "distance"), optional(json, "moveAbout"));
+    }
+
+    private static boolean reportDay(String kind) { return "steps_day".equals(kind); }
+
+    private static Integer optional(JSONObject json, String name) throws JSONException {
+        if (!json.has(name) || json.isNull(name)) return null;
+        Object value = json.get(name);
+        if (!(value instanceof Number) || value instanceof Double || value instanceof Float) {
+            throw new IllegalArgumentException("INVALID_HEALTH_MEASUREMENT");
+        }
+        long number = ((Number) value).longValue();
+        if (number < 0 || number > Integer.MAX_VALUE) throw new IllegalArgumentException("INVALID_HEALTH_MEASUREMENT");
+        return (int) number;
     }
 }

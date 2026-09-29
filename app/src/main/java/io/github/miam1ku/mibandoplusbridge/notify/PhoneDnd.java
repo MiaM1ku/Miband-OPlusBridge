@@ -33,7 +33,11 @@ public final class PhoneDnd {
         return filter == PRIORITY || filter == NONE || filter == ALARMS;
     }
 
-    /** The band is the source only when its manual rule disagrees with the phone, and not during our own write. */
+    /** ColorOS delivers one change as both a filter broadcast and a zen_mode write. */
+    public static boolean repeatSync(int previousFilter, long elapsedNanos, int filter) {
+        return previousFilter == filter && elapsedNanos >= 0 && elapsedNanos < 1_000_000_000L;
+    }
+
     public static boolean acceptBandManual(boolean bandOn, int phoneFilter, long sentAtNanos, long nowNanos) {
         if (phoneFilter == UNKNOWN) return false;
         if (bandOn == blocksNotifications(phoneFilter)) return false;

@@ -161,9 +161,11 @@ public final class BandHistoryParser {
         for (int index = 0; cursor.remaining() > 0; index++) {
             long minute = firstMinute + index * MINUTE_MS;
             int steps = flag(validity, base) ? cursor.uint(2) : 0;
-            if (flag(validity, base - 4)) cursor.skip(1);
+            Integer minuteCalories = null;
+            if (flag(validity, base - 4)) minuteCalories = cursor.uint(1);
             if (flag(validity, base - 8)) cursor.skip(1);
-            if (flag(validity, base - 12)) cursor.skip(2);
+            Integer minuteDistance = null;
+            if (flag(validity, base - 12)) minuteDistance = cursor.uint(2);
             int heart = flag(validity, base - 16) ? cursor.uint(1) : -1;
             if (flag(validity, base - 20)) cursor.skip(1);
             if (flag(validity, base - 24)) cursor.skip(2);
@@ -184,7 +186,7 @@ public final class BandHistoryParser {
             }
             if (flag(validity, base) && flag(validity, base - 3)) {
                 records.add(measurement("steps_interval", minute, minute + MINUTE_MS,
-                        steps & 0x3fff, timezone, "continuous", false));
+                        steps & 0x3fff, timezone, "continuous", false, minuteCalories, minuteDistance, null));
             }
             if (flag(validity, base - 17)) addMetric(records, "heart_rate", minute, heart, timezone, "continuous");
             if (version >= 3 && flag(validity, base - 29)) {
@@ -206,8 +208,12 @@ public final class BandHistoryParser {
         if (cursor.remaining() != REPORT_BYTES) throw new SemanticException("UNSUPPORTED_ACTIVITY_REPORT_LAYOUT");
         if (!bit(validity, 31)) return List.of();
         long day = Math.floorDiv(seconds + offsetSeconds, 86_400L) * DAY_MS - offsetSeconds * 1000L;
-        return List.of(measurement("steps_day", day, day + DAY_MS, cursor.unsigned32(),
-                timezone, "continuous", false));
+        long steps = cursor.unsigned32();
+        int calories = cursor.uint(2);
+        cursor.skip(16); // Heart, stress and stand lead-in. The 53-byte body is fixed.
+        int moveAbout = Integer.bitCount(cursor.uint(3));
+        return List.of(measurement("steps_day", day, day + DAY_MS, steps,
+                timezone, "continuous", false, calories, null, moveAbout));
     }
 
     private List<Measurement> decodeManual(byte[] bytes, String timezone) {
@@ -350,7 +356,8 @@ public final class BandHistoryParser {
         if (start < 0 || end <= start) throw new SemanticException("INVALID_HISTORY_TIMESTAMP");
         return new Measurement(recordId("sleep_stage", start) + ":sleep", deviceId, "sleep_stage",
                 start, end, null, stage, timezone, "sleep", false,
-                sourceFingerprint("sleep_stage", start, end, null, timezone, "sleep", false, stage));
+                sourceFingerprint("sleep_stage", start, end, null, timezone, "sleep", false, stage),
+                null, null, null);
     }
 
 
@@ -364,10 +371,18 @@ public final class BandHistoryParser {
 
     private Measurement measurement(String kind, long start, long end, Number value,
             String timezone, String mode, boolean complete) {
+        return measurement(kind, start, end, value, timezone, mode, complete, null, null, null);
+    }
+
+    private Measurement measurement(String kind, long start, long end, Number value,
+            String timezone, String mode, boolean complete, Integer calories, Integer distance,
+            Integer moveAbout) {
         if (start < 0 || end <= start) throw new SemanticException("INVALID_HISTORY_TIMESTAMP");
         return new Measurement(recordId(kind, start) + ":" + mode, deviceId, kind, start, end,
                 value, null, timezone, mode, complete,
-                sourceFingerprint(kind, start, end, value, timezone, mode, complete));
+                sourceFingerprint(kind, start, end, value, timezone, mode, complete, null,
+                        calories, distance, moveAbout),
+                calories, distance, moveAbout);
     }
 
     private static boolean bit(long flags, int bit) { return (flags & 1L << bit) != 0; }
@@ -417,11 +432,17 @@ public final class BandHistoryParser {
 
     private String sourceFingerprint(String kind, long start, long end, Number value,
             String timezone, String mode, boolean complete) {
-        return sourceFingerprint(kind, start, end, value, timezone, mode, complete, null);
+        return sourceFingerprint(kind, start, end, value, timezone, mode, complete, null, null, null, null);
     }
 
     private String sourceFingerprint(String kind, long start, long end, Number value,
             String timezone, String mode, boolean complete, Integer stage) {
+        return sourceFingerprint(kind, start, end, value, timezone, mode, complete, stage, null, null, null);
+    }
+
+    private String sourceFingerprint(String kind, long start, long end, Number value,
+            String timezone, String mode, boolean complete, Integer stage,
+            Integer calories, Integer distance, Integer moveAbout) {
         digest.reset();
         digest.update(identityBytes);
         digest.update((byte) 0);
@@ -438,6 +459,11 @@ public final class BandHistoryParser {
         if (stage != null) {
             digest.update((byte) 1);
             digest.update(stage.byteValue());
+        }
+        if (calories != null || distance != null || moveAbout != null) {
+            updateLong(calories == null ? -1 : calories);
+            updateLong(distance == null ? -1 : distance);
+            updateLong(moveAbout == null ? -1 : moveAbout);
         }
         return HexFormat.of().formatHex(digest.digest());
     }
@@ -556,11 +582,22 @@ public final class BandHistoryParser {
             int numeric = date.getYear() * 10_000 + date.getMonthValue() * 100 + date.getDayOfMonth();
             String key = record.timezone + "|" + numeric;
             long[] acc = days.computeIfAbsent(key, unused -> new long[] {numeric, -1, 0, 0,
-                    date.atStartOfDay(zone).toInstant().toEpochMilli()});
-            if (report) acc[1] = acc[1] < 0 ? value : Math.max(acc[1], value);
-            else if (acc[2] <= 200_000L - value) {
+                    date.atStartOfDay(zone).toInstant().toEpochMilli(), -1, -1, -1});
+            if (report) {
+                if (acc[1] < value) {
+                    acc[1] = value;
+                    acc[5] = record.calories == null ? -1 : record.calories;
+                    acc[6] = record.moveAbout == null ? -1 : record.moveAbout;
+                } else if (acc[1] == value) {
+                    if (record.calories != null) acc[5] = Math.max(acc[5], record.calories);
+                    if (record.moveAbout != null) acc[6] = Math.max(acc[6], record.moveAbout);
+                }
+            } else if (acc[2] <= 200_000L - value) {
                 acc[2] += value;
                 acc[3] = 1;
+                if (record.distance != null && (acc[7] < 0 || acc[7] <= 1_000_000L - record.distance)) {
+                    acc[7] = (acc[7] < 0 ? 0 : acc[7]) + record.distance;
+                }
             } else acc[3] = -1;
         }
         List<StepDay> result = new ArrayList<>();
@@ -569,7 +606,8 @@ public final class BandHistoryParser {
             long steps = acc[1] >= 0 ? acc[1] : acc[3] == 1 ? acc[2] : -1;
             if (steps < 0 || steps > 200_000L) continue;
             int split = entry.getKey().lastIndexOf('|');
-            result.add(new StepDay((int) acc[0], steps, acc[4], entry.getKey().substring(0, split)));
+            result.add(new StepDay((int) acc[0], steps, acc[4], entry.getKey().substring(0, split),
+                    acc[5], acc[7], acc[6]));
         }
         return result;
     }
@@ -579,11 +617,19 @@ public final class BandHistoryParser {
         public final long steps;
         public final long startMs;
         public final String timezone;
-        private StepDay(int date, long steps, long startMs, String timezone) {
+        /** -1 when the daily report has not been parsed. */
+        public final long calories;
+        public final long distance;
+        public final long moveAbout;
+        private StepDay(int date, long steps, long startMs, String timezone,
+                long calories, long distance, long moveAbout) {
             this.date = date;
             this.steps = steps;
             this.startMs = startMs;
             this.timezone = timezone;
+            this.calories = calories;
+            this.distance = distance;
+            this.moveAbout = moveAbout;
         }
     }
 
@@ -603,9 +649,10 @@ public final class BandHistoryParser {
                 continue;
             }
             seen = true;
-            result.add(new StepDay(day.date, Math.max(day.steps, steps), day.startMs, day.timezone));
+            result.add(new StepDay(day.date, Math.max(day.steps, steps), day.startMs, day.timezone,
+                    day.calories, day.distance, day.moveAbout));
         }
-        if (!seen) result.add(new StepDay(numeric, steps, start, zone.getId()));
+        if (!seen) result.add(new StepDay(numeric, steps, start, zone.getId(), -1, -1, -1));
         return result;
     }
 
@@ -614,7 +661,8 @@ public final class BandHistoryParser {
     /** A decoded fact without a revision; the durable queue assigns that monotonically. */
     public static final class Measurement {
         private static final Set<String> FIELDS = Set.of("recordId", "deviceId", "kind", "startMs",
-                "endMs", "value", "stage", "timezone", "measurementMode", "complete", "sourceFingerprint");
+                "endMs", "value", "stage", "timezone", "measurementMode", "complete", "sourceFingerprint",
+                "calories", "distance", "moveAbout");
 
         public final String recordId;
         public final String deviceId;
@@ -627,10 +675,14 @@ public final class BandHistoryParser {
         public final String sourceFingerprint;
         public final String measurementMode;
         public final boolean complete;
+        public final Integer calories;
+        public final Integer distance;
+        public final Integer moveAbout;
 
         private Measurement(String recordId, String deviceId, String kind, long startMs,
                 long endMs, Number value, Integer stage, String timezone,
-                String measurementMode, boolean complete, String fingerprint) {
+                String measurementMode, boolean complete, String fingerprint,
+                Integer calories, Integer distance, Integer moveAbout) {
             if (fingerprint == null || fingerprint.length() != 64) {
                 throw new IllegalArgumentException("INVALID_SOURCE_FINGERPRINT");
             }
@@ -651,11 +703,14 @@ public final class BandHistoryParser {
             this.sourceFingerprint = fingerprint;
             this.measurementMode = measurementMode;
             this.complete = complete;
+            this.calories = calories;
+            this.distance = distance;
+            this.moveAbout = moveAbout;
         }
 
         public HealthRecord toRecord(int revision) {
             return new HealthRecord(recordId, deviceId, kind, startMs, endMs, value, stage,
-                    revision, timezone, measurementMode, complete);
+                    revision, timezone, measurementMode, complete, calories, distance, moveAbout);
         }
 
         public JSONObject toJson() {
@@ -672,6 +727,9 @@ public final class BandHistoryParser {
                 json.put("sourceFingerprint", sourceFingerprint);
                 json.put("measurementMode", measurementMode);
                 json.put("complete", complete);
+                if (calories != null) json.put("calories", calories);
+                if (distance != null) json.put("distance", distance);
+                if (moveAbout != null) json.put("moveAbout", moveAbout);
             } catch (JSONException e) {
                 throw new IllegalStateException("MEASUREMENT_SERIALIZATION_FAILED", e);
             }
@@ -699,9 +757,23 @@ public final class BandHistoryParser {
                     stage == JSONObject.NULL ? null : (Integer) stage,
                     json.has("timezone") ? json.getString("timezone") : null,
                     json.getString("measurementMode"), json.getBoolean("complete"),
-                    json.getString("sourceFingerprint"));
+                    json.getString("sourceFingerprint"),
+                    optional(json, "calories"), optional(json, "distance"), optional(json, "moveAbout"));
             result.toRecord(1); // Apply the same measurement validity rules as persisted records.
             return result;
+        }
+
+        private static Integer optional(JSONObject json, String name) throws JSONException {
+            if (!json.has(name) || json.isNull(name)) return null;
+            Object value = json.get(name);
+            if (!(value instanceof Number) || value instanceof Double || value instanceof Float) {
+                throw new IllegalArgumentException("INVALID_MEASUREMENT_VALUE");
+            }
+            long number = ((Number) value).longValue();
+            if (number < 0 || number > Integer.MAX_VALUE) {
+                throw new IllegalArgumentException("INVALID_MEASUREMENT_VALUE");
+            }
+            return (int) number;
         }
     }
 }

@@ -140,6 +140,8 @@ final class BleGattClient implements AutoCloseable {
                 fail("BLE_NOTIFY_FAILED");
                 return;
             }
+            // Classic sniff is the controller's idle policy. BLE has a public interval instead.
+            gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_LOW_POWER);
             ready.countDown();
         }
 

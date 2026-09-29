@@ -1101,6 +1101,12 @@ public final class OHealthDeviceHook {
 
     private static final java.util.concurrent.ConcurrentHashMap<String, Integer> HOST_NOTIFICATIONS =
             new java.util.concurrent.ConcurrentHashMap<>();
+    private static final java.util.concurrent.ExecutorService ALLOWLIST =
+            java.util.concurrent.Executors.newSingleThreadExecutor(runnable -> {
+                Thread thread = new Thread(runnable, "OplusBandAllowlist");
+                thread.setDaemon(true);
+                return thread;
+            });
 
     private static boolean registeredBand() {
         Bundle shown = snapshot;
@@ -1137,7 +1143,7 @@ public final class OHealthDeviceHook {
             if (deliverPhoneAlarm(bean, pkg, key, removed)) return true;
             boolean call = isIncomingCall(bean);
             if (!removed && !call) {
-                String blocked = allowBlock(bean);
+                String blocked = readAllowBlock(bean);
                 if (blocked != null) {
                     notifyDrop(blocked, pkg, process);
                     return false;
@@ -1152,11 +1158,12 @@ public final class OHealthDeviceHook {
                     return false;
                 }
             }
-            int id = HOST_NOTIFICATIONS.computeIfAbsent(key, ignored -> {
-                int hash = key.hashCode() & 0x7fffffff;
-                return hash == 0 ? 1 : hash;
-            });
-            if (removed) HOST_NOTIFICATIONS.remove(key);
+            Integer id = OHealthNotifyFilter.id(HOST_NOTIFICATIONS, key, removed && !call);
+            if (id == null) {
+                notifyDrop("not-forwarded", pkg, process);
+                return false;
+            }
+            if (removed && call) HOST_NOTIFICATIONS.remove(key);
             Object posted = XposedHelpers.callMethod(bean, "getPostTimeMillis");
             long when = posted instanceof Number time && time.longValue() > 0
                     ? time.longValue() : System.currentTimeMillis();
@@ -1309,7 +1316,31 @@ public final class OHealthDeviceHook {
             return false;
         }
     }
-    /** Null means the health allowlist permits this package. */
+    /** Null means the health allowlist permits this package. Room is not queried on the main thread. */
+    private static String readAllowBlock(Object bean) {
+        if (android.os.Looper.myLooper() != android.os.Looper.getMainLooper()) return allowBlock(bean);
+        java.util.concurrent.atomic.AtomicReference<String> result = new java.util.concurrent.atomic.AtomicReference<>();
+        java.util.concurrent.CountDownLatch done = new java.util.concurrent.CountDownLatch(1);
+        ALLOWLIST.execute(() -> {
+            try {
+                result.set(allowBlock(bean));
+            } finally {
+                done.countDown();
+            }
+        });
+        try {
+            if (!done.await(1, java.util.concurrent.TimeUnit.SECONDS)) {
+                noteAllowlist("timeout");
+                return null;
+            }
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            noteAllowlist("thread");
+            return null;
+        }
+        return result.get();
+    }
+
     private static String allowBlock(Object bean) {
         try {
             Object holder = XposedHelpers.getStaticObjectField(bean.getClass().getClassLoader()
@@ -1326,8 +1357,21 @@ public final class OHealthDeviceHook {
             }
             return null;
         } catch (Throwable unavailable) {
-            return "allowlist " + unavailable.getClass().getSimpleName();
+            String kind = OHealthNotifyFilter.allowlistFailure(unavailable);
+            if (OHealthNotifyFilter.blocks(kind)) return kind;
+            noteAllowlist(kind);
+            return null;
         }
+    }
+
+    private static String lastAllowlist = "";
+
+    private static void noteAllowlist(String kind) {
+        String line = "OHEALTH_ALLOWLIST_UNAVAILABLE " + kind;
+        if (line.equals(lastAllowlist)) return;
+        lastAllowlist = line;
+        Log.i("OplusBandBridge", line);
+        trace(line);
     }
 
     private static String lastNotifyDrop = "";
@@ -1345,11 +1389,15 @@ public final class OHealthDeviceHook {
     }
 
     private static void trace(String line) {
-        if (hostContext == null || line == null || line.isBlank()) return;
+        traceLine(hostContext, line);
+    }
+
+    static void traceLine(Context context, String line) {
+        if (context == null || line == null || line.isBlank()) return;
         try {
             android.os.Bundle extras = new android.os.Bundle();
             extras.putString("line", line.length() > 240 ? line.substring(0, 240) : line);
-            hostContext.getContentResolver().call(
+            context.getContentResolver().call(
                     io.github.miam1ku.mibandoplusbridge.integration.HostNotifyProvider.URI,
                     "trace", null, extras);
         } catch (RuntimeException ignored) { }

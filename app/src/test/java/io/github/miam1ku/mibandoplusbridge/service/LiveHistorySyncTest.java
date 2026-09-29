@@ -54,4 +54,36 @@ public final class LiveHistorySyncTest {
             worker.shutdownNow();
         }
     }
+
+    @Test public void anAlreadyStoredFileIsNotDownloadedAgain() throws Exception {
+        var worker = Executors.newSingleThreadScheduledExecutor();
+        var queueRef = new AtomicReference<LiveCommandQueue>();
+        var historyRef = new AtomicReference<LiveHistorySync>();
+        var downloads = new AtomicInteger();
+        byte[] id = new byte[] {1, 0, 0, 0, 0, 4, 0};
+        BlockingQueue<String> outcomes = new LinkedBlockingQueue<>();
+        try (var queue = new LiveCommandQueue(0, 5_000, (sequence, command) -> {
+            var current = queueRef.get();
+            if (command.getSubtype() == 1) {
+                current.onCommand(XiaomiProto.Command.newBuilder().setType(8).setSubtype(1)
+                        .setHealth(XiaomiProto.Health.newBuilder()
+                                .setActivityRequestFileIds(ByteString.copyFrom(id))).build());
+            } else if (command.getSubtype() == 3) {
+                downloads.incrementAndGet();
+                worker.execute(() -> historyRef.get().saved(id));
+            }
+            current.onAck(sequence);
+        })) {
+            queueRef.set(queue);
+            var history = new LiveHistorySync(queue, worker, () -> outcomes.add("complete"), outcomes::add, () -> true);
+            historyRef.set(history);
+            worker.execute(() -> history.request(false));
+            assertEquals("complete", outcomes.poll(5, TimeUnit.SECONDS));
+            worker.execute(() -> history.request(false));
+            assertEquals("complete", outcomes.poll(5, TimeUnit.SECONDS));
+            assertEquals(1, downloads.get());
+        } finally {
+            worker.shutdownNow();
+        }
+    }
 }
