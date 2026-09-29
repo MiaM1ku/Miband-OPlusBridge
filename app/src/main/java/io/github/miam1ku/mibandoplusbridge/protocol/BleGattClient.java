@@ -8,6 +8,7 @@ import android.bluetooth.BluetoothGattCharacteristic;
 import android.bluetooth.BluetoothGattDescriptor;
 import android.bluetooth.BluetoothGattService;
 import android.bluetooth.BluetoothProfile;
+import android.bluetooth.BluetoothStatusCodes;
 import android.content.Context;
 import java.util.List;
 import java.util.UUID;
@@ -17,6 +18,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import org.json.JSONObject;
+import io.github.miam1ku.mibandoplusbridge.data.SessionLog;
 
 /** Official-app GATT UUIDs when present; otherwise Band 8 fe95 command characteristics. */
 final class BleGattClient implements AutoCloseable {
@@ -40,6 +42,8 @@ final class BleGattClient implements AutoCloseable {
     private final BleV1Codec.Reassembler commands = new BleV1Codec.Reassembler();
     private final BleV1Codec.Reassembler activity = new BleV1Codec.Reassembler();
     private final Object writeLock = new Object();
+    private final BluetoothGattCharacteristic[] subscribe = new BluetoothGattCharacteristic[2];
+    private BleNotifyQueue notifies;
 
     BleGattClient(Context context, BluetoothDevice device, JSONObject binding) {
         this.context = context;
@@ -136,13 +140,10 @@ final class BleGattClient implements AutoCloseable {
                 fail("BLE_CHARACTERISTIC_MISSING");
                 return;
             }
-            if (!enableNotify(gatt, reader) || (fitness != null && !enableNotify(gatt, fitness))) {
-                fail("BLE_NOTIFY_FAILED");
-                return;
-            }
-            // Classic sniff is the controller's idle policy. BLE has a public interval instead.
-            gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_LOW_POWER);
-            ready.countDown();
+            subscribe[0] = reader;
+            subscribe[1] = fitness;
+            notifies = new BleNotifyQueue(fitness == null ? 1 : 2);
+            subscribeNext(gatt);
         }
 
         @Override public void onCharacteristicChanged(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic) {
@@ -156,14 +157,52 @@ final class BleGattClient implements AutoCloseable {
                 fail("BLE_FRAME_INVALID");
             }
         }
+
+        @Override public void onDescriptorWrite(BluetoothGatt gatt, BluetoothGattDescriptor descriptor, int status) {
+            if (closed || notifies == null || descriptor == null || !CCCD.equals(descriptor.getUuid())) return;
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                SessionLog.line(context, "cccd status=" + status);
+                fail("BLE_NOTIFY_FAILED");
+                return;
+            }
+            if (!notifies.confirmed()) return;
+            subscribeNext(gatt);
+        }
     };
 
-    private boolean enableNotify(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic) {
-        if (!gatt.setCharacteristicNotification(characteristic, true)) return false;
+    private void subscribeNext(BluetoothGatt link) {
+        BleNotifyQueue queue = notifies;
+        if (closed || queue == null) {
+            if (!closed) fail("BLE_NOTIFY_FAILED");
+            return;
+        }
+        int index = queue.start();
+        if (index < 0) {
+            if (queue.complete()) {
+                link.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_LOW_POWER);
+                ready.countDown();
+            }
+            return;
+        }
+        BluetoothGattCharacteristic characteristic = subscribe[index];
+        if (characteristic == null || !link.setCharacteristicNotification(characteristic, true)) {
+            fail("BLE_NOTIFY_FAILED");
+            return;
+        }
         BluetoothGattDescriptor descriptor = characteristic.getDescriptor(CCCD);
-        if (descriptor == null) return true;
-        descriptor.setValue(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
-        return gatt.writeDescriptor(descriptor);
+        if (descriptor == null) {
+            if (!queue.confirmed()) {
+                fail("BLE_NOTIFY_FAILED");
+                return;
+            }
+            subscribeNext(link);
+            return;
+        }
+        int queued = link.writeDescriptor(descriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
+        if (queued != BluetoothStatusCodes.SUCCESS) {
+            SessionLog.line(context, "cccd write rejected status=" + queued);
+            fail("BLE_NOTIFY_FAILED");
+        }
     }
 
     private void fail(String code) {
