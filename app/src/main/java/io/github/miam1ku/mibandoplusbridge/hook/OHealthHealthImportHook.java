@@ -604,21 +604,27 @@ public final class OHealthHealthImportHook {
 
         List<?> readRows(Object api, String account, int table, String device, long start, long end,
                 int groupUnit, boolean parse) throws Exception {
+            return readRows(api, account, table, device, start, end, groupUnit, parse, 0);
+        }
+
+        List<?> readRows(Object api, String account, int table, String device, long start, long end,
+                int groupUnit, boolean parse, int limit) throws Exception {
             Object option = readConstructor.newInstance();
             readAccount.invoke(option, account);
             readStart.invoke(option, Math.max(0, start));
             readEnd.invoke(option, end);
             readTable.invoke(option, table);
             if (device != null && !device.isBlank()) readDevice.invoke(option, device);
+            Class<?> readClass = readConstructor.getDeclaringClass();
             if (groupUnit != 0) {
-                Class<?> readClass = readConstructor.getDeclaringClass();
                 readClass.getMethod("setGroupUnitType", int.class).invoke(option, groupUnit);
                 readClass.getMethod("setCount", int.class).invoke(option, 1);
                 readClass.getMethod("setSortOrder", int.class).invoke(option, 1);
             }
+            if (limit > 0) readClass.getMethod("setCount", int.class).invoke(option, limit);
             if (parse) {
                 try {
-                    readConstructor.getDeclaringClass().getMethod("setIsParse", int.class).invoke(option, 2);
+                    readClass.getMethod("setIsParse", int.class).invoke(option, 2);
                 } catch (NoSuchMethodException ignored) { }
             }
             Object bean = awaitRead(read.invoke(api, option));
@@ -630,7 +636,7 @@ public final class OHealthHealthImportHook {
             if (!(value instanceof List<?> rows)) throw new IllegalStateException("IMPORT_READ_PAYLOAD");
             return rows;
         }
-        /** Same query as ExtendStepCounterUtil.fetchDailyData: table 1002, sport mode -2. */
+        /** Band day totals are stored as walk mode, so the phone's mode -2 row is left alone. */
         List<?> readStepDays(Object api, String account, long start, long end) throws Exception {
             Object option = readConstructor.newInstance();
             readAccount.invoke(option, account);
@@ -638,7 +644,7 @@ public final class OHealthHealthImportHook {
             readEnd.invoke(option, end);
             readTable.invoke(option, OHealthStepWriter.TABLE_STAT);
             Class<?> readClass = readConstructor.getDeclaringClass();
-            readClass.getMethod("setReadSportMode", int.class).invoke(option, OHealthStepWriter.DAY_STEP_MODE);
+            readClass.getMethod("setReadSportMode", int.class).invoke(option, OHealthStepWriter.MINUTE_MODE);
             readClass.getMethod("setSortOrder", int.class).invoke(option, 1);
             Object bean = awaitRead(read.invoke(api, option));
             if (!beanClass.isInstance(bean)) throw new IllegalStateException("IMPORT_READ_BEAN_TYPE");
