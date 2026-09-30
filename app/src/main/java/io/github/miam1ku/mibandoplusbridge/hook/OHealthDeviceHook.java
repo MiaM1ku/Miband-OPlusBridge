@@ -1123,11 +1123,6 @@ public final class OHealthDeviceHook {
             }
             if (deliverPhoneAlarm(bean, pkg, key, removed)) return true;
             boolean call = isIncomingCall(bean);
-            if (!call && localListenerConnected()) {
-                if (!removed) readAllowBlock(bean);
-                notifyDrop("local", pkg, process);
-                return true;
-            }
             if (!removed && !call) {
                 String blocked = readAllowBlock(bean);
                 if (blocked != null) {

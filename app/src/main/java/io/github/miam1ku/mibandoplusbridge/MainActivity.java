@@ -700,27 +700,15 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     private void publishPermissionStatus(boolean bluetooth, boolean notify) {
-        boolean listener = io.github.miam1ku.mibandoplusbridge.notify.BandNotificationListener.accessGranted(this);
-        if (bluetooth && notify && listener) {
+        if (bluetooth && notify) {
             permissionStatus.setVisibility(View.GONE);
             permissionStatus.setOnClickListener(null);
             return;
         }
         permissionStatus.setVisibility(View.VISIBLE);
+        permissionStatus.setOnClickListener(null);
         permissionStatus.setText("附近设备权限：" + (bluetooth ? "已授权" : "未授权")
-                + "\n本应用通知：" + (notify ? "已开启" : "未开启")
-                + "\n通知使用权：" + (listener ? "已开启" : "未开启，点此打开"));
-        if (listener) {
-            permissionStatus.setOnClickListener(null);
-            return;
-        }
-        permissionStatus.setOnClickListener(v -> {
-            try {
-                startActivity(new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS));
-            } catch (RuntimeException failure) {
-                permissionStatus.setText("打不开通知使用权设置。");
-            }
-        });
+                + "\n本应用通知：" + (notify ? "已开启" : "未开启"));
     }
 
     private static String safeIdentity(String value, String fallback) {
