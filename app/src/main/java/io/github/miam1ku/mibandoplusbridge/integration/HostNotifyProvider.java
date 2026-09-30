@@ -12,6 +12,7 @@ import io.github.miam1ku.mibandoplusbridge.HostIdentity;
 import io.github.miam1ku.mibandoplusbridge.notify.CallPresentation;
 import io.github.miam1ku.mibandoplusbridge.protocol.BandNotificationCommand;
 import io.github.miam1ku.mibandoplusbridge.service.BandLiveService;
+import io.github.miam1ku.mibandoplusbridge.service.HostKeepAlive;
 import java.time.Instant;
 import java.time.ZoneId;
 
@@ -26,6 +27,9 @@ public final class HostNotifyProvider extends ContentProvider {
         if ("trace".equals(method)) return trace(extras);
         if ("policy".equals(method)) return policy(extras);
         if ("listener".equals(method)) return listenerState();
+        if ("findWatch".equals(method) || "music".equals(method) || "forward".equals(method)) {
+            HostKeepAlive.ensureBridge(getContext());
+        }
         if ("findWatch".equals(method)) return findWatch(extras);
         if ("music".equals(method)) return music(extras);
         if (!"forward".equals(method) || extras == null) {

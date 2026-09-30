@@ -15,6 +15,7 @@ import android.os.UserManager;
 import io.github.miam1ku.mibandoplusbridge.HostIdentity;
 import io.github.miam1ku.mibandoplusbridge.data.BandCatalog;
 import io.github.miam1ku.mibandoplusbridge.service.BandLiveService;
+import io.github.miam1ku.mibandoplusbridge.service.HostKeepAlive;
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -200,6 +201,7 @@ public final class DeviceCardProvider extends ContentProvider {
         }
         requireReader();
         if (!"bandDisplay".equals(method)) throw new SecurityException("DEVICE_CARD_READ_ONLY");
+        HostKeepAlive.ensureBridge(getContext());
         var state = state();
         Bundle display = new Bundle();
         boolean registered = state.getBoolean("registered", false);

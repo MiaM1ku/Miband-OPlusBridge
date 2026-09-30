@@ -24,7 +24,7 @@ public final class BootReceiver extends BroadcastReceiver {
                 OwnershipController owner = new OwnershipController(context);
                 BandStateRepository repository = new BandStateRepository(context);
                 if (repository.isRegistered() && owner.nativeReady()) {
-                    BandLiveService.start(context);
+                    BandLiveService.startBlocking(context);
                 } else {
                     repository.markSessionClosed();
                     BandLiveService.stop(context);

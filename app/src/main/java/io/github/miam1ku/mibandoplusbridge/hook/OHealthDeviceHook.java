@@ -449,11 +449,8 @@ public final class OHealthDeviceHook {
         }
         List<String> names = new ArrayList<>();
         for (String apk : apks) {
-            dalvik.system.DexFile dex = null;
             try {
-                dex = new dalvik.system.DexFile(apk);
-                for (java.util.Enumeration<String> entries = dex.entries(); entries.hasMoreElements();) {
-                    String name = entries.nextElement();
+                for (String name : DexAnchors.classNames(apk)) {
                     if (!name.startsWith(WEARABLE_ITEM) || name.indexOf('$') >= 0) continue;
                     Class<?> type;
                     try {
@@ -467,10 +464,6 @@ public final class OHealthDeviceHook {
                     }
                 }
             } catch (Throwable ignored) {
-            } finally {
-                if (dex != null) {
-                    try { dex.close(); } catch (Throwable ignored) { }
-                }
             }
         }
         return names;

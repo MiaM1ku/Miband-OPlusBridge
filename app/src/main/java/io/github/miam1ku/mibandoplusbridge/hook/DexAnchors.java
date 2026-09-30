@@ -40,6 +40,73 @@ final class DexAnchors {
         return found;
     }
 
+    /**
+     * Class names in an apk, from dex bytes only.
+     * {@code dalvik.system.DexFile} dlopens the host odex. Zygisk Next linker mode
+     * replaces that dlopen and aborts the host; a Java catch cannot stop it.
+     */
+    static List<String> classNames(String apkPath) throws IOException {
+        List<String> found = new ArrayList<>();
+        try (ZipFile zip = new ZipFile(apkPath)) {
+            zip.stream().filter(entry -> entry.getName().startsWith("classes") && entry.getName().endsWith(".dex"))
+                    .forEach(entry -> {
+                        try {
+                            collectClasses(read(zip, entry), found);
+                        } catch (IOException failure) {
+                            throw new IllegalStateException(failure);
+                        }
+                    });
+        } catch (IllegalStateException wrapped) {
+            if (wrapped.getCause() instanceof IOException io) throw io;
+            throw wrapped;
+        }
+        return found;
+    }
+
+    private static void collectClasses(byte[] dex, List<String> found) {
+        if (dex.length < 112 || dex[0] != 'd' || dex[1] != 'e' || dex[2] != 'x' || dex[3] != '\n') return;
+        ByteBuffer buf = ByteBuffer.wrap(dex).order(ByteOrder.LITTLE_ENDIAN);
+        int stringIdsSize = buf.getInt(56);
+        int stringIdsOff = buf.getInt(60);
+        int typeIdsSize = buf.getInt(64);
+        int typeIdsOff = buf.getInt(68);
+        int classDefsSize = buf.getInt(96);
+        int classDefsOff = buf.getInt(100);
+        if (stringIdsSize <= 0 || typeIdsSize <= 0 || classDefsSize <= 0) return;
+        if (stringIdsSize > 1_000_000 || typeIdsSize > 1_000_000 || classDefsSize > 1_000_000) return;
+        for (int ci = 0; ci < classDefsSize; ci++) {
+            int def = classDefsOff + ci * 32;
+            if (def < 0 || def + 4 > dex.length) return;
+            int classIdx = buf.getInt(def);
+            if (classIdx < 0 || classIdx >= typeIdsSize) continue;
+            int type = typeIdsOff + classIdx * 4;
+            if (type < 0 || type + 4 > dex.length) continue;
+            int stringIdx = buf.getInt(type);
+            if (stringIdx < 0 || stringIdx >= stringIdsSize) continue;
+            int id = stringIdsOff + stringIdx * 4;
+            if (id < 0 || id + 4 > dex.length) continue;
+            String descriptor = safeText(dex, buf.getInt(id));
+            if (descriptor.length() < 2 || descriptor.charAt(0) != 'L'
+                    || descriptor.charAt(descriptor.length() - 1) != ';') continue;
+            found.add(descriptor.substring(1, descriptor.length() - 1).replace('/', '.'));
+        }
+    }
+
+    private static String safeText(byte[] dex, int off) {
+        if (off < 0 || off >= dex.length) return "";
+        int pos = off;
+        int shift = 0;
+        while (pos < dex.length && shift <= 28) {
+            int b = dex[pos++] & 0xff;
+            if (b < 0x80) break;
+            shift += 7;
+        }
+        int end = pos;
+        while (end < dex.length && dex[end] != 0) end++;
+        if (end >= dex.length) return "";
+        return new String(dex, pos, end - pos, StandardCharsets.UTF_8);
+    }
+
     private static byte[] read(ZipFile zip, ZipEntry entry) throws IOException {
         try (InputStream in = zip.getInputStream(entry)) {
             ByteArrayOutputStream out = new ByteArrayOutputStream();

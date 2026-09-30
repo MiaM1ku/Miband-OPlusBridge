@@ -207,4 +207,27 @@ public final class OwnershipController {
             if (process != null) process.destroy();
         }
     }
+
+    /** Fixed components only. Callers cannot pass a shell string. */
+    static String rootStartCommand(String packageName, String className, boolean foreground) {
+        if (foreground) {
+            if (!"io.github.miam1ku.mibandoplusbridge".equals(packageName)
+                    || !"io.github.miam1ku.mibandoplusbridge.service.BandLiveService".equals(className)) return null;
+            return "am start-foreground-service --user 0 -n " + packageName + "/" + className;
+        }
+        if (!"com.heytap.health".equals(packageName)
+                || !"com.heytap.health.rpc.host.HealthRpcMsgService".equals(className)) return null;
+        return "am start-service --user 0 -n " + packageName + "/" + className;
+    }
+
+    static boolean rootStart(String packageName, String className, boolean foreground) {
+        String command = rootStartCommand(packageName, className, foreground);
+        if (command == null) return false;
+        try {
+            execute(command, 8);
+            return true;
+        } catch (Failure failure) {
+            return false;
+        }
+    }
 }

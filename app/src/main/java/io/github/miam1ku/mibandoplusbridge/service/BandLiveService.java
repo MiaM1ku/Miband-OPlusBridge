@@ -60,6 +60,7 @@ public final class BandLiveService extends Service {
         @Override public void onBindingDied(android.content.ComponentName name) {
             unbindHealthHost();
             healthHostStatus("UNAVAILABLE");
+            reviveHealth();
         }
         @Override public void onNullBinding(android.content.ComponentName name) {
             unbindHealthHost();
@@ -69,6 +70,8 @@ public final class BandLiveService extends Service {
     private static final String CHANNEL = "band-live";
     private static final io.github.miam1ku.mibandoplusbridge.notify.NotifyDedupe NOTIFICATIONS =
             new io.github.miam1ku.mibandoplusbridge.notify.NotifyDedupe();
+    private static final io.github.miam1ku.mibandoplusbridge.notify.NotifyReplay HELD_NOTIFICATIONS =
+            new io.github.miam1ku.mibandoplusbridge.notify.NotifyReplay();
     private static final int NOTICE = 7;
     private static final long INITIAL_BACKOFF_MS = 3_000;
     private static final long MAX_BACKOFF_MS = 30_000;
@@ -126,6 +129,33 @@ public final class BandLiveService extends Service {
     };
 
     public static void start(Context context) {
+        admit(context);
+        launch(context, false);
+    }
+
+    /** Package update runs this off the main thread and can wait for the root start. */
+    public static void startBlocking(Context context) {
+        admit(context);
+        launch(context, true);
+    }
+
+    /** Health card reads and notification IPC. Does nothing while this process already hosts the service. */
+    public static void ensureProcess(Context context) {
+        BandLiveService live = instance;
+        if (live != null && !live.stopRequested) return;
+        try {
+            start(context);
+        } catch (RuntimeException ignored) { }
+    }
+
+    public static boolean mayWake(Context context) {
+        if (context == null || diagnosticPaused) return false;
+        if (!context.getSystemService(android.os.UserManager.class).isUserUnlocked()) return false;
+        if (!new BandStateRepository(context).isRegistered()) return false;
+        return new OwnershipController(context).nativeReady();
+    }
+
+    private static void admit(Context context) {
         if (diagnosticPaused) throw new IllegalStateException("DIAGNOSTIC_ACTIVE");
         if (!context.getSystemService(android.os.UserManager.class).isUserUnlocked()) {
             throw new IllegalStateException("USER_LOCKED");
@@ -136,7 +166,15 @@ public final class BandLiveService extends Service {
         if (!new OwnershipController(context).nativeReady()) {
             throw new IllegalStateException("NATIVE_OWNERSHIP_REQUIRED");
         }
-        context.startForegroundService(new Intent(context, BandLiveService.class));
+    }
+
+    private static void launch(Context context, boolean waitForRoot) {
+        try {
+            context.startForegroundService(new Intent(context, BandLiveService.class));
+        } catch (RuntimeException backgroundRejected) {
+            if (waitForRoot) HostKeepAlive.startBridge(context);
+            else HostKeepAlive.startBridgeAsync(context);
+        }
     }
 
     public static void stop(Context context) {
@@ -185,9 +223,9 @@ public final class BandLiveService extends Service {
             }
         }
         try {
-            context.startForegroundService(new Intent(context, BandLiveService.class).setAction(ACTION_SYNC));
+            start(context);
             return "ACCEPTED";
-        } catch (RuntimeException backgroundRejected) {
+        } catch (RuntimeException denied) {
             return "OPEN_CONFIG_REQUIRED";
         }
     }
@@ -309,14 +347,13 @@ public final class BandLiveService extends Service {
 
     public static java.util.concurrent.CompletionStage<Void> sendNotification(Context context,
             nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto.Command command) {
+        if (!notificationCommand(command)) {
+            io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(context, "NOTIFY_DROP reason=command");
+            return java.util.concurrent.CompletableFuture.failedFuture(
+                    new IllegalStateException("NOTIFICATION_SESSION_UNAVAILABLE"));
+        }
         BandLiveService live = instance;
         var queue = live == null ? null : live.commands;
-        if (queue == null || !notificationSessionReady(context) || command == null || command.getType() != 7
-                || (command.getSubtype() != 0 && command.getSubtype() != 1) || !command.hasNotification()) {
-            io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(context, "NOTIFY_DROP reason="
-                    + (queue == null ? "service" : !notificationSessionReady(context) ? sessionReason(context) : "command"));
-            return java.util.concurrent.CompletableFuture.failedFuture(new IllegalStateException("NOTIFICATION_SESSION_UNAVAILABLE"));
-        }
         var notification = command.getNotification();
         boolean call = command.getSubtype() == 0 && notification.hasNotification2()
                 && io.github.miam1ku.mibandoplusbridge.protocol.BandNotificationCommand.isCall(
@@ -340,6 +377,13 @@ public final class BandLiveService extends Service {
                 return java.util.concurrent.CompletableFuture.failedFuture(new IllegalStateException("NOTIFICATION_ACCESS_REQUIRED"));
             }
         }
+        if (queue == null || !notificationSessionReady(context)) {
+            if (mayWake(context)) return holdNotification(context, command);
+            io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(context, "NOTIFY_DROP reason="
+                    + (queue == null ? "service" : sessionReason(context)));
+            return java.util.concurrent.CompletableFuture.failedFuture(
+                    new IllegalStateException("NOTIFICATION_SESSION_UNAVAILABLE"));
+        }
         if (duplicate(context, command)) return java.util.concurrent.CompletableFuture.completedFuture(null);
         if (suppressForDnd(command, io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.currentFilter(context))) {
             android.util.Log.i("OplusBandBridge", "NOTIFY_SUPPRESSED_DND");
@@ -361,12 +405,17 @@ public final class BandLiveService extends Service {
     /** OHealth already decided this notification may reach the band. */
     public static java.util.concurrent.CompletionStage<Void> forwardHostNotification(Context context,
             nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto.Command command) {
+        if (!notificationCommand(command)) {
+            android.util.Log.i("OplusBandBridge", "NOTIFY_DROP reason=command");
+            io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(context, "NOTIFY_DROP reason=command");
+            return java.util.concurrent.CompletableFuture.failedFuture(
+                    new IllegalStateException("NOTIFICATION_SESSION_UNAVAILABLE"));
+        }
         BandLiveService live = instance;
         var queue = live == null ? null : live.commands;
-        if (queue == null || !notificationSessionReady(context) || command == null || command.getType() != 7
-                || (command.getSubtype() != 0 && command.getSubtype() != 1) || !command.hasNotification()) {
-            String reason = queue == null ? "service" : !notificationSessionReady(context) ? sessionReason(context)
-                    : command == null ? "empty" : "command type=" + command.getType() + " subtype=" + command.getSubtype();
+        if (queue == null || !notificationSessionReady(context)) {
+            if (mayWake(context)) return holdNotification(context, command);
+            String reason = queue == null ? "service" : sessionReason(context);
             android.util.Log.i("OplusBandBridge", "NOTIFY_DROP reason=" + reason);
             io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(context, "NOTIFY_DROP reason=" + reason);
             return java.util.concurrent.CompletableFuture.failedFuture(
@@ -392,6 +441,66 @@ public final class BandLiveService extends Service {
             io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(context, "NOTIFY_DROP reason=too-large");
             return java.util.concurrent.CompletableFuture.failedFuture(
                     new IllegalStateException("NOTIFICATION_IDENTITY_TOO_LARGE"));
+        }
+    }
+
+    private static boolean notificationCommand(
+            nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto.Command command) {
+        return command != null && command.getType() == 7
+                && (command.getSubtype() == 0 || command.getSubtype() == 1)
+                && command.hasNotification();
+    }
+
+    private static java.util.concurrent.CompletionStage<Void> holdNotification(Context context,
+            nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto.Command command) {
+        io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(context, "NOTIFY_HOLD");
+        return HELD_NOTIFICATIONS.add(command, android.os.SystemClock.elapsedRealtime());
+    }
+
+    private void expireHeld() {
+        int expired = HELD_NOTIFICATIONS.expire(android.os.SystemClock.elapsedRealtime());
+        if (expired > 0) io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this,
+                "NOTIFY_DROP reason=expired count=" + expired);
+    }
+
+    private void replayHeld() {
+        long now = android.os.SystemClock.elapsedRealtime();
+        int expired = HELD_NOTIFICATIONS.expire(now);
+        if (expired > 0) io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this,
+                "NOTIFY_DROP reason=expired count=" + expired);
+        for (var held : HELD_NOTIFICATIONS.poll(now)) deliverHeld(held);
+    }
+
+    private void deliverHeld(io.github.miam1ku.mibandoplusbridge.notify.NotifyReplay.Held held) {
+        var command = held.command;
+        var queue = commands;
+        if (queue == null || !notificationSessionReady(this)) {
+            held.fail(new IllegalStateException("NOTIFICATION_SESSION_UNAVAILABLE"));
+            io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this, "NOTIFY_DROP reason=service");
+            return;
+        }
+        if (duplicate(this, command)) {
+            held.succeed();
+            return;
+        }
+        if (ordinaryPost(command) && io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.blocksNotifications(
+                io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.currentFilter(this))) {
+            io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this, "NOTIFY_SUPPRESSED_DND");
+            held.succeed();
+            return;
+        }
+        try {
+            var fitted = io.github.miam1ku.mibandoplusbridge.protocol.BandNotificationCommand.fitToPayload(
+                    command, notificationPayloadLimit());
+            io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this, "NOTIFY_OUT type=" + fitted.getType()
+                    + " subtype=" + fitted.getSubtype() + " bytes=" + fitted.getSerializedSize());
+            queue.send(fitted).whenComplete((ignored, error) -> {
+                if (error == null) held.succeed();
+                else held.fail(error);
+            });
+        } catch (IllegalArgumentException tooLarge) {
+            io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this, "NOTIFY_DROP reason=too-large");
+            held.fail(new IllegalStateException("NOTIFICATION_IDENTITY_TOO_LARGE"));
         }
     }
 
@@ -466,6 +575,7 @@ public final class BandLiveService extends Service {
         }
         sleepArmedAtMs = sleepPauseOn ? armed : Long.MAX_VALUE;
         coordinator.scheduleAtFixedRate(this::tick, 1, 1, TimeUnit.MINUTES);
+        coordinator.scheduleAtFixedRate(this::expireHeld, 5, 5, TimeUnit.SECONDS);
         try {
             registerReceiver(bluetoothEvents,
                     new IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED), RECEIVER_EXPORTED);
@@ -509,6 +619,9 @@ public final class BandLiveService extends Service {
             stopRequested = true;
             stopLock.notifyAll();
         }
+        int dropped = HELD_NOTIFICATIONS.failAll(new IllegalStateException("NOTIFICATION_SESSION_UNAVAILABLE"));
+        if (dropped > 0) io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this,
+                "NOTIFY_DROP reason=stopped count=" + dropped);
         SppDiagnosticClient active = client;
         if (active != null) active.close();
     }
@@ -578,6 +691,7 @@ public final class BandLiveService extends Service {
                             return;
                         }
                         commands = queue;
+                        replayHeld();
                         calls.connected();
                         logFeatures();
                         io.github.miam1ku.mibandoplusbridge.notify.BandNotificationListener.connectionChanged();
@@ -716,9 +830,13 @@ public final class BandLiveService extends Service {
                 if (healthBound || stopRequested || !new BandStateRepository(this).isRegistered()) return;
                 try {
                     healthBound = bindService(new Intent().setComponent(HEALTH_SERVICE), healthConnection, BIND_AUTO_CREATE);
-                    if (!healthBound) healthHostStatus("UNAVAILABLE");
+                    if (!healthBound) {
+                        healthHostStatus("UNAVAILABLE");
+                        reviveHealth();
+                    }
                 } catch (RuntimeException unavailable) {
                     healthHostStatus("UNAVAILABLE");
+                    reviveHealth();
                 }
             });
         } catch (android.content.pm.PackageManager.NameNotFoundException unavailable) {
@@ -731,6 +849,12 @@ public final class BandLiveService extends Service {
             unbindService(healthConnection);
             healthBound = false;
         }
+    }
+
+    private void reviveHealth() {
+        HostKeepAlive.startHealthAsync(this, () -> main.post(() -> {
+            if (!stopRequested) bindHealthHost();
+        }));
     }
 
     private void healthHostStatus(String status) {
@@ -746,6 +870,7 @@ public final class BandLiveService extends Service {
     private void tick() {
         var queue = commands;
         if (stopRequested || queue == null || historySync == null) return;
+        if (!healthBound) bindHealthHost();
         if (!new BandStateRepository(this).isRegistered()) {
             requestStop();
             return;

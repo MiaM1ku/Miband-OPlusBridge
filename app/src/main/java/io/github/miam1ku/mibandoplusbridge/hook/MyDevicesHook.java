@@ -306,11 +306,8 @@ public final class MyDevicesHook {
             for (String split : info.splitSourceDirs) apks.add(split);
         }
         for (String apk : apks) {
-            dalvik.system.DexFile dex = null;
             try {
-                dex = new dalvik.system.DexFile(apk);
-                for (java.util.Enumeration<String> entries = dex.entries(); entries.hasMoreElements();) {
-                    String name = entries.nextElement();
+                for (String name : DexAnchors.classNames(apk)) {
                     if (!name.startsWith("aa.") || name.indexOf('$') >= 0 || name.length() > 6) continue;
                     Class<?> type;
                     try {
@@ -333,10 +330,6 @@ public final class MyDevicesHook {
                     }
                 }
             } catch (Throwable ignored) {
-            } finally {
-                if (dex != null) {
-                    try { dex.close(); } catch (Throwable ignored) { }
-                }
             }
         }
         Log.i(TAG, hooked == 0 ? "ICON_PLACEHOLDER_HOOK_UNAVAILABLE" : "ICON_PLACEHOLDER_HOOK " + hooked);
