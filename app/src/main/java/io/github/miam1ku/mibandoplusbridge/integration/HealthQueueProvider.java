@@ -195,6 +195,32 @@ public final class HealthQueueProvider extends ContentProvider {
                 result.putInt("released", removed);
                 return result;
             }
+            case "unmeasuredStress": {
+                if (self) throw new SecurityException("OHEALTH_CALLER_REQUIRED");
+                String account = account(extras);
+                var gaps = store.unmeasuredStress(account);
+                long[] starts = new long[gaps.size()];
+                long[] ends = new long[gaps.size()];
+                String[] devices = new String[gaps.size()];
+                for (int i = 0; i < gaps.size(); i++) {
+                    starts[i] = gaps.get(i).startMs();
+                    ends[i] = gaps.get(i).endMs();
+                    devices[i] = gaps.get(i).deviceId();
+                }
+                Bundle result = status("STRESS_GAPS");
+                result.putLongArray("starts", starts);
+                result.putLongArray("ends", ends);
+                result.putStringArray("devices", devices);
+                return result;
+            }
+            case "forgetUnmeasuredStress": {
+                if (self) throw new SecurityException("OHEALTH_CALLER_REQUIRED");
+                int removed = store.forgetUnmeasuredStress(account(extras));
+                if (removed != 0) notifyRecordsChanged();
+                Bundle result = status("STRESS_ZEROS_FORGOTTEN");
+                result.putInt("removed", removed);
+                return result;
+            }
             default:
                 throw new IllegalArgumentException("UNSUPPORTED_HEALTH_OPERATION");
         }
@@ -210,6 +236,13 @@ public final class HealthQueueProvider extends ContentProvider {
         result.putString("status", code);
         result.putInt("pendingCount", store.count());
         return result;
+    }
+
+    private static String account(Bundle extras) {
+        if (extras == null || !extras.keySet().equals(java.util.Set.of("account"))) {
+            throw new IllegalArgumentException("HEALTH_ACCOUNT_REQUIRED");
+        }
+        return extras.getString("account");
     }
 
     @Override public String getType(Uri uri) {

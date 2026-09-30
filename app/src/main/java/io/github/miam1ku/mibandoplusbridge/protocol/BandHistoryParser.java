@@ -138,6 +138,8 @@ public final class BandHistoryParser {
                 measurements = decodeReport(bytes, u32(bytes, 0), offsetSeconds, timezone);
             } else if (dailyType == 6 && fileType == 0 && version == 2) {
                 measurements = decodeManual(bytes, timezone);
+            } else if (dailyType == 8 && fileType == 1 && version == 4) {
+                measurements = decodeSleepV4(bytes, timezone);
             } else if (dailyType == 8 && fileType == 1 && (version == 5 || version == 6)) {
                 measurements = decodeSleep(bytes, version, timezone);
             } else {
@@ -266,6 +268,31 @@ public final class BandHistoryParser {
         return records;
     }
 
+    /**
+     * Summary version 4. One validity byte, then the open flag, bed time and wake time.
+     * Gadgetbridge index 3 (bit 4) is quality; 4/5/6 (bits 3/2/1) are heart, oxygen and snore.
+     * Open flag 0 means the night is finished. 1 means it is still open.
+     */
+    private List<Measurement> decodeSleepV4(byte[] bytes, String timezone) {
+        Cursor cursor = new Cursor(bytes, 8);
+        long validity = cursor.flags(1);
+        int open = cursor.uint(1);
+        long start = cursor.unsigned32() * 1000L;
+        long end = cursor.unsigned32() * 1000L;
+        if (bit(validity, 4)) cursor.skip(1);
+        List<Measurement> records = new ArrayList<>();
+        boolean validSamples = true;
+        if (bit(validity, 3)) validSamples &= decodeSleepSeries(cursor, records, "heart_rate", 1, timezone);
+        if (bit(validity, 2)) validSamples &= decodeSleepSeries(cursor, records, "spo2", 1, timezone);
+        if (bit(validity, 1)) validSamples &= decodeSleepSeries(cursor, records, null, 4, timezone);
+        decodeSleepStages(bytes, cursor, records, timezone, start, end);
+        if (!validSamples) throw new SemanticException("INVALID_SLEEP_SAMPLE_INTERVAL");
+        if (open > 1) throw new SemanticException("INVALID_SLEEP_COMPLETE_FLAG");
+        if (end <= start) throw new SemanticException("INVALID_SLEEP_INTERVAL");
+        records.add(0, measurement("sleep_interval", start, end, null, timezone, "sleep", open == 0));
+        return records;
+    }
+
     private boolean decodeSleepSeries(Cursor cursor, List<Measurement> records, String kind,
             int width, String timezone) {
         int interval = cursor.uint(2);
@@ -291,8 +318,10 @@ public final class BandHistoryParser {
             String timezone, long sleepStart, long sleepEnd) {
         int pos = cursor.position;
         int limit = cursor.end;
-        List<int[]> runs = new ArrayList<>();
-        int totalMinutes = 0;
+        // Each sync appends another type-17 summary. The last one that still
+        // covers this interval is the band's current analysis; earlier copies are history.
+        List<int[]> chosen = null;
+        long spanMinutes = (sleepEnd - sleepStart) / 60_000L;
         while (pos + 17 <= limit) {
             if (u32(bytes, pos) != 0xfffcfafbL) {
                 pos++;
@@ -309,29 +338,27 @@ public final class BandHistoryParser {
             int payload = noData ? 0 : dataLen;
             if (payload < 0 || pos + 17 + payload > limit) break;
             if (type == 17) {
+                List<int[]> runs = new ArrayList<>();
+                int totalMinutes = 0;
                 int off = pos + 17;
                 for (int i = 0; i + 2 <= payload; i += 2) {
                     int val = ((bytes[off + i] & 0xff) << 8) | (bytes[off + i + 1] & 0xff);
                     int stage = xiaomiStage(val >>> 12);
                     int minutes = val & 0xfff;
-                    if (stage >= 2 && stage <= 5 && minutes > 0) {
-                        runs.add(new int[] {stage, minutes});
-                        totalMinutes += minutes;
-                    } else if (minutes > 0) {
-                        totalMinutes += minutes;
-                        runs.add(new int[] {0, minutes});
-                    }
+                    if (minutes <= 0) continue;
+                    totalMinutes += minutes;
+                    runs.add(new int[] {stage >= 2 && stage <= 5 ? stage : 0, minutes});
+                }
+                if (!runs.isEmpty() && spanMinutes > 0 && Math.abs(totalMinutes - spanMinutes) <= 2) {
+                    chosen = runs;
                 }
             }
             pos += 17 + payload;
         }
         cursor.position = limit;
-        if (runs.isEmpty()) return;
-        long origin = sleepStart;
-        long spanMinutes = (sleepEnd - sleepStart) / 60_000L;
-        if (spanMinutes > 0 && Math.abs(totalMinutes - spanMinutes) > 2) return;
-        long current = origin;
-        for (int[] run : runs) {
+        if (chosen == null) return;
+        long current = sleepStart;
+        for (int[] run : chosen) {
             long next = current + run[1] * 60_000L;
             if (run[0] >= 2 && run[0] <= 5 && next > current) {
                 long a = Math.max(current, sleepStart);
@@ -363,7 +390,7 @@ public final class BandHistoryParser {
 
     private void addMetric(List<Measurement> records, String kind, long start, int value,
             String timezone, String mode) {
-        int min = "stress".equals(kind) ? 0 : 1;
+        int min = "stress".equals(kind) && "manual".equals(mode) ? 0 : 1;
         int max = "heart_rate".equals(kind) ? 250 : 100;
         if (value >= min && value <= max) records.add(measurement(kind, start,
                 start + ("continuous".equals(mode) ? MINUTE_MS : 1), value, timezone, mode, false));

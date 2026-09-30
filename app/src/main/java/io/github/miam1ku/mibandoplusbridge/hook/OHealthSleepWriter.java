@@ -29,7 +29,8 @@ final class OHealthSleepWriter {
     private final Method sleepGetDevice, sleepGetStart, sleepGetEnd, sleepGetState;
     private final Method statAccount, statDevice, statDate, statFall, statWake, statSleep, statDeep, statLight,
             statRem, statAwake;
-    private final Method statGetDevice, statGetDate, statGetFall, statGetWake, statGetSleep;
+    private final Method statGetDevice, statGetDate, statGetFall, statGetWake, statGetSleep,
+            statGetDeep, statGetLight, statGetRem, statGetAwake;
 
     OHealthSleepWriter(OHealthHealthImportHook.HostContract host) throws ReflectiveOperationException {
         this.host = host;
@@ -64,6 +65,10 @@ final class OHealthSleepWriter {
         statGetFall = getter(statClass, "getFallAsleep", long.class);
         statGetWake = getter(statClass, "getSleepOut", long.class);
         statGetSleep = getter(statClass, "getTotalSleepTime", long.class);
+        statGetDeep = getter(statClass, "getTotalDeepSleepTime", long.class);
+        statGetLight = getter(statClass, "getTotalLightlySleepTime", long.class);
+        statGetRem = getter(statClass, "getTotalRemTime", long.class);
+        statGetAwake = getter(statClass, "getTotalWakeUpTime", long.class);
     }
 
     void write(Context context) throws Exception {
@@ -108,7 +113,7 @@ final class OHealthSleepWriter {
                 + " inserted=" + inserted + " skipped=" + skipped + " held=" + held);
     }
 
-    /** @return null when the night was inserted; otherwise {@code other-device} or {@code already-ours}. */
+    /** @return null when the night was written; otherwise {@code other-device} or {@code already-ours}. */
     private String writeNight(Object api, String account, String device, OHealthSleepPlan.Night night)
             throws Exception {
         long statStart = night.fallAsleepMs() - 86_400_000L;
@@ -117,25 +122,26 @@ final class OHealthSleepWriter {
         if (ownedByOther(stats, night.date(), device)) return "other-device";
         List<?> existing = host.readRows(api, account, TABLE_SLEEP, device, night.fallAsleepMs() - 1,
                 night.wakeMs() + 1, 0, true);
-        List<Object> missing = new ArrayList<>();
-        for (OHealthSleepPlan.Segment segment : night.segments()) {
-            if (!hasSegment(existing, device, segment)) missing.add(segmentRow(account, device, segment));
-        }
-        if (!missing.isEmpty()) {
-            host.insertRows(api, TABLE_SLEEP, missing);
+        boolean sameSegments = segmentsMatch(existing, device, night);
+        boolean sameStat = statMatches(stats, device, night);
+        if (sameSegments && sameStat) return "already-ours";
+        if (!sameSegments) {
+            // SleepMerge keeps the previous end for an existing start, so a changed night is deleted first.
+            host.deleteRows(api, TABLE_SLEEP, account, device, night.fallAsleepMs(), night.wakeMs() + 1);
+            List<Object> rows = new ArrayList<>();
+            for (OHealthSleepPlan.Segment segment : night.segments()) rows.add(segmentRow(account, device, segment));
+            if (!rows.isEmpty()) host.insertRows(api, TABLE_SLEEP, rows);
             existing = host.readRows(api, account, TABLE_SLEEP, device, night.fallAsleepMs() - 1,
                     night.wakeMs() + 1, 0, true);
-            for (OHealthSleepPlan.Segment segment : night.segments()) {
-                if (!hasSegment(existing, device, segment)) {
-                    throw new IllegalStateException("SLEEP_SEGMENT_UNCONFIRMED");
-                }
-            }
+            if (!segmentsMatch(existing, device, night)) throw new IllegalStateException("SLEEP_SEGMENT_UNCONFIRMED");
         }
-        if (hasStat(stats, device, night)) return "already-ours";
-        host.insertRows(api, TABLE_STAT, List.of(statRow(account, device, night)));
-        List<?> written = host.readRows(api, account, TABLE_STAT, device, statStart, statEnd, 4, false);
-        if (!hasStat(written, device, night)) {
-            throw new IllegalStateException("SLEEP_STAT_UNCONFIRMED_" + written.size());
+        if (!sameStat) {
+            // SleepDataStat is keyed by account and date, so a later insert replaces the frozen summary.
+            host.insertRows(api, TABLE_STAT, List.of(statRow(account, device, night)));
+            List<?> written = host.readRows(api, account, TABLE_STAT, device, statStart, statEnd, 4, false);
+            if (!statMatches(written, device, night)) {
+                throw new IllegalStateException("SLEEP_STAT_UNCONFIRMED_" + written.size());
+            }
         }
         return null;
     }
@@ -193,25 +199,55 @@ final class OHealthSleepWriter {
         return row;
     }
 
-    private boolean hasSegment(List<?> rows, String device, OHealthSleepPlan.Segment segment)
+    private boolean segmentsMatch(List<?> rows, String device, OHealthSleepPlan.Night night)
             throws ReflectiveOperationException {
-        for (Object row : rows) {
-            if (!sleepClass.isInstance(row)) continue;
-            if (!device.equals(sleepGetDevice.invoke(row))) continue;
-            if (segment.startMs() != (Long) sleepGetStart.invoke(row)) continue;
-            if (segment.sleepState() != (Integer) sleepGetState.invoke(row)) continue;
-            // SleepMerge keeps the previous end when this start minute already exists.
-            if ((Long) sleepGetEnd.invoke(row) > segment.startMs()) return true;
+        boolean[] used = new boolean[rows.size()];
+        for (OHealthSleepPlan.Segment segment : night.segments()) {
+            boolean found = false;
+            for (int i = 0; i < rows.size(); i++) {
+                if (used[i] || !sameSegment(rows.get(i), device, segment)) continue;
+                used[i] = true;
+                found = true;
+                break;
+            }
+            if (!found) return false;
         }
-        return false;
+        for (int i = 0; i < rows.size(); i++) {
+            if (used[i] || !overlapsNight(rows.get(i), device, night)) continue;
+            return false;
+        }
+        return true;
     }
 
-    private boolean hasStat(List<?> rows, String device, OHealthSleepPlan.Night night)
+    private boolean sameSegment(Object row, String device, OHealthSleepPlan.Segment segment)
+            throws ReflectiveOperationException {
+        if (!sleepClass.isInstance(row) || !device.equals(sleepGetDevice.invoke(row))) return false;
+        return segment.startMs() == (Long) sleepGetStart.invoke(row)
+                && segment.endMs() == (Long) sleepGetEnd.invoke(row)
+                && segment.sleepState() == (Integer) sleepGetState.invoke(row);
+    }
+
+    private boolean overlapsNight(Object row, String device, OHealthSleepPlan.Night night)
+            throws ReflectiveOperationException {
+        if (!sleepClass.isInstance(row) || !device.equals(sleepGetDevice.invoke(row))) return false;
+        long start = (Long) sleepGetStart.invoke(row);
+        long end = (Long) sleepGetEnd.invoke(row);
+        return start < night.wakeMs() && end > night.fallAsleepMs();
+    }
+
+    private boolean statMatches(List<?> rows, String device, OHealthSleepPlan.Night night)
             throws ReflectiveOperationException {
         for (Object row : rows) {
             if (!statClass.isInstance(row) || night.date() != (Integer) statGetDate.invoke(row)) continue;
             String owner = (String) statGetDevice.invoke(row);
-            if (owner == null || owner.isBlank() || device.equals(owner)) return true;
+            if (owner != null && !owner.isBlank() && !device.equals(owner)) continue;
+            return night.fallAsleepMs() == (Long) statGetFall.invoke(row)
+                    && night.wakeMs() == (Long) statGetWake.invoke(row)
+                    && night.sleepMinutes() == (Long) statGetSleep.invoke(row)
+                    && night.deepMinutes() == (Long) statGetDeep.invoke(row)
+                    && night.lightMinutes() == (Long) statGetLight.invoke(row)
+                    && night.remMinutes() == (Long) statGetRem.invoke(row)
+                    && night.wakeMinutes() == (Long) statGetAwake.invoke(row);
         }
         return false;
     }

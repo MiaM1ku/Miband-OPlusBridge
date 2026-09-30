@@ -67,6 +67,8 @@ public final class BandLiveService extends Service {
         }
     };
     private static final String CHANNEL = "band-live";
+    private static final io.github.miam1ku.mibandoplusbridge.notify.NotifyDedupe NOTIFICATIONS =
+            new io.github.miam1ku.mibandoplusbridge.notify.NotifyDedupe();
     private static final int NOTICE = 7;
     private static final long INITIAL_BACKOFF_MS = 3_000;
     private static final long MAX_BACKOFF_MS = 30_000;
@@ -88,6 +90,8 @@ public final class BandLiveService extends Service {
     private final io.github.miam1ku.mibandoplusbridge.notify.SleepMusic sleepMusic =
             new io.github.miam1ku.mibandoplusbridge.notify.SleepMusic();
     private volatile boolean sleepPauseOn;
+    private volatile long sleepArmedAtMs = Long.MAX_VALUE;
+    private long nextSleepFileAt;
     private volatile boolean retryNow;
     private String noticeTitle = "";
     private volatile SppDiagnosticClient client;
@@ -188,13 +192,17 @@ public final class BandLiveService extends Service {
         }
     }
 
-    /** Switch-on starts a new baseline. An asleep report already in hand does not pause. */
+    /** Switch-on starts a new baseline. A sleep already underway does not pause. */
     public static void sleepPauseChanged(Context context) {
         BandLiveService live = instance;
         if (live == null || live.stopRequested) return;
         live.sleepPauseOn = io.github.miam1ku.mibandoplusbridge.notify.SleepMusic.enabled(context);
         live.sleepMusic.reset();
-        if (live.sleepPauseOn) live.requestSleepState();
+        live.sleepArmedAtMs = io.github.miam1ku.mibandoplusbridge.notify.SleepMusic.armedAt(context);
+        if (live.sleepPauseOn) {
+            live.nextSleepFileAt = System.nanoTime();
+            live.requestSleepState();
+        }
     }
 
     public static java.util.concurrent.CompletionStage<Void> requestWeather(Context context,
@@ -253,7 +261,7 @@ public final class BandLiveService extends Service {
         io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this, "features local="
                 + (up ? "up" : access ? "granted" : "absent")
                 + " healthListener=" + health
-                + " notify=" + settings.getBoolean("enabled", false)
+                + " notify=" + settings.getBoolean("enabled", true)
                 + " packages=" + settings.getStringSet("packages", java.util.Set.of()).size()
                 + " calls=" + settings.getBoolean("callsEnabled", false)
                 + " callOwner=" + (calls != null && calls.ownsCalls())
@@ -326,12 +334,13 @@ public final class BandLiveService extends Service {
         }
         if (!call && !clearCall) {
             var manager = context.getSystemService(NotificationManager.class);
-            if (!settings.getBoolean("enabled", false) || !manager.isNotificationListenerAccessGranted(
+            if (!settings.getBoolean("enabled", true) || !manager.isNotificationListenerAccessGranted(
                     new android.content.ComponentName(context, io.github.miam1ku.mibandoplusbridge.notify.BandNotificationListener.class))) {
                 io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(context, "NOTIFY_DROP reason=access");
                 return java.util.concurrent.CompletableFuture.failedFuture(new IllegalStateException("NOTIFICATION_ACCESS_REQUIRED"));
             }
         }
+        if (duplicate(context, command)) return java.util.concurrent.CompletableFuture.completedFuture(null);
         if (suppressForDnd(command, io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.currentFilter(context))) {
             android.util.Log.i("OplusBandBridge", "NOTIFY_SUPPRESSED_DND");
             io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(context, "NOTIFY_SUPPRESSED_DND");
@@ -363,6 +372,7 @@ public final class BandLiveService extends Service {
             return java.util.concurrent.CompletableFuture.failedFuture(
                     new IllegalStateException("NOTIFICATION_SESSION_UNAVAILABLE"));
         }
+        if (duplicate(context, command)) return java.util.concurrent.CompletableFuture.completedFuture(null);
         if (ordinaryPost(command) && io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.blocksNotifications(
                 io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.currentFilter(context))) {
             android.util.Log.i("OplusBandBridge", "NOTIFY_SUPPRESSED_DND");
@@ -398,6 +408,25 @@ public final class BandLiveService extends Service {
                 command.getNotification().getNotification2().getNotification3());
     }
 
+    private static boolean duplicate(Context context,
+            nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto.Command command) {
+        if (command == null || (!ordinaryPost(command) && !ordinaryDismiss(command))) return false;
+        if (NOTIFICATIONS.first(io.github.miam1ku.mibandoplusbridge.notify.NotifyDedupe.identity(command),
+                android.os.SystemClock.elapsedRealtime())) return false;
+        io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(context, "NOTIFY_DROP reason=duplicate");
+        return true;
+    }
+
+    private static boolean ordinaryDismiss(
+            nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto.Command command) {
+        if (command.getSubtype() != 1 || !command.hasNotification()
+                || !command.getNotification().hasNotificationDismiss()) return false;
+        var dismiss = command.getNotification().getNotificationDismiss();
+        if (dismiss.getNotificationIdCount() != 1) return false;
+        var id = dismiss.getNotificationId(0);
+        return !"phone".equals(id.getPackage());
+    }
+
     public static void cancelNotifications(Context context) {
         BandLiveService live = instance;
         var queue = live == null ? null : live.commands;
@@ -430,6 +459,12 @@ public final class BandLiveService extends Service {
         io.github.miam1ku.mibandoplusbridge.notify.BandNotificationListener.ensureEnabled(this);
         instance = this;
         sleepPauseOn = io.github.miam1ku.mibandoplusbridge.notify.SleepMusic.enabled(this);
+        long armed = io.github.miam1ku.mibandoplusbridge.notify.SleepMusic.armedAt(this);
+        if (sleepPauseOn && armed == Long.MAX_VALUE) {
+            armed = System.currentTimeMillis();
+            io.github.miam1ku.mibandoplusbridge.notify.SleepMusic.rememberCutoff(this, armed);
+        }
+        sleepArmedAtMs = sleepPauseOn ? armed : Long.MAX_VALUE;
         coordinator.scheduleAtFixedRate(this::tick, 1, 1, TimeUnit.MINUTES);
         try {
             registerReceiver(bluetoothEvents,
@@ -518,6 +553,13 @@ public final class BandLiveService extends Service {
                         healthCollectionStatus(code);
                     }
                 });
+                active.setSleepFiles(measurements -> {
+                    try {
+                        coordinator.execute(() -> {
+                            if (!stopRequested) noteSleepFile(measurements);
+                        });
+                    } catch (java.util.concurrent.RejectedExecutionException stopping) { }
+                });
                 client = active;
                 try {
                     active.runLive(result -> {
@@ -547,6 +589,7 @@ public final class BandLiveService extends Service {
                         long now = System.nanoTime();
                         nextBatteryAt = now + TimeUnit.MINUTES.toNanos(IDLE_POLL_MINUTES);
                         nextHealthAt = now + TimeUnit.MINUTES.toNanos(IDLE_POLL_MINUTES);
+                        nextSleepFileAt = now + TimeUnit.MINUTES.toNanos(10);
                         nextWeatherAt = now + TimeUnit.MINUTES.toNanos(30);
                         weatherSync.refreshAndSend();
                         syncRequested = false;
@@ -727,6 +770,11 @@ public final class BandLiveService extends Service {
                 weatherSync.refreshAndSend();
             }
         }
+        // Bands that never answer 2/78 still publish sleep as a history file.
+        if (sleepPauseOn && now >= nextSleepFileAt) {
+            nextSleepFileAt = now + TimeUnit.MINUTES.toNanos(10);
+            historySync.request(false);
+        }
         if (now >= nextWeatherAt) {
             nextWeatherAt = now + TimeUnit.MINUTES.toNanos(30);
             weatherSync.sendIfChanged();
@@ -829,7 +877,8 @@ public final class BandLiveService extends Service {
     private void requestSleepState() {
         var queue = commands;
         if (stopRequested || queue == null || !sleepPauseOn) return;
-        queue.send(io.github.miam1ku.mibandoplusbridge.notify.SleepMusic.query()).exceptionally(error -> {
+        queue.request(io.github.miam1ku.mibandoplusbridge.notify.SleepMusic.query(), 2, 78).exceptionally(error -> {
+            io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this, "SLEEP_MUSIC query missed");
             android.util.Log.i("OplusBandBridge", "SLEEP_MUSIC_QUERY_FAILED");
             return null;
         });
@@ -839,13 +888,34 @@ public final class BandLiveService extends Service {
         if (!sleepPauseOn) return;
         Boolean asleep = io.github.miam1ku.mibandoplusbridge.notify.SleepMusic.asleep(command);
         if (asleep == null) return;
-        var report = sleepMusic.observe(asleep);
-        String line = switch (report.effect()) {
+        long now = System.currentTimeMillis();
+        var report = command.getSubtype() == 79 ? sleepMusic.push(asleep, now) : sleepMusic.observe(asleep, now);
+        if ((report.effect() == io.github.miam1ku.mibandoplusbridge.notify.SleepMusic.Effect.BASELINE && asleep)
+                || report.effect() == io.github.miam1ku.mibandoplusbridge.notify.SleepMusic.Effect.WOKE) {
+            if (io.github.miam1ku.mibandoplusbridge.notify.SleepMusic.rememberCutoff(this, now)) {
+                sleepArmedAtMs = Math.max(sleepArmedAtMs, now);
+            }
+        }
+        applySleep(report, switch (report.effect()) {
             case PAUSE -> "SLEEP_MUSIC pause";
             case BASELINE -> "SLEEP_MUSIC baseline asleep=" + asleep;
             case WOKE -> "SLEEP_MUSIC awake";
             case UNCHANGED -> null;
-        };
+        });
+    }
+
+    private void noteSleepFile(java.util.List<io.github.miam1ku.mibandoplusbridge.protocol.BandHistoryParser.Measurement> measurements) {
+        if (!sleepPauseOn || measurements == null) return;
+        long now = System.currentTimeMillis();
+        for (var measurement : measurements) {
+            if (!"sleep_interval".equals(measurement.kind)) continue;
+            var report = sleepMusic.currentNight(measurement.startMs, measurement.endMs, sleepArmedAtMs, now);
+            if (report.effect() != io.github.miam1ku.mibandoplusbridge.notify.SleepMusic.Effect.PAUSE) continue;
+            applySleep(report, "SLEEP_MUSIC pause file");
+        }
+    }
+
+    private void applySleep(io.github.miam1ku.mibandoplusbridge.notify.SleepMusic.Report report, String line) {
         if (line == null) return;
         io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this, line);
         android.util.Log.i("OplusBandBridge", line);

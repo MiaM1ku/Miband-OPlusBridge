@@ -24,6 +24,8 @@ public final class HostNotifyProvider extends ContentProvider {
     @Override public Bundle call(String method, String arg, Bundle extras) {
         HostIdentity.requireCaller(getContext(), HostIdentity.HEALTH_PACKAGE);
         if ("trace".equals(method)) return trace(extras);
+        if ("policy".equals(method)) return policy(extras);
+        if ("listener".equals(method)) return listenerState();
         if ("findWatch".equals(method)) return findWatch(extras);
         if ("music".equals(method)) return music(extras);
         if (!"forward".equals(method) || extras == null) {
@@ -141,6 +143,37 @@ public final class HostNotifyProvider extends ContentProvider {
         return result;
     }
 
+    private Bundle listenerState() {
+        Bundle result = new Bundle();
+        result.putBoolean("connected",
+                io.github.miam1ku.mibandoplusbridge.notify.BandNotificationListener.listenerConnected());
+        result.putString("status", "OK");
+        return result;
+    }
+
+    private Bundle policy(Bundle extras) {
+        var prefs = getContext().getSharedPreferences(
+                io.github.miam1ku.mibandoplusbridge.notify.BandNotificationListener.SETTINGS,
+                android.content.Context.MODE_PRIVATE);
+        var edit = prefs.edit();
+        if (extras != null && extras.containsKey("main")) {
+            edit.putBoolean("mainSwitchKnown", true).putBoolean("mainSwitch", extras.getBoolean("main"));
+        }
+        if (extras != null && extras.containsKey("screenOnPush")) {
+            edit.putBoolean("screenOnPush", extras.getBoolean("screenOnPush"));
+        }
+        String pkg = extras == null ? "" : extras.getString("pkg", "");
+        if (extras != null && !pkg.isBlank() && extras.containsKey("packageOn")) {
+            java.util.Set<String> denied = new java.util.HashSet<>(prefs.getStringSet("deniedPackages", java.util.Set.of()));
+            if (extras.getBoolean("packageOn")) denied.remove(pkg);
+            else if (denied.size() < io.github.miam1ku.mibandoplusbridge.notify.NotificationRelay.CAPACITY) denied.add(pkg);
+            edit.putStringSet("deniedPackages", denied);
+        }
+        edit.apply();
+        Bundle result = new Bundle();
+        result.putString("status", "OK");
+        return result;
+    }
 
     private Bundle findWatch(Bundle extras) {
         long identity = Binder.clearCallingIdentity();

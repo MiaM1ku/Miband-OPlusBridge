@@ -69,6 +69,7 @@ public final class SppDiagnosticClient implements AutoCloseable {
     private Consumer<LiveCommandQueue> onLiveReady;
     private Consumer<byte[]> onFileStored;
     private Consumer<XiaomiProto.Command> onLiveCommand;
+    private Consumer<java.util.List<BandHistoryParser.Measurement>> onSleepFile;
     private volatile LiveCommandQueue liveCommands;
     private Result verifiedDevice;
     private boolean liveHold;
@@ -127,9 +128,14 @@ public final class SppDiagnosticClient implements AutoCloseable {
             onLiveReady = null;
             onFileStored = null;
             onLiveCommand = null;
+            onSleepFile = null;
             liveHold = false;
             deadlineSeconds = 30;
         }
+    }
+
+    public void setSleepFiles(Consumer<java.util.List<BandHistoryParser.Measurement>> listener) {
+        onSleepFile = listener;
     }
 
     public Result run(BandWeatherEncoder.Sample weather, boolean inspectCities) throws Exception {
@@ -695,6 +701,15 @@ public final class SppDiagnosticClient implements AutoCloseable {
         if ("PARSED".equals(result.parseStatus)) {
             try { summarizeSport(result.measurements); }
             catch (RuntimeException snapshotFailed) { progress.accept("HEALTH_SNAPSHOT_PAUSED"); }
+            Consumer<java.util.List<BandHistoryParser.Measurement>> sleep = onSleepFile;
+            if (sleep != null) {
+                for (BandHistoryParser.Measurement measurement : result.measurements) {
+                    if ("sleep_interval".equals(measurement.kind)) {
+                        sleep.accept(result.measurements);
+                        break;
+                    }
+                }
+            }
         } else {
             progress.accept("HISTORY_FORMAT_UNSUPPORTED");
             SessionLog.line(context, "history " + result.parseStatus);

@@ -237,13 +237,13 @@ public final class BandHistoryParserTest {
                 new byte[] {3, 0x40, 72, 98, 0, 111, 4, 5, 6, 7,
                         4, 0, 73, 99, 45, 8, 9, 10, 11});
         var records = parser().parseFile(file(4, 0, body)).measurements;
-        assertEquals(8, records.size());
-        assertEquals(0, records.get(3).value.intValue());
-        assertEquals(4, records.get(4).value.intValue());
-        assertEquals(73, records.get(5).value.intValue());
-        assertEquals(99, records.get(6).value.intValue());
-        assertEquals(45, records.get(7).value.intValue());
-        assertEquals(records.get(0).startMs + 60_000L, records.get(4).startMs);
+        assertEquals(7, records.size());
+        assertEquals(4, records.get(3).value.intValue());
+        assertEquals(73, records.get(4).value.intValue());
+        assertEquals(99, records.get(5).value.intValue());
+        assertEquals(45, records.get(6).value.intValue());
+        assertEquals("stress", records.get(6).kind);
+        assertEquals(records.get(0).startMs + 60_000L, records.get(3).startMs);
         assertEquals("continuous", records.get(1).measurementMode);
     }
 
@@ -253,12 +253,13 @@ public final class BandHistoryParserTest {
         body = activity(new int[] {31, 30, 19, 18, 15, 14},
                 new byte[] {0, 0, 0, (byte) 251, 101, 101, (byte) 250, 100, 100});
         var records = parser().parseFile(file(4, 0, body)).measurements;
-        assertEquals(4, records.size());
-        assertEquals("stress", records.get(0).kind);
-        assertEquals(0, records.get(0).value.intValue());
-        assertEquals(250, records.get(1).value.intValue());
+        assertEquals(3, records.size());
+        assertEquals("heart_rate", records.get(0).kind);
+        assertEquals(250, records.get(0).value.intValue());
+        assertEquals("spo2", records.get(1).kind);
+        assertEquals(100, records.get(1).value.intValue());
+        assertEquals("stress", records.get(2).kind);
         assertEquals(100, records.get(2).value.intValue());
-        assertEquals(100, records.get(3).value.intValue());
     }
 
     @Test public void manualRecordsUseDeclaredPayloadAndKeepRealPointTimes() throws Exception {
@@ -368,6 +369,35 @@ public final class BandHistoryParserTest {
         return body;
     }
 
+    private static byte[] sleepV4(int open, boolean quality) {
+        int sleepStart = START_SECONDS + 18 * 3600;
+        int qualityBytes = quality ? 1 : 0;
+        byte[] body = new byte[1 + 1 + 1 + 8 + qualityBytes + 10 + 9 + 12 + 21];
+        body[1] = (byte) ((quality ? 1 << 4 : 0) | (1 << 3) | (1 << 2) | (1 << 1));
+        body[2] = (byte) open;
+        put32(body, 3, sleepStart);
+        put32(body, 7, sleepStart + 8 * 3600);
+        int p = 11;
+        if (quality) body[p++] = 80;
+        put16(body, p, 60); put16(body, p + 2, 2); put32(body, p + 4, sleepStart);
+        body[p + 8] = 70; body[p + 9] = 71; p += 10;
+        put16(body, p, 60); put16(body, p + 2, 1); put32(body, p + 4, sleepStart + 30);
+        body[p + 8] = 98; p += 9;
+        put16(body, p, 60); put16(body, p + 2, 1); put32(body, p + 4, sleepStart);
+        p += 12;
+        body[p] = (byte) 0xfb; body[p + 1] = (byte) 0xfa;
+        body[p + 2] = (byte) 0xfc; body[p + 3] = (byte) 0xff;
+        body[p + 4] = 17;
+        put32(body, p + 5, sleepStart);
+        body[p + 14] = 17;
+        body[p + 16] = 4;
+        int deep = (2 << 12) | 120;
+        int light = (1 << 12) | 360;
+        body[p + 17] = (byte) (deep >>> 8); body[p + 18] = (byte) deep;
+        body[p + 19] = (byte) (light >>> 8); body[p + 20] = (byte) light;
+        return body;
+    }
+
     private static byte[] activity(int[] flags, byte[] payload) {
         byte[] body = new byte[7 + payload.length];
         for (int bit : flags) body[1 + (47 - bit) / 8] |= (byte) (1 << (bit % 8));
@@ -430,6 +460,73 @@ public final class BandHistoryParserTest {
         assertEquals((sleepStart + 480 * 60) * 1000L, stages.get(1).endMs);
         assertEquals("sleep", stages.get(0).measurementMode);
         assertFalse(stages.get(0).complete);
+    }
+
+    @Test public void latestMatchingSleepStagePacketReplacesEarlierSummaries() throws Exception {
+        int sleepStart = START_SECONDS + 18 * 3600;
+        byte[] stale = stagePacket(sleepStart, new int[] {(2 << 12) | 120, (1 << 12) | 120});
+        byte[] current = stagePacket(sleepStart, new int[] {(2 << 12) | 60, (1 << 12) | 420});
+        byte[] body = sleepBody(6, true);
+        byte[] withStages = Arrays.copyOf(body, body.length + stale.length + current.length);
+        System.arraycopy(stale, 0, withStages, body.length, stale.length);
+        System.arraycopy(current, 0, withStages, body.length + stale.length, current.length);
+        var stages = parser().parseFile(file(6, (8 << 2) | 1, withStages)).measurements.stream()
+                .filter(item -> "sleep_stage".equals(item.kind)).toList();
+        assertEquals(2, stages.size());
+        assertEquals(2, stages.get(0).stage.intValue());
+        assertEquals(60 * 60_000L, stages.get(0).endMs - stages.get(0).startMs);
+        assertEquals(3, stages.get(1).stage.intValue());
+        assertEquals(420 * 60_000L, stages.get(1).endMs - stages.get(1).startMs);
+        assertEquals(stages.get(0).endMs, stages.get(1).startMs);
+    }
+
+    private static byte[] stagePacket(int sleepStart, int[] runs) {
+        byte[] packet = new byte[17 + runs.length * 2];
+        packet[0] = (byte) 0xfb; packet[1] = (byte) 0xfa;
+        packet[2] = (byte) 0xfc; packet[3] = (byte) 0xff;
+        packet[4] = 17;
+        put32(packet, 5, sleepStart);
+        packet[14] = 17;
+        packet[16] = (byte) (runs.length * 2);
+        for (int i = 0; i < runs.length; i++) {
+            packet[17 + i * 2] = (byte) (runs[i] >>> 8);
+            packet[18 + i * 2] = (byte) runs[i];
+        }
+        return packet;
+    }
+
+    @Test public void sleepSummaryVersion4ParsesIntervalSeriesAndStages() throws Exception {
+        int sleepStart = START_SECONDS + 18 * 3600;
+        var records = parser().parseFile(file(4, (8 << 2) | 1, sleepV4(0, true))).measurements;
+        assertEquals(6, records.size());
+        var sleep = records.get(0);
+        assertEquals("sleep_interval", sleep.kind);
+        assertTrue(sleep.complete);
+        assertEquals("sleep", sleep.measurementMode);
+        assertEquals(sleepStart * 1000L, sleep.startMs);
+        assertEquals((sleepStart + 8 * 3600L) * 1000L, sleep.endMs);
+        assertEquals(70, records.get(1).value.intValue());
+        assertEquals(71, records.get(2).value.intValue());
+        assertEquals("spo2", records.get(3).kind);
+        assertEquals(98, records.get(3).value.intValue());
+        var stages = records.stream().filter(item -> "sleep_stage".equals(item.kind)).toList();
+        assertEquals(2, stages.size());
+        assertEquals(2, stages.get(0).stage.intValue());
+        assertEquals(3, stages.get(1).stage.intValue());
+        assertEquals(sleep.startMs, stages.get(0).startMs);
+        assertEquals(sleep.endMs, stages.get(1).endMs);
+        var open = parser().parseFile(file(4, (8 << 2) | 1, sleepV4(1, true))).measurements.get(0);
+        assertFalse(open.complete);
+        assertEquals(sleep.recordId, open.recordId);
+        var shifted = parser().parseFile(file(4, (8 << 2) | 1, sleepV4(0, false))).measurements;
+        assertEquals(70, shifted.get(1).value.intValue());
+        assertEquals(sleepStart * 1000L, shifted.get(1).startMs);
+        assertEquals("INVALID_SLEEP_COMPLETE_FLAG",
+                parser().parseFile(file(4, (8 << 2) | 1, sleepV4(2, true))).parseStatus);
+        byte[] inverted = sleepV4(0, true);
+        put32(inverted, 7, sleepStart - 1);
+        assertEquals("INVALID_SLEEP_INTERVAL",
+                parser().parseFile(file(4, (8 << 2) | 1, inverted)).parseStatus);
     }
 
 

@@ -8,8 +8,13 @@ import io.github.miam1ku.mibandoplusbridge.data.BindingStore;
 import io.github.miam1ku.mibandoplusbridge.data.BandStateRepository;
 import io.github.miam1ku.mibandoplusbridge.data.HealthRecordStore;
 import io.github.miam1ku.mibandoplusbridge.data.RawFitnessFileStore;
+import io.github.miam1ku.mibandoplusbridge.data.SleepStageAlign;
 import io.github.miam1ku.mibandoplusbridge.integration.HealthQueueProvider;
 import io.github.miam1ku.mibandoplusbridge.protocol.BandHistoryParser;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
@@ -28,6 +33,7 @@ final class HealthReplay implements AutoCloseable {
     private final AtomicBoolean running = new AtomicBoolean();
     private volatile boolean closed;
     private boolean legacyIndexed;
+    private boolean sleepStagesAligned;
     private final ContentObserver observer = new ContentObserver(null) {
         @Override public void onChange(boolean selfChange) { request(); }
     };
@@ -82,6 +88,10 @@ final class HealthReplay implements AutoCloseable {
             status.accept("ACCOUNT_CONFIRMATION_REQUIRED");
             return;
         }
+        int reparsed = raw.promoteRejectedSleep();
+        if (reparsed > 0) {
+            io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(context, "history sleep reparsed " + reparsed);
+        }
         var binding = new BindingStore(context).readIdentity();
         String identity = binding.did();
         if (identity.isBlank()) identity = binding.address().replace(":", "");
@@ -90,6 +100,7 @@ final class HealthReplay implements AutoCloseable {
             var files = records.replayFiles(4);
             if (files.isEmpty()) break;
             boolean added = false;
+            boolean sawSleep = false;
             try {
                 for (var file : files) {
                     if (closed) return;
@@ -101,8 +112,12 @@ final class HealthReplay implements AutoCloseable {
                     }
                     for (int index = file.nextRecordIndex(); index < parsed.measurements.size(); index++) {
                         if (closed) return;
-                        var result = records.enqueueArchivedMeasurement(file.fileHash(), index, parsed.measurements.get(index));
+                        var measurement = parsed.measurements.get(index);
+                        var result = records.enqueueArchivedMeasurement(file.fileHash(), index, measurement);
                         added |= result.added();
+                        if ("sleep_interval".equals(measurement.kind) || "sleep_stage".equals(measurement.kind)) {
+                            sawSleep = true;
+                        }
                     }
                 }
             } finally {
@@ -111,9 +126,61 @@ final class HealthReplay implements AutoCloseable {
                     context.getContentResolver().notifyChange(HealthQueueProvider.RECORDS_URI, null);
                 }
             }
+            if (sawSleep) sleepStagesAligned = false;
         }
+        alignStoredSleep(identity);
         if (!closed) BandStateRepository.refreshStoredSteps(context);
         status.accept("HEALTH_LOCAL_RECORDS_READY");
+    }
+
+    /** Newest file that still has stages owns the interval. Older files must not delete it. */
+    private void alignStoredSleep(String identity) throws Exception {
+        if (sleepStagesAligned || closed) return;
+        boolean added = false;
+        var files = records.completedFiles();
+        Set<String> blocked = new HashSet<>();
+        var claimed = new java.util.HashMap<String, List<SleepStageAlign.Interval>>();
+        for (int i = files.size() - 1; i >= 0; i--) {
+            if (closed) return;
+            var file = files.get(i);
+            if (blocked.contains(file.deviceId())) continue;
+            BandHistoryParser.FileResult parsed;
+            try {
+                parsed = new BandHistoryParser(file.firmware(), file.deviceId(), identity)
+                        .parseFile(raw.readFile(file.fileHash()));
+            } catch (RuntimeException unreadable) {
+                blocked.add(file.deviceId());
+                continue;
+            }
+            if (!"PARSED".equals(parsed.parseStatus)) {
+                blocked.add(file.deviceId());
+                continue;
+            }
+            var intervals = spans(parsed.measurements, file.deviceId(), "sleep_interval");
+            var stages = spans(parsed.measurements, file.deviceId(), "sleep_stage");
+            var owned = claimed.computeIfAbsent(file.deviceId(), key -> new ArrayList<>());
+            var covered = SleepStageAlign.withStages(SleepStageAlign.claim(intervals, owned), stages);
+            if (covered.isEmpty()) continue;
+            if (records.retainSleepStages(file.deviceId(), parsed.measurements, covered) > 0) added = true;
+            owned.addAll(covered);
+        }
+        sleepStagesAligned = true;
+        if (added) {
+            context.getContentResolver().notifyChange(HealthQueueProvider.URI, null);
+            context.getContentResolver().notifyChange(HealthQueueProvider.RECORDS_URI, null);
+        }
+    }
+
+    private static List<SleepStageAlign.Interval> spans(
+            List<BandHistoryParser.Measurement> parsed, String deviceId, String kind) {
+        List<SleepStageAlign.Interval> found = new ArrayList<>();
+        if (parsed == null) return found;
+        for (var measurement : parsed) {
+            if (measurement != null && deviceId.equals(measurement.deviceId) && kind.equals(measurement.kind)) {
+                found.add(new SleepStageAlign.Interval(measurement.startMs, measurement.endMs));
+            }
+        }
+        return found;
     }
 
     @Override public void close() {

@@ -14,6 +14,7 @@ import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PowerManager;
 import android.service.notification.NotificationListenerService;
 import android.service.notification.StatusBarNotification;
 import android.telecom.TelecomManager;
@@ -34,6 +35,8 @@ public final class BandNotificationListener extends NotificationListenerService 
     private long appliedSession;
     private boolean appliedEnabled, appliedBody;
     private Set<String> appliedPackages = Set.of();
+    private final NotifyHold hold = new NotifyHold();
+    private String lastWake = "";
     private String lastSkip = "";
     private final SharedPreferences.OnSharedPreferenceChangeListener settingsChanged = (prefs, key) -> {
         if (!"observedPackages".equals(key)) main.post(this::resetSession);
@@ -69,9 +72,13 @@ public final class BandNotificationListener extends NotificationListenerService 
     public static void ensureEnabled(Context context) {
         PackageManager packages = context.getPackageManager();
         ComponentName component = new ComponentName(context, BandNotificationListener.class);
-        if (packages.getComponentEnabledSetting(component) == PackageManager.COMPONENT_ENABLED_STATE_ENABLED) return;
-        packages.setComponentEnabledSetting(component, PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
-                PackageManager.DONT_KILL_APP);
+        if (packages.getComponentEnabledSetting(component) != PackageManager.COMPONENT_ENABLED_STATE_ENABLED) {
+            packages.setComponentEnabledSetting(component, PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
+                    PackageManager.DONT_KILL_APP);
+        }
+        if (!listenerConnected()) {
+            try { requestRebind(component); } catch (RuntimeException ignored) { }
+        }
     }
 
     public static void connectionChanged() {
@@ -93,6 +100,7 @@ public final class BandNotificationListener extends NotificationListenerService 
 
     @Override public void onListenerConnected() {
         listenerConnected = true;
+        wakeLive();
         resetSession();
         PhoneMusic.attach(this, main);
     }
@@ -110,11 +118,22 @@ public final class BandNotificationListener extends NotificationListenerService 
     }
 
     private boolean notificationsAllowed() {
-        return sessionAllowed() && settings.getBoolean("enabled", false);
+        return sessionAllowed() && settings.getBoolean("enabled", true);
+    }
+
+    private void wakeLive() {
+        try {
+            BandLiveService.start(this);
+        } catch (RuntimeException failure) {
+            String name = failure.getClass().getSimpleName();
+            if (name.equals(lastWake)) return;
+            lastWake = name;
+            SessionLog.line(this, "NOTIFY_WAKE " + name);
+        }
     }
 
     private void resetSession() {
-        boolean enabled = settings.getBoolean("enabled", false);
+        boolean enabled = settings.getBoolean("enabled", true);
         boolean body = settings.getBoolean("showBody", true);
         Set<String> packages = Set.copyOf(settings.getStringSet("packages", Set.of()));
         long session = notificationsAllowed() ? BandLiveService.notificationSessionId() : 0;
@@ -127,16 +146,21 @@ public final class BandNotificationListener extends NotificationListenerService 
         relay.disconnected();
         BandLiveService.cancelNotifications(this);
         relay.configure(enabled, packages, body);
+        if (!enabled) hold.clear();
         if (!notificationsAllowed()) return;
         HashMap<String, Long> baseline = new HashMap<>();
         try {
             StatusBarNotification[] active = getActiveNotifications();
             if (active != null) for (StatusBarNotification item : active) {
                 observePackage(item.getPackageName());
+                if (hold.contains(item.getKey())) continue;
                 baseline.put(item.getKey(), item.getPostTime());
                 if (baseline.size() > NotificationRelay.CAPACITY) break;
             }
             relay.connected(baseline);
+            if (!"NOTIFICATION_BASELINE_CAPACITY".equals(relay.lastFailureCode())) {
+                for (NotificationRelay.Event event : hold.drain()) relay.posted(event);
+            }
         } catch (SecurityException unavailable) { relay.disconnected(); }
     }
 
@@ -148,28 +172,72 @@ public final class BandNotificationListener extends NotificationListenerService 
                 && CallPresentation.connected(posted)) {
             BandLiveService.noteCallAnswered();
         }
-        if (!notificationsAllowed()) {
-            skip(sessionAllowed() ? "switch" : !accessGranted(this) ? "access" : "session", item.getPackageName());
+        if (!accessGranted(this)) {
+            skip("access", item.getPackageName());
+            return;
+        }
+        if (!settings.getBoolean("enabled", true)) {
+            skip("switch", item.getPackageName());
+            hold.clear();
             relay.disconnected();
             BandLiveService.cancelNotifications(this);
             return;
         }
-        Notification n = item.getNotification();
-        if (io.github.miam1ku.mibandoplusbridge.notify.PhoneAlarmNotice.ringing(item)) {
-            io.github.miam1ku.mibandoplusbridge.notify.PhoneAlarmNotice.posted(this, item);
+        if (PhoneAlarmNotice.ringing(item)) {
+            if (!BandLiveService.notificationSessionReady(this)) wakeLive();
+            PhoneAlarmNotice.posted(this, item);
             return;
         }
+        Notification call = item.getNotification();
+        if (call != null && Notification.CATEGORY_CALL.equals(call.category)) {
+            if (!BandLiveService.notificationSessionReady(this)) wakeLive();
+            skip("call", item.getPackageName());
+            return;
+        }
+        Notification n = item.getNotification();
         Ranking ranking = new Ranking();
-        if (getPackageName().equals(item.getPackageName())
-                || !settings.getStringSet("packages", Set.of()).contains(item.getPackageName())
-                || n == null || (n.flags & (Notification.FLAG_FOREGROUND_SERVICE | Notification.FLAG_GROUP_SUMMARY)) != 0
-                || n.visibility == Notification.VISIBILITY_SECRET
-                || rankings == null || !rankings.getRanking(item.getKey(), ranking)
-                || ranking.getImportance() <= NotificationManager.IMPORTANCE_LOW) {
+        if (!admit(item, n, rankings, ranking)) {
             skip(skipReason(item, n, rankings, ranking), item.getPackageName());
+            hold.remove(item.getKey());
             relay.removed(item.getKey());
             return;
         }
+        NotificationRelay.Event event = event(item, n, ranking);
+        if (!BandLiveService.notificationSessionReady(this)) {
+            hold.put(event);
+            skip("session", item.getPackageName());
+            wakeLive();
+            return;
+        }
+        hold.remove(item.getKey());
+        String appName = event.appName();
+        SessionLog.line(this, "NOTIFY_POST pkg=" + item.getPackageName()
+                + " app=" + (appName.equals(item.getPackageName()) ? "package" : "label"));
+        relay.posted(event);
+    }
+
+    private boolean admit(StatusBarNotification item, Notification notification, RankingMap rankings, Ranking ranking) {
+        if (getPackageName().equals(item.getPackageName())) return false;
+        if (PhoneAlarmNotice.CLOCK.equals(item.getPackageName())) return false;
+        if (!NotifyAdmission.packageAllowed(settings.getStringSet("packages", Set.of()), item.getPackageName())) return false;
+        if (!NotifyAdmission.healthAllows(settings.getBoolean("mainSwitchKnown", false),
+                settings.getBoolean("mainSwitch", true), settings.getStringSet("deniedPackages", Set.of()),
+                item.getPackageName())) return false;
+        if (notification == null) return false;
+        if ((notification.flags & (Notification.FLAG_FOREGROUND_SERVICE | Notification.FLAG_GROUP_SUMMARY)) != 0) return false;
+        if (notification.visibility == Notification.VISIBILITY_SECRET) return false;
+        if (rankings == null || !rankings.getRanking(item.getKey(), ranking)) return false;
+        if (ranking.getImportance() <= NotificationManager.IMPORTANCE_LOW) return false;
+        return !screenBlocks();
+    }
+
+    private boolean screenBlocks() {
+        PowerManager power = getSystemService(PowerManager.class);
+        boolean interactive = power != null && power.isInteractive();
+        return NotifyAdmission.screenBlocks(settings.getBoolean("screenOnPush", true), interactive, locked(this));
+    }
+
+    private NotificationRelay.Event event(StatusBarNotification item, Notification n, Ranking ranking) {
         boolean locked = locked(this);
         Notification visible = n;
         boolean bodyAllowed = settings.getBoolean("showBody", true);
@@ -182,22 +250,25 @@ public final class BandNotificationListener extends NotificationListenerService 
         if (bodyAllowed && body.isBlank()) body = extra(visible, Notification.EXTRA_TEXT);
         String appName = AppLabels.label(this, item.getPackageName());
         if (appName.isBlank()) appName = item.getPackageName();
-        SessionLog.line(this, "NOTIFY_POST pkg=" + item.getPackageName()
-                + " app=" + (appName.equals(item.getPackageName()) ? "package" : "label"));
-        relay.posted(new NotificationRelay.Event(item.getPackageName(), appName, item.getKey(),
+        return new NotificationRelay.Event(item.getPackageName(), appName, item.getKey(),
                 title, body, visible != n ? title : null, visible != n ? body : null,
-                item.getPostTime(), n.visibility, locked, false, false, ranking.getImportance()));
+                item.getPostTime(), n.visibility, locked, false, false, ranking.getImportance());
     }
 
     private String skipReason(StatusBarNotification item, Notification notification, RankingMap rankings, Ranking ranking) {
         if (getPackageName().equals(item.getPackageName())) return "self";
-        if (!settings.getStringSet("packages", Set.of()).contains(item.getPackageName())) return "package";
+        if (PhoneAlarmNotice.CLOCK.equals(item.getPackageName())) return "clock";
+        if (!NotifyAdmission.packageAllowed(settings.getStringSet("packages", Set.of()), item.getPackageName())) return "package";
+        if (!NotifyAdmission.healthAllows(settings.getBoolean("mainSwitchKnown", false),
+                settings.getBoolean("mainSwitch", true), settings.getStringSet("deniedPackages", Set.of()),
+                item.getPackageName())) return "health";
         if (notification == null) return "empty";
         if ((notification.flags & Notification.FLAG_GROUP_SUMMARY) != 0) return "summary";
         if ((notification.flags & Notification.FLAG_FOREGROUND_SERVICE) != 0) return "foreground";
         if (notification.visibility == Notification.VISIBILITY_SECRET) return "secret";
         if (rankings == null || !rankings.getRanking(item.getKey(), ranking)) return "ranking";
         if (ranking.getImportance() <= NotificationManager.IMPORTANCE_LOW) return "importance";
+        if (screenBlocks()) return "screen";
         return "filtered";
     }
 
@@ -209,8 +280,11 @@ public final class BandNotificationListener extends NotificationListenerService 
     }
 
     @Override public void onNotificationRemoved(StatusBarNotification item, RankingMap rankings, int reason) {
-        io.github.miam1ku.mibandoplusbridge.notify.PhoneAlarmNotice.removed(this, item);
-        if (item != null) relay.removed(item.getKey());
+        PhoneAlarmNotice.removed(this, item);
+        if (item != null) {
+            hold.remove(item.getKey());
+            relay.removed(item.getKey());
+        }
     }
 
     @Override public void onNotificationRankingUpdate(RankingMap rankings) {
@@ -218,7 +292,10 @@ public final class BandNotificationListener extends NotificationListenerService 
         // Ranking changes can only withdraw existing delivery, never replay an active baseline.
         for (String key : rankings.getOrderedKeys()) {
             Ranking ranking = new Ranking();
-            if (rankings.getRanking(key, ranking) && ranking.getImportance() <= NotificationManager.IMPORTANCE_LOW) relay.removed(key);
+            if (rankings.getRanking(key, ranking) && ranking.getImportance() <= NotificationManager.IMPORTANCE_LOW) {
+                hold.remove(key);
+                relay.removed(key);
+            }
         }
     }
 

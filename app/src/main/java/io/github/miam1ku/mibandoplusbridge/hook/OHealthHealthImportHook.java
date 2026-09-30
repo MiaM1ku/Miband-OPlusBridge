@@ -53,6 +53,7 @@ public final class OHealthHealthImportHook {
     private final AtomicReference<Object> observedApi = new AtomicReference<>();
     private final AtomicLong accountEpoch = new AtomicLong();
     private long retryAfter;
+    private boolean stressZerosCleared;
     private String lastFailure;
     private final Runnable work = this::runScheduled;
 
@@ -163,6 +164,16 @@ public final class OHealthHealthImportHook {
                     logImportFailure(sleepFail);
                 }
             }
+            if (!stressZerosCleared) {
+                try {
+                    stressZerosCleared = clearUnmeasuredStress();
+                } catch (SecurityException paused) {
+                    throw paused;
+                } catch (Exception | LinkageError stressFail) {
+                    retrySoon = true;
+                    logImportFailure(stressFail);
+                }
+            }
             drain();
             if (steps != null) steps.write(context);
             lastFailure = null;
@@ -172,6 +183,33 @@ public final class OHealthHealthImportHook {
             logImportFailure(failure);
             if (failure instanceof InterruptedException) Thread.currentThread().interrupt();
         }
+    }
+
+    /** A zero continuous sample is an empty minute. Remove any already stored in OHealth. */
+    private boolean clearUnmeasuredStress() throws Exception {
+        String account = host.account();
+        Object api = host.api();
+        if (!usableAccount(account) || api == null) return false;
+        Bundle request = new Bundle();
+        request.putString("account", account);
+        Bundle gaps = context.getContentResolver().call(HealthQueueProvider.URI, "unmeasuredStress", null, request);
+        if (gaps == null) throw new IllegalStateException("STRESS_GAP_UNAVAILABLE");
+        long[] starts = gaps.getLongArray("starts");
+        long[] ends = gaps.getLongArray("ends");
+        String[] devices = gaps.getStringArray("devices");
+        if (starts == null || ends == null || devices == null
+                || starts.length != ends.length || starts.length != devices.length) {
+            throw new IllegalStateException("STRESS_GAP_UNAVAILABLE");
+        }
+        int table = OHealthHealthModels.Kind.STRESS.table;
+        for (int i = 0; i < starts.length; i++) {
+            host.deleteRows(api, table, account, devices[i], starts[i], ends[i]);
+        }
+        if (starts.length > 0) host.syncCloud(api, table);
+        Bundle forgotten = context.getContentResolver().call(HealthQueueProvider.URI,
+                "forgetUnmeasuredStress", null, request);
+        if (forgotten == null) throw new IllegalStateException("STRESS_GAP_UNAVAILABLE");
+        return true;
     }
 
     /** The app can already be signed in without calling getSsoId. Read it once per import pass. */
@@ -491,6 +529,30 @@ public final class OHealthHealthImportHook {
         void insertRows(Object api, int table, List<Object> rows) throws ReflectiveOperationException {
             insert(api, insertOption(table, rows));
             syncCloud(api, table);
+        }
+
+        void deleteRows(Object api, int table, String account, String device, long start, long end)
+                throws ReflectiveOperationException {
+            if (device == null || device.isBlank() || end <= start) {
+                throw new IllegalArgumentException("HEALTH_DELETE_WINDOW");
+            }
+            Class<?> type = Class.forName("com.heytap.databaseengine.option.DataDeleteOption", false, loader);
+            Object option = type.getConstructor().newInstance();
+            type.getMethod("setSsoid", String.class).invoke(option, account);
+            type.getMethod("setDeviceUniqueId", String.class).invoke(option, device);
+            type.getMethod("setDataTable", int.class).invoke(option, table);
+            type.getMethod("setStartTime", long.class).invoke(option, Math.max(0, start));
+            // end is exclusive. Inclusive host filters must not eat the next real sample.
+            type.getMethod("setEndTime", long.class).invoke(option, end - 1);
+            Object observer = observerConstructor.newInstance();
+            try {
+                subscribe.invoke(api.getClass().getMethod("deleteSportHealthData", type).invoke(api, option), observer);
+                if (!Boolean.TRUE.equals(observerResult.invoke(observer))) {
+                    throw new IllegalStateException("HEALTH_DELETE_UNCONFIRMED");
+                }
+            } finally {
+                try { observerDispose.invoke(observer); } catch (ReflectiveOperationException ignored) { }
+            }
         }
 
         /** Same post-insert cloud request as databaseengineservice. A cloud failure leaves the local row. */

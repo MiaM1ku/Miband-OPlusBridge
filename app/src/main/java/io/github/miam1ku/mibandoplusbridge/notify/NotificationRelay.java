@@ -77,8 +77,7 @@ public final class NotificationRelay {
     public synchronized String lastFailureCode() { return failure; }
 
     public synchronized void posted(Event event) {
-        if (!connected || !enabled) return;
-        if (!packages.contains(event.packageName()) || event.foreground() || event.summary()
+        if (!NotifyAdmission.packageAllowed(packages, event.packageName()) || event.foreground() || event.summary()
                 || event.importance() <= 2 || event.visibility() == -1) {
             removed(event.key());
             return;

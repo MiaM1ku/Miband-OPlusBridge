@@ -45,6 +45,13 @@ public final class NotificationRelayTest {
         assertEquals("visible", h.data(0).getBody());
     }
 
+    @Test public void emptyPackageSelectionForwardsAnAlert() {
+        Harness h = new Harness();
+        h.relay.configure(true, Set.of(), true);
+        h.relay.connected(Map.of());
+        h.relay.posted(event("open", "visible", 1));
+        assertEquals("visible", h.data(0).getBody());
+    }
     @Test public void baselineIsNotReplayedButLaterUpdateCanBeDelivered() {
         Harness h = new Harness();
         h.relay.connected(Map.of("key", 1L));

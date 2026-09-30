@@ -47,6 +47,47 @@ public final class SleepMusicTest {
         assertFalse(query.hasSystem());
     }
 
+    @Test public void currentSleepFilePausesOnceAndAnAsleepBaselineHoldsThatNight() {
+        SleepMusic gate = new SleepMusic();
+        long now = 1_000_000_000_000L;
+        long start = now - 30 * 60_000L;
+        long end = now - 60_000L;
+        assertEquals(SleepMusic.Effect.UNCHANGED, gate.currentNight(start, end, now, now).effect());
+        assertEquals(SleepMusic.Effect.PAUSE, gate.currentNight(start, end, start, now).effect());
+        assertEquals(SleepMusic.Effect.UNCHANGED, gate.currentNight(start, end, start, now).effect());
+        assertEquals(SleepMusic.Effect.UNCHANGED,
+                gate.currentNight(start, now - SleepMusic.FILE_WINDOW_MS - 1, 0, now).effect());
+        long next = start + 24 * 60 * 60_000L;
+        assertEquals(SleepMusic.Effect.PAUSE, gate.currentNight(next, next + 60_000L, 0, next + 60_000L).effect());
+        SleepMusic held = new SleepMusic();
+        assertEquals(SleepMusic.Effect.BASELINE, held.observe(true, now).effect());
+        assertEquals(SleepMusic.Effect.UNCHANGED, held.currentNight(start, end, 0, now).effect());
+        assertEquals(SleepMusic.Effect.PAUSE, held.currentNight(next, next + 60_000L, 0, next + 60_000L).effect());
+        assertEquals(SleepMusic.Effect.BASELINE, new SleepMusic().push(true).effect());
+    }
+
+    @Test public void anAwakeReportHoldsTheCurrentNightAndAFreshGateDoesNotPauseIt() {
+        SleepMusic gate = new SleepMusic();
+        long now = 1_000_000_000_000L;
+        long start = now - 30 * 60_000L;
+        long end = now - 60_000L;
+        assertEquals(SleepMusic.Effect.BASELINE, gate.observe(true, start).effect());
+        assertEquals(SleepMusic.Effect.WOKE, gate.observe(false, now).effect());
+        assertEquals(SleepMusic.Effect.UNCHANGED, gate.currentNight(start, end, 0, now).effect());
+        long next = now + 20 * 60 * 60_000L;
+        assertEquals(SleepMusic.Effect.PAUSE, gate.currentNight(next, next + 60_000L, 0, next + 60_000L).effect());
+        SleepMusic restarted = new SleepMusic();
+        assertEquals(SleepMusic.Effect.UNCHANGED,
+                restarted.currentNight(start, end, Long.MAX_VALUE, now).effect());
+        assertEquals(SleepMusic.Effect.PAUSE, restarted.currentNight(start, end, start, now).effect());
+        SleepMusic stillAwake = new SleepMusic();
+        long arm = now;
+        assertEquals(SleepMusic.Effect.BASELINE, stillAwake.observe(false, arm).effect());
+        assertEquals(SleepMusic.Effect.UNCHANGED, stillAwake.observe(false, arm + 3_600_000L).effect());
+        assertEquals(SleepMusic.Effect.PAUSE, stillAwake.currentNight(
+                arm + 30 * 60_000L, arm + 90 * 60_000L, arm, arm + 90 * 60_000L).effect());
+    }
+
     private static XiaomiProto.Command basic(boolean asleep) {
         return XiaomiProto.Command.newBuilder().setType(2).setSubtype(78)
                 .setSystem(XiaomiProto.System.newBuilder().setBasicDeviceState(

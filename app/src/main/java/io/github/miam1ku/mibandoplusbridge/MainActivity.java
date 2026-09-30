@@ -148,7 +148,7 @@ public final class MainActivity extends AppCompatActivity {
         LinearLayout.LayoutParams sleepParams = new LinearLayout.LayoutParams(-1, -2);
         sleepParams.bottomMargin = BridgeScreen.dp(this, 8);
         sleepCard.addView(sleepPause, sleepParams);
-        screen.caption(sleepCard, "手环检测到入睡后，暂停手机正在播放的音乐。醒来不会自动继续。刚打开时先记下当前状态，不会立刻暂停。");
+        screen.caption(sleepCard, "手环报入睡后暂停正在播放的音乐，醒来不自动继续。刚打开时如果已经在睡，不会马上暂停。这只手环若不回报实时入睡，就等睡眠记录同步后再暂停，大约几分钟。");
         screen.setLastChildMargin(sleepCard, 0);
         final boolean[] writingSleepPause = {false};
         sleepPause.setChecked(SleepMusic.enabled(this));
@@ -700,15 +700,27 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     private void publishPermissionStatus(boolean bluetooth, boolean notify) {
-        if (bluetooth && notify) {
+        boolean listener = io.github.miam1ku.mibandoplusbridge.notify.BandNotificationListener.accessGranted(this);
+        if (bluetooth && notify && listener) {
             permissionStatus.setVisibility(View.GONE);
             permissionStatus.setOnClickListener(null);
             return;
         }
         permissionStatus.setVisibility(View.VISIBLE);
-        permissionStatus.setOnClickListener(null);
         permissionStatus.setText("附近设备权限：" + (bluetooth ? "已授权" : "未授权")
-                + "\n本应用通知：" + (notify ? "已开启" : "未开启"));
+                + "\n本应用通知：" + (notify ? "已开启" : "未开启")
+                + "\n通知使用权：" + (listener ? "已开启" : "未开启，点此打开"));
+        if (listener) {
+            permissionStatus.setOnClickListener(null);
+            return;
+        }
+        permissionStatus.setOnClickListener(v -> {
+            try {
+                startActivity(new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS));
+            } catch (RuntimeException failure) {
+                permissionStatus.setText("打不开通知使用权设置。");
+            }
+        });
     }
 
     private static String safeIdentity(String value, String fallback) {

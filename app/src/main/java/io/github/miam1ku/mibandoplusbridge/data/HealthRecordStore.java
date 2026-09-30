@@ -467,6 +467,161 @@ public final class HealthRecordStore extends SQLiteOpenHelper {
         }
     }
 
+    /** A rejected file gained a parser. Does not rewind a cursor that already moved. */
+    synchronized boolean promoteRejectedFile(String hash, int recordCount) {
+        requireHash(hash);
+        if (recordCount < 1) return false;
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
+        try {
+            try (Cursor row = db.rawQuery("SELECT parse_status, record_count, next_record_index FROM files WHERE file_hash=?",
+                    new String[]{hash})) {
+                if (!row.moveToFirst() || "PARSED".equals(row.getString(0))
+                        || row.getInt(1) != 0 || row.getInt(2) != 0) {
+                    db.setTransactionSuccessful();
+                    return false;
+                }
+            }
+            ContentValues values = new ContentValues(2);
+            values.put("parse_status", "PARSED");
+            values.put("record_count", recordCount);
+            int updated = db.update("files", values,
+                    "file_hash=? AND parse_status!='PARSED' AND record_count=0 AND next_record_index=0",
+                    new String[]{hash});
+            db.setTransactionSuccessful();
+            return updated == 1;
+        } finally {
+            db.endTransaction();
+        }
+    }
+
+    /**
+     * Write this file's stages for {@code owned} intervals, then drop any other stages there.
+     * Caller passes only intervals the newest analysis still owns.
+     */
+    public synchronized int retainSleepStages(String deviceId, List<Measurement> parsed,
+            List<SleepStageAlign.Interval> owned) {
+        if (deviceId == null || deviceId.isBlank() || parsed == null || owned == null || owned.isEmpty()) return 0;
+        List<Measurement> stages = new ArrayList<>();
+        for (Measurement measurement : parsed) {
+            if (measurement != null && deviceId.equals(measurement.deviceId) && "sleep_stage".equals(measurement.kind)) {
+                stages.add(measurement);
+            }
+        }
+        if (stages.isEmpty()) return 0;
+        SQLiteDatabase db = getWritableDatabase();
+        String account = requireConfirmedAccount(db);
+        int changed = 0;
+        db.beginTransaction();
+        try {
+            for (Measurement stage : stages) {
+                if (!SleepStageAlign.overlapsAny(stage.startMs, stage.endMs, owned)) continue;
+                if (enqueue(db, account, stage).added()) changed++;
+            }
+            for (SleepStageAlign.Interval interval : owned) {
+                List<String> keep = new ArrayList<>();
+                for (Measurement stage : stages) {
+                    if (stage.startMs < interval.endMs() && stage.endMs > interval.startMs()) keep.add(stage.recordId);
+                }
+                if (keep.isEmpty()) continue;
+                List<String> drop = new ArrayList<>();
+                try (Cursor rows = db.rawQuery("SELECT record_id FROM measurements WHERE account_hash=? "
+                        + "AND device_id=? AND kind='sleep_stage' AND start_ms<? AND end_ms>?",
+                        new String[]{account, deviceId, Long.toString(interval.endMs()),
+                                Long.toString(interval.startMs())})) {
+                    while (rows.moveToNext()) {
+                        String id = rows.getString(0);
+                        if (!keep.contains(id)) drop.add(id);
+                    }
+                }
+                for (String id : drop) {
+                    String[] key = {account, id};
+                    db.delete("measurements", "account_hash=? AND record_id=?", key);
+                    db.delete("revisions", "account_hash=? AND record_id=?", key);
+                    changed++;
+                }
+            }
+            db.setTransactionSuccessful();
+        } finally {
+            db.endTransaction();
+        }
+        return changed;
+    }
+
+    public record StressGap(String deviceId, long startMs, long endMs) {}
+
+    /** Continuous stress 0 is an empty minute, not a reading. Ranges are [start, end). */
+    public synchronized List<StressGap> unmeasuredStress(String account) {
+        if (!authorizedAccount(account)) throw new SecurityException("HEALTH_ACCOUNT_NOT_CONFIRMED");
+        String hash = hashAccount(account);
+        if (!hash.equals(requireConfirmedAccount(getReadableDatabase()))) {
+            throw new SecurityException("HEALTH_ACCOUNT_NOT_CONFIRMED");
+        }
+        List<StressGap> gaps = new ArrayList<>();
+        try (Cursor rows = getReadableDatabase().rawQuery("SELECT device_id, start_ms, end_ms FROM measurements "
+                + "WHERE account_hash=? AND kind='stress' AND json_extract(payload,'$.measurementMode')='continuous' "
+                + "AND json_extract(payload,'$.value')=0 ORDER BY device_id, start_ms", new String[]{hash})) {
+            String device = null;
+            long runStart = -1;
+            long runEnd = -1;
+            while (rows.moveToNext()) {
+                String nextDevice = rows.getString(0);
+                long start = rows.getLong(1);
+                long end = rows.getLong(2);
+                if (device != null && device.equals(nextDevice) && runEnd == start) {
+                    runEnd = end;
+                    continue;
+                }
+                if (device != null) gaps.add(new StressGap(device, runStart, runEnd));
+                device = nextDevice;
+                runStart = start;
+                runEnd = end;
+            }
+            if (device != null) gaps.add(new StressGap(device, runStart, runEnd));
+        }
+        return gaps;
+    }
+
+    public synchronized int forgetUnmeasuredStress(String account) {
+        if (!authorizedAccount(account)) throw new SecurityException("HEALTH_ACCOUNT_NOT_CONFIRMED");
+        SQLiteDatabase db = getWritableDatabase();
+        String hash = hashAccount(account);
+        if (!hash.equals(requireConfirmedAccount(db))) throw new SecurityException("HEALTH_ACCOUNT_NOT_CONFIRMED");
+        db.beginTransaction();
+        try {
+            List<String> ids = new ArrayList<>();
+            try (Cursor rows = db.rawQuery("SELECT record_id FROM measurements WHERE account_hash=? AND kind='stress' "
+                    + "AND json_extract(payload,'$.measurementMode')='continuous' AND json_extract(payload,'$.value')=0",
+                    new String[]{hash})) {
+                while (rows.moveToNext()) ids.add(rows.getString(0));
+            }
+            for (String id : ids) {
+                String[] key = {hash, id};
+                db.delete("records", "account_hash=? AND record_id=?", key);
+                db.delete("revisions", "account_hash=? AND record_id=?", key);
+                db.delete("measurements", "account_hash=? AND record_id=?", key);
+            }
+            db.setTransactionSuccessful();
+            return ids.size();
+        } finally {
+            db.endTransaction();
+        }
+    }
+
+    public synchronized List<ArchivedFile> completedFiles() {
+        List<ArchivedFile> files = new ArrayList<>();
+        String account = confirmedAccountHash();
+        if (account == null) return files;
+        try (Cursor rows = getReadableDatabase().rawQuery("SELECT file_hash, device_id, firmware, captured_at_ms, "
+                + "account_hash, next_record_index, parse_status, record_count FROM files "
+                + "WHERE account_hash=? AND parse_status='PARSED' AND next_record_index>=record_count "
+                + "ORDER BY captured_at_ms, file_hash", new String[]{account})) {
+            while (rows.moveToNext()) files.add(new ArchivedFile(rows.getString(0), rows.getString(1), rows.getString(2),
+                    rows.getLong(3), rows.getString(4), rows.getInt(5), rows.getString(6), rows.getInt(7)));
+        }
+        return files;
+    }
+
     public synchronized List<ArchivedFile> replayFiles(int limit) {
         if (limit < 1 || limit > PAGE_SIZE) throw new IllegalArgumentException("INVALID_HISTORY_PAGE_SIZE");
         List<ArchivedFile> files = new ArrayList<>(limit);

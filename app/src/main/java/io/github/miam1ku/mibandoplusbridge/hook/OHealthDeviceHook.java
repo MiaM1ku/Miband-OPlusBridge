@@ -1123,6 +1123,11 @@ public final class OHealthDeviceHook {
             }
             if (deliverPhoneAlarm(bean, pkg, key, removed)) return true;
             boolean call = isIncomingCall(bean);
+            if (!call && localListenerConnected()) {
+                if (!removed) readAllowBlock(bean);
+                notifyDrop("local", pkg, process);
+                return true;
+            }
             if (!removed && !call) {
                 String blocked = readAllowBlock(bean);
                 if (blocked != null) {
@@ -1184,6 +1189,7 @@ public final class OHealthDeviceHook {
     private static boolean deliverPhoneAlarm(Object bean, String pkg, String key, boolean removed) {
         if (!io.github.miam1ku.mibandoplusbridge.notify.PhoneAlarmNotice.CLOCK.equals(pkg)) return false;
         boolean live = io.github.miam1ku.mibandoplusbridge.notify.PhoneAlarmNotice.ringing(clockNotification(bean));
+        if (localListenerConnected()) return true;
         if (!removed) {
             trace("ALARM_CLOCK_POST " + clockShape(bean));
             if (!live) return true;
@@ -1283,10 +1289,10 @@ public final class OHealthDeviceHook {
             ClassLoader loader = bean.getClass().getClassLoader();
             Object holder = XposedHelpers.getStaticObjectField(loader.loadClass(
                     "com.heytap.health.watch.notification.impl.whitelist.NotificationRoomHolder"), "INSTANCE");
-            if (io.github.miam1ku.mibandoplusbridge.notify.NotifySwitch.on(
-                    XposedHelpers.callMethod(holder, "getPackageSwitchStatus", "screen_on_push"))) {
-                return false;
-            }
+            boolean on = io.github.miam1ku.mibandoplusbridge.notify.NotifySwitch.on(
+                    XposedHelpers.callMethod(holder, "getPackageSwitchStatus", "screen_on_push"));
+            remember(null, null, null, on);
+            if (on) return false;
             Object utils = XposedHelpers.getStaticObjectField(loader.loadClass(
                     "com.heytap.health.watch.notification.impl.utils.NotificationScreenUtils"), "INSTANCE");
             Object offOrLocked = XposedHelpers.callMethod(utils, "isScreenOffOrLocked", hostContext);
@@ -1329,19 +1335,52 @@ public final class OHealthDeviceHook {
                     "INSTANCE");
             Object mainSwitch = XposedHelpers.callMethod(holder, "getPackageSwitchStatus", "main_switch");
             if (!io.github.miam1ku.mibandoplusbridge.notify.NotifySwitch.on(mainSwitch)) {
+                remember(false, null, null, null);
                 return "main_switch value=" + String.valueOf(mainSwitch);
             }
             String pkg = text(bean, "getPackageName");
             Object appSwitch = XposedHelpers.callMethod(holder, "getPackageSwitchStatus", pkg);
-            if (!io.github.miam1ku.mibandoplusbridge.notify.NotifySwitch.on(appSwitch)) {
-                return "package value=" + String.valueOf(appSwitch);
-            }
+            boolean packageOn = io.github.miam1ku.mibandoplusbridge.notify.NotifySwitch.on(appSwitch);
+            remember(true, pkg, packageOn, null);
+            if (!packageOn) return "package value=" + String.valueOf(appSwitch);
             return null;
         } catch (Throwable unavailable) {
             String kind = OHealthNotifyFilter.allowlistFailure(unavailable);
             if (OHealthNotifyFilter.blocks(kind)) return kind;
             noteAllowlist(kind);
             return null;
+        }
+    }
+
+    private static String lastPolicy = "";
+
+    private static void remember(Boolean main, String pkg, Boolean packageOn, Boolean screenOnPush) {
+        String token = String.valueOf(main) + "|" + pkg + "|" + packageOn + "|" + screenOnPush;
+        if (token.equals(lastPolicy) || hostContext == null) return;
+        lastPolicy = token;
+        android.os.Bundle extras = new android.os.Bundle();
+        if (main != null) extras.putBoolean("main", main);
+        if (pkg != null && packageOn != null) {
+            extras.putString("pkg", pkg);
+            extras.putBoolean("packageOn", packageOn);
+        }
+        if (screenOnPush != null) extras.putBoolean("screenOnPush", screenOnPush);
+        try {
+            hostContext.getContentResolver().call(
+                    io.github.miam1ku.mibandoplusbridge.integration.HostNotifyProvider.URI, "policy", null, extras);
+        } catch (RuntimeException failure) {
+            lastPolicy = "";
+        }
+    }
+
+    private static boolean localListenerConnected() {
+        if (hostContext == null) return false;
+        try {
+            android.os.Bundle result = hostContext.getContentResolver().call(
+                    io.github.miam1ku.mibandoplusbridge.integration.HostNotifyProvider.URI, "listener", null, null);
+            return result != null && result.getBoolean("connected", false);
+        } catch (RuntimeException failure) {
+            return false;
         }
     }
 
