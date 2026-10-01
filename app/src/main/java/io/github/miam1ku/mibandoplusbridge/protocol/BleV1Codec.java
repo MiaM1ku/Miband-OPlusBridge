@@ -23,6 +23,8 @@ public final class BleV1Codec {
     public static final int TYPE_SINGLE = 2;
     public static final int TYPE_PAYLOAD_ACK = 3;
     public static final byte[] PAYLOAD_ACK = {0, 0, 3, 0};
+    public static final byte[] CHUNK_START_ACK = {0, 0, 1, 1};
+    public static final byte[] CHUNK_END_ACK = {0, 0, 1, 0};
     public static final int DEFAULT_MTU_PAYLOAD = 244;
 
     private BleV1Codec() {}
@@ -32,8 +34,10 @@ public final class BleV1Codec {
     }
 
     /**
-     * Encrypted commands follow XiaomiCharacteristicV1: a single frame carries the counter in the
-     * header; a chunked frame prepends it to the ciphertext. Plaintext frames stay unprefixed.
+     * Band 8 fe95 plaintext is a single frame only when it fits: chunk 0, type 2, encryption
+     * flag 2, then the protobuf. Flag 2 is what an encrypted characteristic expects before
+     * auth; omitting it makes the band drop the nonce. Encrypted single frames carry the
+     * counter in the header. A chunked frame prepends that counter to the ciphertext.
      */
     public static List<byte[]> encodeOutgoing(byte[] payload, int maxWrite, boolean encrypted, int counter) {
         if (payload == null) throw new IllegalArgumentException("BLE payload required");
@@ -60,10 +64,11 @@ public final class BleV1Codec {
             body[1] = (byte) (counter >> 8);
             System.arraycopy(payload, 0, body, 2, payload.length);
         }
-        if (!encrypted && body.length <= chunkPayload) {
-            byte[] single = new byte[3 + body.length];
+        if (!encrypted && 4 + body.length <= maxWrite) {
+            byte[] single = new byte[4 + body.length];
             single[2] = TYPE_SINGLE;
-            System.arraycopy(body, 0, single, 3, body.length);
+            single[3] = 2;
+            System.arraycopy(body, 0, single, 4, body.length);
             frames.add(single);
             return frames;
         }
@@ -87,6 +92,16 @@ public final class BleV1Codec {
         return frames;
     }
 
+    public static boolean control(byte[] value, int type) {
+        return value != null && value.length >= 3 && value[0] == 0 && value[1] == 0
+                && (value[2] & 0xff) == type;
+    }
+
+    public static boolean chunkAck(byte[] value, int subtype) {
+        return value != null && value.length >= 4 && control(value, TYPE_CHUNK_ACK)
+                && (value[3] & 0xff) == subtype;
+    }
+
     public static final class Reassembler {
         private int expectedChunks;
         private final Map<Integer, byte[]> chunks = new HashMap<>();
@@ -107,7 +122,12 @@ public final class BleV1Codec {
             }
             int type = value[2] & 0xff;
             if (type == TYPE_SINGLE) {
-                return Arrays.copyOfRange(value, 3, value.length);
+                if (value.length < 4) throw new IllegalArgumentException("Invalid BLE V1 single");
+                int flag = value[3] & 0xff;
+                // Flag 1 stays so decrypt can tell ciphertext from plaintext. Flag 2 is the
+                // Band 8 plaintext marker and is not part of the protobuf.
+                if (flag == 1) return Arrays.copyOfRange(value, 3, value.length);
+                return Arrays.copyOfRange(value, 4, value.length);
             }
             if (type == TYPE_CHUNK_START) {
                 if (value.length < 6) throw new IllegalArgumentException("Invalid BLE V1 start");
