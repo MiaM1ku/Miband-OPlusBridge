@@ -37,7 +37,7 @@ final class BleGattClient implements AutoCloseable {
     private final UUID readUuid;
     private final UUID writeUuid;
     private final UUID activityUuid;
-    private final BlockingQueue<byte[]> incoming = new ArrayBlockingQueue<>(32);
+    private final BlockingQueue<Rx> incoming = new ArrayBlockingQueue<>(32);
     private final BlockingQueue<byte[]> transportAcks = new ArrayBlockingQueue<>(8);
     private final AtomicReference<String> failure = new AtomicReference<>();
     private final CountDownLatch ready = new CountDownLatch(1);
@@ -105,10 +105,10 @@ final class BleGattClient implements AutoCloseable {
         }
     }
 
-    byte[] take(long timeoutMs) throws Exception {
+    Rx take(long timeoutMs) throws Exception {
         String error = failure.get();
         if (error != null) throw new SppDiagnosticClient.Failure(error);
-        byte[] payload = incoming.poll(timeoutMs, TimeUnit.MILLISECONDS);
+        Rx payload = incoming.poll(timeoutMs, TimeUnit.MILLISECONDS);
         if (payload != null) return payload;
         if (closed) throw new SppDiagnosticClient.Failure("CANCELLED");
         error = failure.get();
@@ -127,7 +127,7 @@ final class BleGattClient implements AutoCloseable {
         failPending("CANCELLED");
         Thread writer = writerThread;
         if (writer != null) writer.interrupt();
-        incoming.offer(new byte[0]);
+        incoming.offer(new Rx(new byte[0], false));
         transportAcks.offer(new byte[0]);
     }
 
@@ -380,7 +380,7 @@ final class BleGattClient implements AutoCloseable {
                         ? BleV1Codec.PAYLOAD_ACK : BleV1Codec.CHUNK_END_ACK);
                 SessionLog.line(context, "rx ble bytes=" + payload.length
                         + (activityChar ? " activity" : ""));
-                incoming.offer(payload);
+                incoming.offer(new Rx(payload, activityChar));
             }
         } catch (IllegalArgumentException ignored) {
             fail("BLE_FRAME_INVALID");
@@ -431,6 +431,16 @@ final class BleGattClient implements AutoCloseable {
         }
     }
 
+
+    static final class Rx {
+        final byte[] payload;
+        final boolean activity;
+
+        Rx(byte[] payload, boolean activity) {
+            this.payload = payload;
+            this.activity = activity;
+        }
+    }
     private void fail(String code) {
         failure.compareAndSet(null, code);
         ready.countDown();

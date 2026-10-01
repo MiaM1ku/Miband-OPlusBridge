@@ -592,8 +592,15 @@ public final class BandLiveService extends Service {
             dndReceiverRegistered = true;
         } catch (RuntimeException ignored) { }
         try {
-            getContentResolver().registerContentObserver(
+            android.content.ContentResolver resolver = getContentResolver();
+            resolver.registerContentObserver(
                     android.provider.Settings.Global.getUriFor("zen_mode"), false, zenMode);
+            resolver.registerContentObserver(
+                    android.provider.Settings.Secure.getUriFor("focusmode_switch"), false, zenMode);
+            resolver.registerContentObserver(
+                    android.provider.Settings.Secure.getUriFor("focusmode_switch_new"), false, zenMode);
+            resolver.registerContentObserver(
+                    android.provider.Settings.Secure.getUriFor("op_breath_mode_status"), false, zenMode);
         } catch (RuntimeException ignored) { }
     }
 
@@ -958,9 +965,9 @@ public final class BandLiveService extends Service {
             lastDndFilter = filter;
             dndSyncAtNanos = now;
         }
-        boolean on = io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.blocksNotifications(filter);
-        android.util.Log.i("OplusBandBridge", "DND_SYNC filter=" + filter + " on=" + on);
-        io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this, "DND_SYNC filter=" + filter + " on=" + on);
+        String detail = io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.describe(this);
+        android.util.Log.i("OplusBandBridge", "DND_SYNC " + detail);
+        io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this, "DND_SYNC " + detail);
         // The band drops a rule list that arrives before sync_with_phone is on.
         queue.send(io.github.miam1ku.mibandoplusbridge.protocol.BandDndCommand.syncWithPhone())
                 .whenComplete((done, error) -> {

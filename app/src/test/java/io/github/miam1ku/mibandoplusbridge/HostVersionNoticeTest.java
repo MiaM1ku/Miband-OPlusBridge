@@ -13,6 +13,7 @@ public final class HostVersionNoticeTest {
                 app(HostIdentity.MI_PACKAGE, "3.59.1", 359_001L));
         assertEquals("", HostVersionNotice.fingerprint(installed));
         assertTrue(HostVersionNotice.accepted(HostIdentity.HEALTH_PACKAGE, "6.1.18_9fe4116_260429", 6_011_800L));
+        assertTrue(HostVersionNotice.accepted(HostIdentity.HEALTH_PACKAGE, "6.9.40_f91e7bd_260930", 6_094_000L));
         assertTrue(HostVersionNotice.accepted(HostIdentity.DEVICES_PACKAGE, "17.4.10", 1_704_010L));
     }
 

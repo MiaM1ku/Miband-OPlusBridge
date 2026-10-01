@@ -29,4 +29,14 @@ public final class PhoneDndTest {
         assertFalse(PhoneDnd.repeatSync(PhoneDnd.PRIORITY, 100_000_000L, PhoneDnd.ALL));
         assertFalse(PhoneDnd.repeatSync(PhoneDnd.ALL, -1, PhoneDnd.ALL));
     }
+
+    @Test public void vendorFocusOrBreathTurnsDndOnWhileZenStaysOff() {
+        assertEquals(PhoneDnd.PRIORITY, PhoneDnd.resolve(0, -1, -1, 1, PhoneDnd.ALL));
+        assertEquals(PhoneDnd.PRIORITY, PhoneDnd.resolve(0, 1, -1, -1, PhoneDnd.ALL));
+        assertEquals(PhoneDnd.PRIORITY, PhoneDnd.resolve(0, 0, 1, 0, PhoneDnd.ALL));
+        assertEquals(PhoneDnd.ALL, PhoneDnd.resolve(0, 0, 0, 0, PhoneDnd.PRIORITY));
+        assertEquals(PhoneDnd.ALL, PhoneDnd.resolve(0, -1, -1, -1, PhoneDnd.PRIORITY));
+        assertEquals(PhoneDnd.NONE, PhoneDnd.resolve(2, 0, 0, 0, PhoneDnd.ALL));
+        assertEquals(PhoneDnd.ALARMS, PhoneDnd.resolve(3, -1, -1, -1, PhoneDnd.ALL));
+    }
 }

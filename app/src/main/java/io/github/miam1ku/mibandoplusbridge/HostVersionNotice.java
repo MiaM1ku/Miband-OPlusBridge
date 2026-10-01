@@ -9,7 +9,7 @@ public final class HostVersionNotice {
     public record Expectation(String label, String packageName, String verified) {}
 
     public static final List<Expectation> EXPECTATIONS = List.of(
-            new Expectation("OPPO 健康", HostIdentity.HEALTH_PACKAGE, "6.1.18 或 6.9.37"),
+            new Expectation("OPPO 健康", HostIdentity.HEALTH_PACKAGE, "6.1.18、6.9.37 或 6.9.40"),
             new Expectation("设备空间", HostIdentity.DEVICES_PACKAGE, "17.4.10 或 17.25"),
             new Expectation("小米运动健康", HostIdentity.MI_PACKAGE, "3.59.1"));
 
@@ -21,7 +21,8 @@ public final class HostVersionNotice {
         String name = versionName == null ? "" : versionName;
         return switch (packageName) {
             case HostIdentity.HEALTH_PACKAGE -> versionCode == 6_011_800L || versionCode == 6_093_700L
-                    || name.startsWith("6.1.18") || name.startsWith("6.9.37");
+                    || versionCode == 6_094_000L
+                    || name.startsWith("6.1.18") || name.startsWith("6.9.37") || name.startsWith("6.9.40");
             case HostIdentity.DEVICES_PACKAGE -> versionCode == 1_704_010L
                     || name.startsWith("17.4.") || name.startsWith("17.25");
             case HostIdentity.MI_PACKAGE -> versionCode == 359_001L || name.startsWith("3.59.1");

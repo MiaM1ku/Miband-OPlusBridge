@@ -447,14 +447,28 @@ public final class SppDiagnosticClient implements AutoCloseable {
         return publishParsed(payload);
     }
 
-    private XiaomiProto.Command decodeBle(byte[] payload) throws Exception {
-        if (payload == null || payload.length == 0) return null;
+    private XiaomiProto.Command decodeBle(BleGattClient.Rx packet) throws Exception {
+        if (packet == null || packet.payload == null || packet.payload.length == 0) return null;
+        byte[] payload = packet.payload;
+        if (packet.activity) {
+            byte[] plain = payload;
+            try {
+                if (authenticated) plain = decryptBle(payload);
+                acceptV1Activity(plain);
+            } catch (Exception failed) {
+                SessionLog.line(context, "rx ble activity decrypt failed len=" + payload.length);
+            } finally {
+                if (plain != payload) Arrays.fill(plain, (byte) 0);
+            }
+            return null;
+        }
         byte[] plain = payload;
         try {
             if (authenticated) plain = decryptBle(payload);
             return publishParsed(plain);
-        } catch (Exception ignored) {
-            acceptV1Activity(payload);
+        } catch (Exception failed) {
+            SessionLog.line(context, "rx ble command rejected len=" + payload.length
+                    + " " + failed.getClass().getSimpleName());
             return null;
         }
     }
@@ -500,7 +514,8 @@ public final class SppDiagnosticClient implements AutoCloseable {
         } catch (IllegalArgumentException malformed) {
             history.reset();
             progress.accept("HISTORY_FILE_REJECTED");
-            SessionLog.line(context, "rx spp1 activity rejected len=" + payload.length);
+            SessionLog.line(context, "rx spp1 activity rejected len=" + payload.length
+                    + " " + malformed.getMessage());
             return;
         }
         if (result != null) {

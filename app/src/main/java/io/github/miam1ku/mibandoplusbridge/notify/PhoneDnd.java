@@ -15,15 +15,55 @@ public final class PhoneDnd {
     private PhoneDnd() {}
 
     public static int currentFilter(Context context) {
-        int zen = 0;
-        try {
-            zen = android.provider.Settings.Global.getInt(context.getContentResolver(), "zen_mode", 0);
-        } catch (RuntimeException ignored) { }
-        // ColorOS often updates zen_mode from SystemUI without a filter broadcast.
+        int zen = global(context, "zen_mode");
+        int focus = secure(context, "focusmode_switch");
+        int focusNew = secure(context, "focusmode_switch_new");
+        int breath = secure(context, "op_breath_mode_status");
+        int interruption = UNKNOWN;
+        if (focusNew != 1 && focus != 1 && breath != 1
+                && zen != 0 && zen != 1 && zen != 2 && zen != 3) {
+            interruption = interruptionFilter(context);
+        }
+        return resolve(zen, focus, focusNew, breath, interruption);
+    }
+
+    /** Health 6.9.40 ZenModeObserver: vendor switch 1 is on. Classic zen_mode still wins when those keys are absent. */
+    public static int resolve(int zen, int focus, int focusNew, int breath, int interruptionFilter) {
+        if (focusNew == 1 || focus == 1 || breath == 1) return PRIORITY;
         if (zen == 1) return PRIORITY;
         if (zen == 2) return NONE;
         if (zen == 3) return ALARMS;
         if (zen == 0) return ALL;
+        return interruptionFilter;
+    }
+
+    public static String describe(Context context) {
+        int zen = global(context, "zen_mode");
+        int focus = secure(context, "focusmode_switch");
+        int focusNew = secure(context, "focusmode_switch_new");
+        int breath = secure(context, "op_breath_mode_status");
+        int filter = currentFilter(context);
+        return "filter=" + filter + " on=" + blocksNotifications(filter)
+                + " zen=" + zen + " focus=" + focus + " focusNew=" + focusNew + " breath=" + breath;
+    }
+
+    private static int global(Context context, String key) {
+        try {
+            return android.provider.Settings.Global.getInt(context.getContentResolver(), key, 0);
+        } catch (RuntimeException ignored) {
+            return 0;
+        }
+    }
+
+    private static int secure(Context context, String key) {
+        try {
+            return android.provider.Settings.Secure.getInt(context.getContentResolver(), key, -1);
+        } catch (RuntimeException ignored) {
+            return -1;
+        }
+    }
+
+    private static int interruptionFilter(Context context) {
         NotificationManager manager = context.getSystemService(NotificationManager.class);
         return manager == null ? UNKNOWN : manager.getCurrentInterruptionFilter();
     }
