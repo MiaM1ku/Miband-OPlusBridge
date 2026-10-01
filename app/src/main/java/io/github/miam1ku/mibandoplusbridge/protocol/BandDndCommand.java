@@ -26,18 +26,28 @@ import nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto;
                  .build();
      }
 
-    /** Subtype 110. The band's own manual rule is named watch_manual. state 1 is on, 0 is off.
-     * activatedAtSeconds is unix time, matching the rule the band returns. */
-    public static XiaomiProto.Command phoneRules(boolean enabled, int activatedAtSeconds) {
+    /** Subtype 110. Mi Fitness names the phone's manual rule manual_zen_rule.
+     * watch_manual is the band's own rule and does not drive phone sync.
+     * activatedAt is the low 32 bits of epoch millis. */
+    public static XiaomiProto.Command phoneRules(boolean enabled, int activatedAt) {
         return XiaomiProto.Command.newBuilder().setType(2).setSubtype(110)
                 .setSystem(XiaomiProto.System.newBuilder().setPhoneZenRules(
                         XiaomiProto.PhoneZenRuleList.newBuilder().addRule(
                                 XiaomiProto.PhoneZenRule.newBuilder()
                                         .setManual(true)
-                                        .setName("watch_manual")
+                                        .setName("manual_zen_rule")
                                         .setState(enabled ? 1 : 0)
                                         .setConditionOverride(0)
-                                        .setLastActivation(activatedAtSeconds))))
+                                        .setLastActivation(activatedAt))))
+                .build();
+    }
+
+    /** Subtype 44. Answers the band's silent-mode query and mirrors phone DND onto that flag. */
+    public static XiaomiProto.Command phoneSilent(boolean silent) {
+        return XiaomiProto.Command.newBuilder().setType(2).setSubtype(44)
+                .setSystem(XiaomiProto.System.newBuilder().setPhoneSilentModeSet(
+                        XiaomiProto.PhoneSilentModeSet.newBuilder().setPhoneSilentMode(
+                                XiaomiProto.PhoneSilentMode.newBuilder().setSilent(silent))))
                 .build();
     }
 
@@ -46,11 +56,13 @@ import nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto;
         return XiaomiProto.Command.newBuilder().setType(2).setSubtype(109).build();
     }
 
-    /** Null when this packet is not the band's manual rule. */
+    /** Null when this packet has neither the phone rule nor the band's own manual rule. */
     public static Boolean manualState(XiaomiProto.Command command) {
         if (command == null || !command.hasSystem() || !command.getSystem().hasPhoneZenRules()) return null;
         for (var rule : command.getSystem().getPhoneZenRules().getRuleList()) {
-            if (rule.getManual() && "watch_manual".equals(rule.getName())) return rule.getState() == 1;
+            if (!rule.getManual()) continue;
+            String name = rule.getName();
+            if ("manual_zen_rule".equals(name) || "watch_manual".equals(name)) return rule.getState() == 1;
         }
         return null;
     }
@@ -58,7 +70,7 @@ import nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto;
     /** Sync switch, the old quiet flag, then the phone rules. */
     public static List<XiaomiProto.Command> mirror(int filter) {
         boolean on = PhoneDnd.blocksNotifications(filter);
-        int now = (int) (System.currentTimeMillis() / 1000L);
-        return List.of(syncWithPhone(), state(on), phoneRules(on, now));
+        int now = (int) System.currentTimeMillis();
+        return List.of(syncWithPhone(), state(on), phoneRules(on, now), phoneSilent(on));
     }
  }

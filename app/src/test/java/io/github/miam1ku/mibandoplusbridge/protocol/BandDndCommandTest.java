@@ -31,7 +31,7 @@ public final class BandDndCommandTest {
         assertEquals(1, on.getSystem().getPhoneZenRules().getRuleCount());
         var rule = on.getSystem().getPhoneZenRules().getRule(0);
         assertTrue(rule.getManual());
-        assertEquals("watch_manual", rule.getName());
+        assertEquals("manual_zen_rule", rule.getName());
         assertEquals(1, rule.getState());
         assertEquals(0, rule.getConditionOverride());
         assertEquals(1_700_000_000, rule.getLastActivation());
@@ -47,13 +47,14 @@ public final class BandDndCommandTest {
     }
 
     @Test public void mirrorAlwaysSendsTheSwitchThenTheLiveStatus() {
-        int before = (int) (System.currentTimeMillis() / 1000L);
+        int before = (int) System.currentTimeMillis();
         for (int filter : new int[] {PhoneDnd.NONE, PhoneDnd.ALL, PhoneDnd.UNKNOWN}) {
             var packets = BandDndCommand.mirror(filter);
-            assertEquals(3, packets.size());
+            assertEquals(4, packets.size());
             var sync = packets.get(0);
             var state = packets.get(1);
             var rules = packets.get(2);
+            var silent = packets.get(3);
             assertEquals(15, sync.getSubtype());
             assertEquals(1, sync.getSystem().getMiscSettingSet().getDndSync().getEnabled());
             assertEquals(23, state.getSubtype());
@@ -61,11 +62,14 @@ public final class BandDndCommandTest {
             assertEquals(on ? 0 : 2, state.getSystem().getDndStatus().getStatus());
             assertEquals(110, rules.getSubtype());
             var rule = rules.getSystem().getPhoneZenRules().getRule(0);
-            assertEquals("watch_manual", rule.getName());
+            assertEquals("manual_zen_rule", rule.getName());
             assertEquals(on ? 1 : 0, rule.getState());
             assertTrue(rule.getManual());
-            assertTrue(rule.getLastActivation() >= before);
+            assertTrue(rule.getLastActivation() - before >= 0);
+            assertTrue(rule.getLastActivation() - before < 5_000);
             assertEquals(1, rules.getSystem().getPhoneZenRules().getRuleCount());
+            assertEquals(44, silent.getSubtype());
+            assertEquals(on, silent.getSystem().getPhoneSilentModeSet().getPhoneSilentMode().getSilent());
         }
     }
  }

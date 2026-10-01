@@ -90,6 +90,7 @@ public final class BandLiveService extends Service {
     private long dndSyncAtNanos;
     private final Object dndSyncLock = new Object();
     private final Runnable dndRulesAgain = this::sendDndRulesAgain;
+    private static volatile nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto.Command lastMusic;
     private final io.github.miam1ku.mibandoplusbridge.notify.SleepMusic sleepMusic =
             new io.github.miam1ku.mibandoplusbridge.notify.SleepMusic();
     private volatile boolean sleepPauseOn;
@@ -346,6 +347,7 @@ public final class BandLiveService extends Service {
             return java.util.concurrent.CompletableFuture.failedFuture(
                     new IllegalStateException("NOTIFICATION_SESSION_UNAVAILABLE"));
         }
+        if (command.getType() == 18 && command.getSubtype() == 1) lastMusic = command;
         return queue.send(command);
     }
 
@@ -756,8 +758,16 @@ public final class BandLiveService extends Service {
                                     .onBandCommand(BandLiveService.this, command));
                         }
                         if (command.getType() == 18) {
+                            if (command.getSubtype() == 0) {
+                                io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(BandLiveService.this,
+                                        "MUSIC_REQ");
+                                main.post(BandLiveService.this::replyMusic);
+                            }
                             main.post(() -> io.github.miam1ku.mibandoplusbridge.notify.NativeMusic
                                     .onBandCommand(BandLiveService.this, command));
+                        }
+                        if (command.getType() == 2 && command.getSubtype() == 43) {
+                            main.post(BandLiveService.this::replySilent);
                         }
                         if (command.getType() == 17 && command.getSubtype() == 16) {
                             int op = command.hasSchedule() && command.getSchedule().hasPhoneAlarmOperation()
@@ -984,12 +994,42 @@ public final class BandLiveService extends Service {
         lastDndSentNanos = System.nanoTime();
         int filter = io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.currentFilter(this);
         boolean on = io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.blocksNotifications(filter);
-        int activatedAt = (int) (System.currentTimeMillis() / 1000L);
+        int activatedAt = (int) System.currentTimeMillis();
         sendQuietly(queue, io.github.miam1ku.mibandoplusbridge.protocol.BandDndCommand.state(on));
+        sendQuietly(queue, io.github.miam1ku.mibandoplusbridge.protocol.BandDndCommand.phoneSilent(on));
         sendQuietly(queue, io.github.miam1ku.mibandoplusbridge.protocol.BandDndCommand.queryRules());
         sendQuietly(queue, io.github.miam1ku.mibandoplusbridge.protocol.BandDndCommand.phoneRules(on, activatedAt));
         main.removeCallbacks(dndRulesAgain);
         main.postDelayed(dndRulesAgain, 2000);
+    }
+
+    private void replyMusic() {
+        var queue = commands;
+        if (stopRequested || queue == null) return;
+        var command = lastMusic;
+        if (command == null) {
+            android.media.AudioManager audio = getSystemService(android.media.AudioManager.class);
+            int volume = 0;
+            if (audio != null) {
+                int max = audio.getStreamMaxVolume(android.media.AudioManager.STREAM_MUSIC);
+                volume = io.github.miam1ku.mibandoplusbridge.protocol.BandMusicCommand.percent(
+                        audio.getStreamVolume(android.media.AudioManager.STREAM_MUSIC), max);
+            }
+            command = io.github.miam1ku.mibandoplusbridge.protocol.BandMusicCommand.nothing(volume);
+        }
+        var info = command.getMusic().getMusicInfo();
+        io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this, "MUSIC_REPLY state="
+                + info.getState() + " volume=" + info.getVolume());
+        sendQuietly(queue, command);
+    }
+
+    private void replySilent() {
+        var queue = commands;
+        if (stopRequested || queue == null) return;
+        boolean on = io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.blocksNotifications(
+                io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.currentFilter(this));
+        io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this, "SILENT_REQ on=" + on);
+        sendQuietly(queue, io.github.miam1ku.mibandoplusbridge.protocol.BandDndCommand.phoneSilent(on));
     }
 
 
@@ -1071,7 +1111,8 @@ public final class BandLiveService extends Service {
         int filter = io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.currentFilter(this);
         boolean on = io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.blocksNotifications(filter);
         sendQuietly(queue, io.github.miam1ku.mibandoplusbridge.protocol.BandDndCommand.phoneRules(
-                on, (int) (System.currentTimeMillis() / 1000L)));
+                on, (int) System.currentTimeMillis()));
+        sendQuietly(queue, io.github.miam1ku.mibandoplusbridge.protocol.BandDndCommand.phoneSilent(on));
         sendQuietly(queue, io.github.miam1ku.mibandoplusbridge.protocol.BandDndCommand.queryRules());
     }
 
