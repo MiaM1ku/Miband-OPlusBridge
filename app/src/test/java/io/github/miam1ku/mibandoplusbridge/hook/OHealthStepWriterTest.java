@@ -7,7 +7,9 @@ import java.time.ZoneId;
 import java.util.List;
 import org.junit.Test;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
 
 public final class OHealthStepWriterTest {
     private static final ZoneId ZONE = ZoneId.of("Asia/Shanghai");
@@ -35,6 +37,13 @@ public final class OHealthStepWriterTest {
         int filled = 0;
         for (OHealthStepWriter.MinuteBar bar : bars) if (bar != null) filled++;
         assertEquals(3, filled);
+    }
+
+    @Test public void publishStepsOnlyWhenTheBandIsAhead() {
+        assertTrue(OHealthStepWriter.publishSteps(0, 100));
+        assertFalse(OHealthStepWriter.publishSteps(200, 100));
+        assertFalse(OHealthStepWriter.publishSteps(0, 0));
+        assertFalse(OHealthStepWriter.publishSteps(100, 100));
     }
 
     private static HealthRecord minute(long dayStart, int index, int steps, Integer calories, Integer distance) {

@@ -12,7 +12,7 @@ import static org.junit.Assert.assertThrows;
 public final class OHealthSleepPlanTest {
     private static final ZoneId ZONE = ZoneId.of("+08:00");
 
-    @Test public void unstagedIntervalStaysLightAndUsesTheTwentyHourWindow() {
+    @Test public void longerUnstagedSessionKeepsTheTwentyHourWindow() {
         HealthRecord morning = interval("morning", at(2026, 9, 25, 3, 41), at(2026, 9, 25, 11, 45));
         HealthRecord nap = interval("nap", at(2026, 9, 25, 13, 18), at(2026, 9, 25, 15, 23));
         HealthRecord late = interval("late", at(2026, 9, 25, 21, 0), at(2026, 9, 25, 22, 0));
@@ -21,19 +21,46 @@ public final class OHealthSleepPlanTest {
         OHealthSleepPlan.Night day = nights.get(0);
         assertEquals(20260925, day.date());
         assertEquals(morning.startMs, day.fallAsleepMs());
-        assertEquals(nap.endMs, day.wakeMs());
-        assertEquals(484 + 125, day.sleepMinutes());
-        assertEquals(484 + 125, day.lightMinutes());
+        assertEquals(morning.endMs, day.wakeMs());
+        assertEquals(484, day.sleepMinutes());
+        assertEquals(484, day.lightMinutes());
         assertEquals(0, day.deepMinutes());
         assertEquals(0, day.remMinutes());
-        assertEquals(2, day.segments().size());
-        assertEquals(morning.startMs, day.segments().get(0).startMs());
-        assertEquals(morning.endMs, day.segments().get(0).endMs());
-        assertEquals(nap.startMs, day.segments().get(1).startMs());
-        assertEquals(nap.endMs, day.segments().get(1).endMs());
+        assertEquals(1, day.segments().size());
         assertEquals(OHealthSleepPlan.LIGHT, day.segments().get(0).sleepState());
+        assertEquals(at(2026, 9, 24, 20, 0), day.dayStartMs());
+        assertEquals(at(2026, 9, 25, 20, 0), day.dayEndMs());
         assertEquals(20260926, nights.get(1).date());
         assertEquals(60, nights.get(1).sleepMinutes());
+        assertEquals(late.startMs, nights.get(1).fallAsleepMs());
+    }
+
+    @Test public void stagedNightDropsTheLaterNap() {
+        long start = at(2026, 9, 28, 2, 10);
+        long wake = at(2026, 9, 28, 5, 57);
+        HealthRecord night = interval("night", start, wake);
+        HealthRecord deep = stage("deep", start, start + 3_600_000, 2);
+        HealthRecord light = stage("light", start + 3_600_000, wake, 3);
+        HealthRecord nap = interval("nap", at(2026, 9, 28, 15, 33), at(2026, 9, 28, 16, 34));
+        List<OHealthSleepPlan.Night> nights = OHealthSleepPlan.nights(List.of(nap, night, light, deep));
+        assertEquals(1, nights.size());
+        OHealthSleepPlan.Night chosen = nights.get(0);
+        assertEquals(start, chosen.fallAsleepMs());
+        assertEquals(wake, chosen.wakeMs());
+        assertEquals(2, chosen.segments().size());
+        assertEquals(OHealthSleepPlan.DEEP, chosen.segments().get(0).sleepState());
+        assertEquals(OHealthSleepPlan.LIGHT, chosen.segments().get(1).sleepState());
+        assertEquals(227, chosen.sleepMinutes());
+    }
+
+    @Test public void sessionStartingBeforeTwentyExtendsTheClearWindow() {
+        HealthRecord early = interval("early", at(2026, 9, 24, 19, 30), at(2026, 9, 25, 2, 0));
+        HealthRecord nap = interval("nap", at(2026, 9, 25, 14, 0), at(2026, 9, 25, 15, 0));
+        List<OHealthSleepPlan.Night> nights = OHealthSleepPlan.nights(List.of(nap, early));
+        assertEquals(1, nights.size());
+        assertEquals(early.startMs, nights.get(0).fallAsleepMs());
+        assertEquals(early.startMs, nights.get(0).dayStartMs());
+        assertEquals(at(2026, 9, 25, 20, 0), nights.get(0).dayEndMs());
     }
 
     @Test public void stagesMapOntoHostStatesAndAreNotDuplicated() {
@@ -58,6 +85,43 @@ public final class OHealthSleepPlanTest {
         assertEquals(60, night.remMinutes());
         assertEquals(60, night.wakeMinutes());
         assertThrows(IllegalArgumentException.class, () -> OHealthSleepPlan.hostState(1));
+    }
+
+    @Test public void overlappingStagesPartitionInsteadOfStacking() {
+        long start = at(2026, 10, 2, 1, 0);
+        long lightStart = at(2026, 10, 2, 1, 30);
+        long two = at(2026, 10, 2, 2, 0);
+        long end = at(2026, 10, 2, 3, 0);
+        HealthRecord interval = interval("night", start, end);
+        List<OHealthSleepPlan.Night> nights = OHealthSleepPlan.nights(List.of(
+                interval,
+                stage("deep", start, two, 2),
+                stage("light", lightStart, end, 3)));
+        assertEquals(1, nights.size());
+        OHealthSleepPlan.Night night = nights.get(0);
+        assertEquals(2, night.segments().size());
+        assertEquals(start, night.segments().get(0).startMs());
+        assertEquals(two, night.segments().get(0).endMs());
+        assertEquals(OHealthSleepPlan.DEEP, night.segments().get(0).sleepState());
+        assertEquals(two, night.segments().get(1).startMs());
+        assertEquals(end, night.segments().get(1).endMs());
+        assertEquals(OHealthSleepPlan.LIGHT, night.segments().get(1).sleepState());
+        assertEquals(120, night.sleepMinutes());
+        assertEquals(60, night.deepMinutes());
+        assertEquals(60, night.lightMinutes());
+
+        // Shorter than the light that starts at the same minute, and it runs past the first deep.
+        HealthRecord shorter = stage("deep-short", lightStart, at(2026, 10, 2, 2, 30), 2);
+        nights = OHealthSleepPlan.nights(List.of(
+                interval, stage("deep", start, two, 2), stage("light", lightStart, end, 3), shorter));
+        assertEquals(1, nights.size());
+        night = nights.get(0);
+        assertEquals(2, night.segments().size());
+        assertEquals(two, night.segments().get(1).startMs());
+        assertEquals(end, night.segments().get(1).endMs());
+        assertEquals(120, night.sleepMinutes());
+        assertEquals(60, night.deepMinutes());
+        assertEquals(60, night.lightMinutes());
     }
 
     private static HealthRecord interval(String id, long start, long end) {

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 package io.github.miam1ku.mibandoplusbridge.hook;
 
+import android.content.ContentValues;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.database.Cursor;
@@ -13,11 +14,14 @@ import io.github.miam1ku.mibandoplusbridge.integration.HealthQueueProvider;
 import io.github.miam1ku.mibandoplusbridge.protocol.BandHistoryParser;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
+import java.time.DateTimeException;
+import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.List;
 import org.json.JSONObject;
 
-/** Writes one daily step total per day into OHealth table 1002, and minute bars into table 1001. */
+/** Writes walk and home daily totals into OHealth table 1002, and minute bars into table 1001. */
 final class OHealthStepWriter {
     static final int TABLE_STAT = 1002;
     static final int TABLE_DETAIL = 1001;
@@ -101,6 +105,7 @@ final class OHealthStepWriter {
                 XposedBridge.log("OplusBandBridge OHEALTH_STEP_CHART_FAIL date=" + day.date + " " + failure);
             }
         }
+        publishToday(context, days, records);
         String summary = "OHEALTH_STEP_IMPORT days=" + days.size()
                 + " inserted=" + inserted + " skipped=" + skipped + " chart=" + chart;
         Log.i("OplusBandBridge", summary);
@@ -111,41 +116,72 @@ final class OHealthStepWriter {
             List<HealthRecord> records, SharedPreferences written) throws Exception {
         String memory = "metric:" + device + ":" + day.date;
         String key = day.steps + ":" + day.calories + ":" + day.moveAbout + ":" + day.distance + ":milli";
-        if (key.equals(written.getString(memory, ""))) return false;
-        long end = day.startMs + 86_400_000L;
-        List<?> existing = host.readStepDays(api, account, day.startMs, end);
-        if (!covers(existing, device, day)) {
-            Object row = statNew.newInstance();
-            setAccount.invoke(row, account);
-            setDevice.invoke(row, device);
-            setDate.invoke(row, day.date);
-            setMode.invoke(row, MINUTE_MODE);
-            setSteps.invoke(row, (int) day.steps);
-            if (day.timezone != null) setTimezone.invoke(row, day.timezone);
-            if (day.calories >= 0) setCalories.invoke(row, day.calories * (long) CALORIE_SCALE);
-            if (day.distance >= 0 && day.distance <= Integer.MAX_VALUE) {
-                setDistance.invoke(row, (int) day.distance);
+        boolean changed = !key.equals(written.getString(memory, ""));
+        if (changed) {
+            long end = day.startMs + 86_400_000L;
+            List<?> existing = host.readStepDays(api, account, day.startMs, end);
+            if (!covers(existing, device, day, MINUTE_MODE)) {
+                host.insertRows(api, TABLE_STAT, List.of(statRow(account, device, day, records, MINUTE_MODE)));
+                List<?> confirmed = host.readStepDays(api, account, day.startMs, end);
+                if (!covers(confirmed, device, day, MINUTE_MODE)) {
+                    String miss = "OHEALTH_STEP_STAT_MISS date=" + day.date
+                            + " steps=" + day.steps + " cal=" + (day.calories * (long) CALORIE_SCALE)
+                            + " move=" + day.moveAbout + " " + summarize(confirmed);
+                    Log.i("OplusBandBridge", miss);
+                    XposedBridge.log("OplusBandBridge " + miss);
+                    throw new IllegalStateException("STEP_STAT_UNCONFIRMED");
+                }
             }
-            if (day.moveAbout >= 0) setMoveAbout.invoke(row, (int) day.moveAbout);
-            setWorkoutMinutes.invoke(row, activeMinutes(records, day));
-            host.insertRows(api, TABLE_STAT, List.of(row));
-            List<?> confirmed = host.readStepDays(api, account, day.startMs, end);
-            if (!covers(confirmed, device, day)) {
-                String miss = "OHEALTH_STEP_STAT_MISS date=" + day.date
-                        + " steps=" + day.steps + " cal=" + (day.calories * (long) CALORIE_SCALE)
-                        + " move=" + day.moveAbout + " " + summarize(confirmed);
+            if (!written.edit().putString(memory, key).commit()) {
+                throw new IllegalStateException("STEP_IMPORT_MEMORY_FAILED");
+            }
+        }
+        writeHomeStat(api, account, device, day, records, written, key);
+        return changed;
+    }
+
+    /** Same day and device as the walk row. Another device's mode -2 row is left in place. */
+    private void writeHomeStat(Object api, String account, String device, BandHistoryParser.StepDay day,
+            List<HealthRecord> records, SharedPreferences written, String key) throws Exception {
+        String memory = "home:" + device + ":" + day.date;
+        if (key.equals(written.getString(memory, ""))) return;
+        long end = day.startMs + 86_400_000L;
+        List<?> existing = host.readStepDays(api, account, day.startMs, end, DAY_STEP_MODE);
+        if (!covers(existing, device, day, DAY_STEP_MODE)) {
+            host.insertRows(api, TABLE_STAT, List.of(statRow(account, device, day, records, DAY_STEP_MODE)));
+            List<?> confirmed = host.readStepDays(api, account, day.startMs, end, DAY_STEP_MODE);
+            if (!covers(confirmed, device, day, DAY_STEP_MODE)) {
+                String miss = "OHEALTH_STEP_HOME_STAT_MISS date=" + day.date
+                        + " steps=" + day.steps + " " + summarize(confirmed);
                 Log.i("OplusBandBridge", miss);
                 XposedBridge.log("OplusBandBridge " + miss);
-                throw new IllegalStateException("STEP_STAT_UNCONFIRMED");
+                return;
             }
         }
         if (!written.edit().putString(memory, key).commit()) {
             throw new IllegalStateException("STEP_IMPORT_MEMORY_FAILED");
         }
-        return true;
     }
 
-    private boolean covers(List<?> rows, String device, BandHistoryParser.StepDay day)
+    private Object statRow(String account, String device, BandHistoryParser.StepDay day,
+            List<HealthRecord> records, int mode) throws ReflectiveOperationException {
+        Object row = statNew.newInstance();
+        setAccount.invoke(row, account);
+        setDevice.invoke(row, device);
+        setDate.invoke(row, day.date);
+        setMode.invoke(row, mode);
+        setSteps.invoke(row, (int) day.steps);
+        if (day.timezone != null) setTimezone.invoke(row, day.timezone);
+        if (day.calories >= 0) setCalories.invoke(row, day.calories * (long) CALORIE_SCALE);
+        if (day.distance >= 0 && day.distance <= Integer.MAX_VALUE) {
+            setDistance.invoke(row, (int) day.distance);
+        }
+        if (day.moveAbout >= 0) setMoveAbout.invoke(row, (int) day.moveAbout);
+        setWorkoutMinutes.invoke(row, activeMinutes(records, day));
+        return row;
+    }
+
+    private boolean covers(List<?> rows, String device, BandHistoryParser.StepDay day, int mode)
             throws ReflectiveOperationException {
         boolean steps = false;
         boolean calories = day.calories < 0;
@@ -155,7 +191,7 @@ final class OHealthStepWriter {
             if (!statClass.isInstance(row)) continue;
             if (day.date != (Integer) getDate.invoke(row)) continue;
             if (!device.equals(getDevice.invoke(row))) continue;
-            if ((Integer) getMode.invoke(row) != MINUTE_MODE) continue;
+            if ((Integer) getMode.invoke(row) != mode) continue;
             if ((Integer) getSteps.invoke(row) >= day.steps) steps = true;
             if (day.calories >= 0 && (Long) getCalories.invoke(row) >= wantCalories) calories = true;
             if (day.moveAbout >= 0 && (Integer) getMoveAbout.invoke(row) >= day.moveAbout) moveAbout = true;
@@ -316,6 +352,55 @@ final class OHealthStepWriter {
 
     private static String minuteKey(String device, int date, int minute) {
         return device + ":" + date + ":n" + minute;
+    }
+
+    /** True only when the band total should replace the cached home steps. */
+    static boolean publishSteps(long shown, long band) {
+        return band > shown && band > 0;
+    }
+
+    private void publishToday(Context context, List<BandHistoryParser.StepDay> days,
+            List<HealthRecord> records) {
+        BandHistoryParser.StepDay today = null;
+        for (BandHistoryParser.StepDay day : days) {
+            if (isToday(day)) today = day;
+        }
+        if (today == null) return;
+        try {
+            Class<?> adapter = Class.forName(
+                    "com.heytap.health.core.provider.adapter.open.SportDataAdapter", false, host.loader);
+            Object result = adapter.getMethod("querySportData", Context.class).invoke(null, context);
+            if (!(result instanceof Bundle bundle)) throw new IllegalStateException("STEP_CACHE_BUNDLE");
+            if (publishSteps(bundle.getLong("step"), today.steps)) {
+                ContentValues values = new ContentValues();
+                values.put("step", today.steps);
+                if (today.calories >= 0) values.put("calorie", (double) today.calories);
+                if (today.distance >= 0) values.put("distance", today.distance / 1000.0);
+                values.put("duration", (double) activeMinutes(records, today));
+                if (today.moveAbout >= 0 && today.moveAbout <= Integer.MAX_VALUE) {
+                    values.put("activityCount", (int) today.moveAbout);
+                }
+                adapter.getMethod("updateSportData", Context.class, ContentValues.class)
+                        .invoke(null, context, values);
+            }
+        } catch (Throwable failure) {
+            String unavailable = "OHEALTH_STEP_CACHE_UNAVAILABLE " + failure.getClass().getSimpleName();
+            Log.i("OplusBandBridge", unavailable);
+            XposedBridge.log("OplusBandBridge " + unavailable);
+        }
+        OHealthHomeMetricHook.requestReload();
+    }
+
+    private static boolean isToday(BandHistoryParser.StepDay day) {
+        ZoneId zone = ZoneId.systemDefault();
+        if (day.timezone != null && !day.timezone.isBlank()) {
+            try {
+                zone = ZoneId.of(day.timezone);
+            } catch (DateTimeException ignored) { }
+        }
+        LocalDate now = LocalDate.now(zone);
+        int today = now.getYear() * 10_000 + now.getMonthValue() * 100 + now.getDayOfMonth();
+        return today == day.date;
     }
 
     private static int activeMinutes(List<HealthRecord> records, BandHistoryParser.StepDay day) {

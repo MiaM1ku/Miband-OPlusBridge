@@ -147,6 +147,11 @@ public final class BandLiveService extends Service {
             start(context);
         } catch (RuntimeException ignored) { }
     }
+    /** True while this process hosts the service and a stop has not been requested. */
+    public static boolean isRunning() {
+        BandLiveService live = instance;
+        return live != null && !live.stopRequested;
+    }
 
     public static boolean mayWake(Context context) {
         if (context == null || diagnosticPaused) return false;

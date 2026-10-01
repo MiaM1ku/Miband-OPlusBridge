@@ -16,6 +16,7 @@ import de.robv.android.xposed.XposedHelpers;
 import io.github.miam1ku.mibandoplusbridge.HostIdentity;
 import io.github.miam1ku.mibandoplusbridge.data.HealthRecord;
 import io.github.miam1ku.mibandoplusbridge.integration.HealthQueueProvider;
+import java.io.File;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
@@ -98,6 +99,7 @@ public final class OHealthHealthImportHook {
         }
         OHealthHealthImportHook hook = new OHealthHealthImportHook(context, contract, sleepWriter, stepWriter);
         hook.observe();
+        hook.keepSystemAccount();
         installed = hook;
         hook.request();
     }
@@ -132,9 +134,93 @@ public final class OHealthHealthImportHook {
             }
         });
         XposedHelpers.findAndHookMethod(Application.class, "onCreate", new XC_MethodHook() {
-            @Override protected void afterHookedMethod(MethodHookParam param) { request(); }
+            @Override protected void afterHookedMethod(MethodHookParam param) {
+                restoreSystemAccount();
+                new Handler(android.os.Looper.getMainLooper()).postDelayed(() -> restoreSystemAccount(), 2_000);
+                request();
+            }
         });
     }
+    /**
+     * The setup activity treats a missing login task as cancellation and writes tourist mode,
+     * even when the system account is still signed in. Put that account back once.
+     */
+    private void restoreSystemAccount() {
+        File marker = new File(context.getFilesDir(), "oplusband-account-restore");
+        if (marker.isFile()) {
+            Log.i("OplusBandBridge", "OHEALTH_ACCOUNT_RESTORE_SKIP marker");
+            return;
+        }
+        try {
+            ClassLoader loader = host.loader;
+            Class<?> tourist = Class.forName("com.heytap.health.base.tourist.TouristHelper", false, loader);
+            boolean guest = Boolean.TRUE.equals(tourist.getMethod("getIsInTouristMode").invoke(null));
+            Class<?> accounts = Class.forName("com.heytap.health.account.AccountHelper", false, loader);
+            Object manager = accounts.getMethod("getAccountManager").invoke(null);
+            boolean system = manager != null && Boolean.TRUE.equals(
+                    manager.getClass().getMethod("isSystemLogin").invoke(manager));
+            Class<?> prefsType = Class.forName("com.heytap.health.base.sp.SPUtils", false, loader);
+            Object prefs = prefsType.getMethod("getInstance").invoke(null);
+            String stored = String.valueOf(prefs.getClass().getMethod("getString", String.class)
+                    .invoke(prefs, "user_ssoid"));
+            boolean placeholder = stored.isBlank() || "com.heytap.health".equals(stored) || "null".equals(stored);
+            Log.i("OplusBandBridge", "OHEALTH_ACCOUNT_RESTORE_CHECK guest=" + guest
+                    + " system=" + system + " placeholder=" + placeholder);
+            if (!system || (!guest && !placeholder)) return;
+            tourist.getMethod("setIsInTouristMode", boolean.class).invoke(null, false);
+            manager.getClass().getMethod("cacheAccountInfo", boolean.class).invoke(manager, true);
+            if (!marker.createNewFile() && !marker.isFile()) {
+                throw new IllegalStateException("ACCOUNT_RESTORE_MARKER");
+            }
+            Log.i("OplusBandBridge", "OHEALTH_ACCOUNT_RESTORED");
+        } catch (Throwable failure) {
+            Throwable cause = failure.getCause() == null ? failure : failure.getCause();
+            Log.i("OplusBandBridge", "OHEALTH_ACCOUNT_RESTORE_FAILED " + cause.getClass().getSimpleName());
+        }
+    }
+    private void keepSystemAccount() {
+        try {
+            Class<?> tourist = Class.forName(
+                    "com.heytap.health.base.tourist.TouristHelper", false, host.loader);
+            XposedBridge.hookAllMethods(tourist, "setIsInTouristMode", new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam param) {
+                    if (param.args.length == 0 || !Boolean.TRUE.equals(param.args[0])) return;
+                    if (!systemLoggedIn()) return;
+                    param.setResult(null);
+                    try {
+                        tourist.getMethod("setIsInTouristMode", boolean.class).invoke(null, false);
+                        Class<?> accounts = Class.forName(
+                                "com.heytap.health.account.AccountHelper", false, host.loader);
+                        Object manager = accounts.getMethod("getAccountManager").invoke(null);
+                        if (manager != null) {
+                            manager.getClass().getMethod("cacheAccountInfo", boolean.class)
+                                    .invoke(manager, true);
+                        }
+                    } catch (Throwable failure) {
+                        Log.i("OplusBandBridge", "OHEALTH_ACCOUNT_RESTORE_FAILED "
+                                + failure.getClass().getSimpleName());
+                    }
+                    Log.i("OplusBandBridge", "OHEALTH_ACCOUNT_TOURIST_BLOCKED");
+                }
+            });
+        } catch (Throwable failure) {
+            Log.i("OplusBandBridge", "OHEALTH_ACCOUNT_GUARD_FAILED "
+                    + failure.getClass().getSimpleName());
+        }
+    }
+
+    private boolean systemLoggedIn() {
+        try {
+            Class<?> accounts = Class.forName("com.heytap.health.account.AccountHelper", false, host.loader);
+            Object manager = accounts.getMethod("getAccountManager").invoke(null);
+            return manager != null && Boolean.TRUE.equals(
+                    manager.getClass().getMethod("isSystemLogin").invoke(manager));
+        } catch (Throwable failure) {
+            return false;
+        }
+    }
+
+
 
     private void request() {
         if (scheduled.compareAndSet(false, true)) worker.post(work);
@@ -178,6 +264,7 @@ public final class OHealthHealthImportHook {
             if (steps != null) steps.write(context);
             lastFailure = null;
             if (retrySoon) scheduleRetry(2_000);
+            OHealthHomeMetricHook.requestReload();
         } catch (Exception | LinkageError failure) {
             scheduleRetry(transientImport(failure) ? 2_000 : FAILURE_COOLDOWN_MS);
             logImportFailure(failure);
@@ -636,15 +723,19 @@ public final class OHealthHealthImportHook {
             if (!(value instanceof List<?> rows)) throw new IllegalStateException("IMPORT_READ_PAYLOAD");
             return rows;
         }
-        /** Band day totals are stored as walk mode, so the phone's mode -2 row is left alone. */
+        /** Walk-mode read. A home-mode read uses the sportMode overload and does not change this one. */
         List<?> readStepDays(Object api, String account, long start, long end) throws Exception {
+            return readStepDays(api, account, start, end, OHealthStepWriter.MINUTE_MODE);
+        }
+
+        List<?> readStepDays(Object api, String account, long start, long end, int sportMode) throws Exception {
             Object option = readConstructor.newInstance();
             readAccount.invoke(option, account);
             readStart.invoke(option, Math.max(0, start));
             readEnd.invoke(option, end);
             readTable.invoke(option, OHealthStepWriter.TABLE_STAT);
             Class<?> readClass = readConstructor.getDeclaringClass();
-            readClass.getMethod("setReadSportMode", int.class).invoke(option, OHealthStepWriter.MINUTE_MODE);
+            readClass.getMethod("setReadSportMode", int.class).invoke(option, sportMode);
             readClass.getMethod("setSortOrder", int.class).invoke(option, 1);
             Object bean = awaitRead(read.invoke(api, option));
             if (!beanClass.isInstance(bean)) throw new IllegalStateException("IMPORT_READ_BEAN_TYPE");

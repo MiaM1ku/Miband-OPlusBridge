@@ -137,6 +137,7 @@ public final class MainActivity extends AppCompatActivity {
         screen.navRow(shortcuts, "协议测试", () -> startActivity(new Intent(this, LabActivity.class)));
         screen.navRow(shortcuts, "天气同步", () -> startActivity(new Intent(this, WeatherActivity.class)));
         screen.navRow(shortcuts, "发送调试日志到 QQ", this::shareDebugLog);
+        screen.caption(shortcuts, "控制中心编辑里添加「手环」。下拉或点一下会拉起连接，不会断开。");
         screen.setLastChildMargin(shortcuts, 0);
         LinearLayout sleepCard = screen.card();
         MaterialSwitch sleepPause = new MaterialSwitch(this);
@@ -852,7 +853,8 @@ public final class MainActivity extends AppCompatActivity {
                 .setMessage("1. 打开 KernelSU，为本应用打开超级用户权限，返回后点「检查 Root」。\n"
                         + "2. 导入绑定：选择已配对手环，打开小米运动健康点开该设备。连接参数会同时记录。\n"
                         + "3. 若提示连接参数丢失：点「采集连接参数」，在小米运动健康里再连一次手环。\n"
-                        + "4. 添加到健康：暂停小米运动健康并由本应用接管。\n\n"
+                        + "4. 添加到健康：暂停小米运动健康并由本应用接管。\n"
+                        + "控制中心编辑里添加「手环」。下拉或点一下会拉起连接，不会断开。\n\n"
                         + SETUP_PREREQ)
                 .setPositiveButton("关闭", null)
                 .show();

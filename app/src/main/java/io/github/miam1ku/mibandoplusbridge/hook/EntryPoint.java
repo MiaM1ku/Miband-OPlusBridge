@@ -122,6 +122,17 @@ public final class EntryPoint implements IXposedHookLoadPackage {
         } catch (Throwable incompatible) {
             android.util.Log.i("OplusBandBridge", "OHEALTH_MUSIC_HOOK_UNAVAILABLE");
         }
+        String process = Application.getProcessName();
+        if (process != null && process.endsWith(":SportDaemonService")) {
+            try {
+                installSleepRowDelete(context, loader);
+                installSleepStatReplace(loader);
+                android.util.Log.i("OplusBandBridge", "OHEALTH_SLEEP_DELETE_HOOKED");
+            } catch (Throwable incompatible) {
+                android.util.Log.i("OplusBandBridge", "OHEALTH_SLEEP_DELETE_HOOK_UNAVAILABLE "
+                        + incompatible.getClass().getSimpleName());
+            }
+        }
         try {
             OHealthHealthImportHook.install(context, loader);
             android.util.Log.i("OplusBandBridge", "OHEALTH_IMPORT_HOOK_INSTALLED");
@@ -147,4 +158,57 @@ public final class EntryPoint implements IXposedHookLoadPackage {
             android.util.Log.i("OplusBandBridge", "OHEALTH_NOTIFICATION_ACCESS_HOOK_UNAVAILABLE");
         }
     }
+
+    /**
+     * Table 1010 delete returns 0 and removes nothing. This process owns the database,
+     * so drop rows by start time. The caller's end is inclusive.
+     */
+    private static void installSleepRowDelete(Context context, ClassLoader loader) {
+        XposedHelpers.findAndHookMethod("com.heytap.databaseengineservice.store.SportDataStore", loader,
+                "delete", "com.heytap.databaseengine.option.DataDeleteOption", new XC_MethodHook() {
+                    @Override protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        Object option = param.args[0];
+                        if (option == null) return;
+                        if ((Integer) option.getClass().getMethod("getDataTable").invoke(option)
+                                != OHealthSleepWriter.TABLE_SLEEP) return;
+                        String account = (String) option.getClass().getMethod("getSsoid").invoke(option);
+                        String device = (String) option.getClass().getMethod("getDeviceUniqueId").invoke(option);
+                        long start = (Long) option.getClass().getMethod("getStartTime").invoke(option);
+                        long end = (Long) option.getClass().getMethod("getEndTime").invoke(option);
+                        if (account == null || account.isBlank() || device == null || device.isBlank()
+                                || end < start) return;
+                        Class<?> dbClass = Class.forName(
+                                "com.heytap.databaseengineservice.db.AppDatabase", false, loader);
+                        Object database = dbClass.getMethod("getInstance", Context.class).invoke(null, context);
+                        Object helper = database.getClass().getMethod("getOpenHelper").invoke(database);
+                        Object sqlite = helper.getClass().getMethod("getWritableDatabase").invoke(helper);
+                        sqlite.getClass().getMethod("execSQL", String.class, Object[].class).invoke(sqlite,
+                                new Object[] {
+                                        "DELETE FROM DBSleepTable WHERE ssoid = ? AND device_unique_id = ?"
+                                                + " AND start_time >= ? AND start_time <= ?",
+                                        new Object[] {account, device, start, end}
+                                });
+                        param.setResult(0);
+                    }
+                });
+    }
+
+    /**
+     * An API save of table 1011 passes keep-old and never replaces totals.
+     * The corrected night has to overwrite the stacked summary.
+     */
+    private static void installSleepStatReplace(ClassLoader loader) {
+        XposedHelpers.findAndHookMethod(
+                "com.heytap.databaseengineservice.store.stat.SleepStatProcess", loader,
+                "getUpdateData", long.class, long.class,
+                "com.heytap.databaseengineservice.db.table.DBSleepDataStat",
+                "com.heytap.databaseengineservice.db.table.DBSleepDataStat",
+                boolean.class, new XC_MethodHook() {
+                    @Override protected void beforeHookedMethod(MethodHookParam param) {
+                        if (Boolean.TRUE.equals(param.args[4])) param.setResult(param.args[1]);
+                    }
+                });
+    }
+
+
 }

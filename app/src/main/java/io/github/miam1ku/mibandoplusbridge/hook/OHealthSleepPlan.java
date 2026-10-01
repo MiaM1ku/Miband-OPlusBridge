@@ -9,7 +9,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 
-/** Band intervals and stages become the host's 20:00 sleep-day rows. No score is invented. */
+/** One band session per host sleep-day. A later nap is not glued onto that axis. */
 public final class OHealthSleepPlan {
     /** Host Sleep.sleepState. SleepDataMapping turns these into the chart. */
     public static final int DEEP = 2;
@@ -20,7 +20,8 @@ public final class OHealthSleepPlan {
     public record Segment(long startMs, long endMs, int sleepState) {}
 
     public record Night(int date, long fallAsleepMs, long wakeMs, long sleepMinutes, long deepMinutes,
-            long lightMinutes, long remMinutes, long wakeMinutes, List<Segment> segments) {}
+            long lightMinutes, long remMinutes, long wakeMinutes, List<Segment> segments,
+            long dayStartMs, long dayEndMs) {}
 
     private OHealthSleepPlan() {}
 
@@ -42,6 +43,13 @@ public final class OHealthSleepPlan {
         };
     }
 
+    /**
+     * The host chart runs from fall-asleep to wake, so two sessions on one date leave a hole
+     * that looks like one broken night. Keep the longer session. Clear from {@code dayStartMs}
+     * (20:00, or earlier when the session began before then) through {@code dayEndMs}.
+     * An interval with no stages is one light bar. That bar does not claim deep sleep or REM.
+     * Stages that share a minute are trimmed to one partition, so deep and light are not stacked.
+     */
     public static List<Night> nights(List<HealthRecord> records) {
         List<HealthRecord> intervals = new ArrayList<>();
         List<HealthRecord> stages = new ArrayList<>();
@@ -51,7 +59,7 @@ public final class OHealthSleepPlan {
         }
         intervals.sort(Comparator.comparingLong(record -> record.startMs));
         boolean[] used = new boolean[stages.size()];
-        List<NightBuilder> builders = new ArrayList<>();
+        List<Session> sessions = new ArrayList<>();
         for (HealthRecord interval : intervals) {
             List<Segment> segments = new ArrayList<>();
             for (int i = 0; i < stages.size(); i++) {
@@ -62,44 +70,55 @@ public final class OHealthSleepPlan {
                 used[i] = true;
                 segments.add(new Segment(stage.startMs, stage.endMs, hostState(stage.stage)));
             }
-            // The host chart has no stage-unknown bar. Light does not claim deep sleep or REM.
             if (segments.isEmpty()) {
                 segments.add(new Segment(interval.startMs, interval.endMs, LIGHT));
             }
-            segments = merge(segments);
+            segments = flatten(segments);
             ZoneId zone = interval.timezone == null ? ZoneId.systemDefault() : ZoneId.of(interval.timezone);
             int date = sleepDate(interval.endMs, zone);
-            // Host SleepDataStat is one row per date: axis is min(fall)..max(wake),
-            // totals are the sum of real segments. Do not invent a bar across the nap gap.
-            NightBuilder builder = null;
-            for (NightBuilder existing : builders) if (existing.date == date) builder = existing;
-            if (builder == null) {
-                builder = new NightBuilder(date);
-                builders.add(builder);
-            }
-            builder.fall = builder.fall == 0 ? interval.startMs : Math.min(builder.fall, interval.startMs);
-            builder.wake = Math.max(builder.wake, interval.endMs);
-            builder.segments.addAll(segments);
+            Count counted = count(segments);
+            sessions.add(new Session(date, zone, interval.startMs, interval.endMs,
+                    counted.sleep, counted.deep, counted.light, counted.rem, counted.awake, segments));
         }
         List<Night> nights = new ArrayList<>();
-        for (NightBuilder builder : builders) {
-            List<Segment> segments = merge(builder.segments);
-            long sleep = 0, deep = 0, light = 0, rem = 0, wake = 0;
-            for (Segment segment : segments) {
-                long minutes = Math.max(0, (segment.endMs - segment.startMs) / 60_000);
-                switch (segment.sleepState) {
-                    case DEEP -> { deep += minutes; sleep += minutes; }
-                    case LIGHT -> { light += minutes; sleep += minutes; }
-                    case REM -> { rem += minutes; sleep += minutes; }
-                    case AWAKE -> wake += minutes;
-                    default -> throw new IllegalStateException("SLEEP_STATE_UNMAPPED");
-                }
+        for (int i = 0; i < sessions.size(); i++) {
+            if (!chosen(sessions, i)) continue;
+            Session session = sessions.get(i);
+            long[] window = sleepDayWindow(session.date, session.zone);
+            long purgeStart = window[0];
+            for (Session other : sessions) {
+                if (other.date == session.date) purgeStart = Math.min(purgeStart, other.fall);
             }
-            nights.add(new Night(builder.date, builder.fall, builder.wake, sleep, deep, light, rem, wake,
-                    List.copyOf(segments)));
+            List<Segment> flat = flatten(session.segments);
+            Count counted = count(flat);
+            nights.add(new Night(session.date, session.fall, session.wake, counted.sleep, counted.deep,
+                    counted.light, counted.rem, counted.awake, List.copyOf(flat),
+                    purgeStart, window[1]));
         }
-        nights.sort(Comparator.comparingInt(Night::date));
+        nights.sort(Comparator.comparingInt(Night::date).thenComparingLong(Night::fallAsleepMs));
         return nights;
+    }
+
+    private static boolean chosen(List<Session> sessions, int index) {
+        Session session = sessions.get(index);
+        for (int i = 0; i < sessions.size(); i++) {
+            if (i == index) continue;
+            Session other = sessions.get(i);
+            if (other.date != session.date) continue;
+            if (other.sleep > session.sleep) return false;
+            if (other.sleep == session.sleep && other.fall < session.fall) return false;
+            if (other.sleep == session.sleep && other.fall == session.fall && i < index) return false;
+        }
+        return true;
+    }
+
+    /** [start, end) of the calendar date whose 20:00 boundary owns this sleep-day. */
+    static long[] sleepDayWindow(int date, ZoneId zone) {
+        int year = date / 10000;
+        int month = (date / 100) % 100;
+        int day = date % 100;
+        var end = LocalDate.of(year, month, day).atTime(20, 0).atZone(zone);
+        return new long[] {end.minusDays(1).toInstant().toEpochMilli(), end.toInstant().toEpochMilli()};
     }
 
     private static boolean bestInterval(HealthRecord interval, HealthRecord stage, List<HealthRecord> intervals,
@@ -135,10 +154,68 @@ public final class OHealthSleepPlan {
         return merged;
     }
 
-    private static final class NightBuilder {
+    /**
+     * One row per instant. A segment that starts inside an earlier one keeps only the tail.
+     * A shared start keeps the longer row, then the lower host state.
+     */
+    private static List<Segment> flatten(List<Segment> segments) {
+        if (segments.size() < 2) return segments;
+        List<Segment> sorted = new ArrayList<>(segments);
+        sorted.sort(Comparator.comparingLong(Segment::startMs)
+                .thenComparing((left, right) -> Long.compare(
+                        right.endMs() - right.startMs(), left.endMs() - left.startMs()))
+                .thenComparingInt(Segment::sleepState));
+        List<Segment> parted = new ArrayList<>();
+        Segment current = sorted.get(0);
+        for (int i = 1; i < sorted.size(); i++) {
+            Segment next = sorted.get(i);
+            if (next.startMs() < current.endMs()) {
+                if (next.endMs() <= current.endMs()) continue;
+                next = new Segment(current.endMs(), next.endMs(), next.sleepState());
+            }
+            parted.add(current);
+            current = next;
+        }
+        parted.add(current);
+        return merge(parted);
+    }
+
+    /** Awake minutes stay out of {@code sleep}. */
+    private static Count count(List<Segment> segments) {
+        long sleep = 0, deep = 0, light = 0, rem = 0, awake = 0;
+        for (Segment segment : segments) {
+            long minutes = Math.max(0, (segment.endMs - segment.startMs) / 60_000);
+            switch (segment.sleepState) {
+                case DEEP -> { deep += minutes; sleep += minutes; }
+                case LIGHT -> { light += minutes; sleep += minutes; }
+                case REM -> { rem += minutes; sleep += minutes; }
+                case AWAKE -> awake += minutes;
+                default -> throw new IllegalStateException("SLEEP_STATE_UNMAPPED");
+            }
+        }
+        return new Count(sleep, deep, light, rem, awake);
+    }
+
+    private record Count(long sleep, long deep, long light, long rem, long awake) {}
+
+    private static final class Session {
         final int date;
-        long fall, wake;
-        final List<Segment> segments = new ArrayList<>();
-        NightBuilder(int date) { this.date = date; }
+        final ZoneId zone;
+        final long fall, wake, sleep, deep, light, rem, awake;
+        final List<Segment> segments;
+
+        Session(int date, ZoneId zone, long fall, long wake, long sleep, long deep, long light, long rem,
+                long awake, List<Segment> segments) {
+            this.date = date;
+            this.zone = zone;
+            this.fall = fall;
+            this.wake = wake;
+            this.sleep = sleep;
+            this.deep = deep;
+            this.light = light;
+            this.rem = rem;
+            this.awake = awake;
+            this.segments = segments;
+        }
     }
 }

@@ -106,7 +106,7 @@ final class OHealthSleepWriter {
                 String reason = heldNight.getMessage();
                 if (reason == null || !reason.startsWith("SLEEP_SEGMENT_UNCONFIRMED")) throw heldNight;
                 held++;
-                Log.i("OplusBandBridge", "OHEALTH_SLEEP_NIGHT_HELD date=" + night.date());
+                Log.i("OplusBandBridge", "OHEALTH_SLEEP_NIGHT_HELD date=" + night.date() + " " + reason);
             }
         }
         Log.i("OplusBandBridge", "OHEALTH_SLEEP_IMPORT nights=" + nights.size()
@@ -116,24 +116,54 @@ final class OHealthSleepWriter {
     /** @return null when the night was written; otherwise {@code other-device} or {@code already-ours}. */
     private String writeNight(Object api, String account, String device, OHealthSleepPlan.Night night)
             throws Exception {
-        long statStart = night.fallAsleepMs() - 86_400_000L;
-        long statEnd = night.wakeMs() + 3_600_000L;
+        long statStart = night.dayStartMs();
+        long statEnd = night.dayEndMs() + 1;
         List<?> stats = host.readRows(api, account, TABLE_STAT, null, statStart, statEnd, 4, false);
         if (ownedByOther(stats, night.date(), device)) return "other-device";
-        List<?> existing = host.readRows(api, account, TABLE_SLEEP, device, night.fallAsleepMs() - 1,
-                night.wakeMs() + 1, 0, true);
+        List<?> existing = host.readRows(api, account, TABLE_SLEEP, device, night.dayStartMs(),
+                night.dayEndMs(), 0, true);
         boolean sameSegments = segmentsMatch(existing, device, night);
         boolean sameStat = statMatches(stats, device, night);
         if (sameSegments && sameStat) return "already-ours";
         if (!sameSegments) {
-            // SleepMerge keeps the previous end for an existing start, so a changed night is deleted first.
-            host.deleteRows(api, TABLE_SLEEP, account, device, night.fallAsleepMs(), night.wakeMs() + 1);
-            List<Object> rows = new ArrayList<>();
-            for (OHealthSleepPlan.Segment segment : night.segments()) rows.add(segmentRow(account, device, segment));
-            if (!rows.isEmpty()) host.insertRows(api, TABLE_SLEEP, rows);
-            existing = host.readRows(api, account, TABLE_SLEEP, device, night.fallAsleepMs() - 1,
-                    night.wakeMs() + 1, 0, true);
-            if (!segmentsMatch(existing, device, night)) throw new IllegalStateException("SLEEP_SEGMENT_UNCONFIRMED");
+            // The 20:00 window is not what confirms. Delete the chosen session plus every
+            // in-day row. SleepStore.delete is a no-op; the data service performs this delete.
+            long delStart = night.fallAsleepMs();
+            long coveredEnd = night.wakeMs();
+            for (Object row : existing) {
+                if (!startsInDay(row, device, night)) continue;
+                delStart = Math.min(delStart, (Long) sleepGetStart.invoke(row));
+                coveredEnd = Math.max(coveredEnd, (Long) sleepGetEnd.invoke(row));
+            }
+            host.deleteRows(api, TABLE_SLEEP, account, device, delStart, coveredEnd + 1);
+            insertSegments(api, account, device, night.segments());
+            existing = host.readRows(api, account, TABLE_SLEEP, device, night.dayStartMs(),
+                    night.dayEndMs(), 0, true);
+            if (!segmentsMatch(existing, device, night)) {
+                boolean[] kept = new boolean[night.segments().size()];
+                List<OHealthSleepPlan.Segment> segments = night.segments();
+                for (Object row : existing) {
+                    if (!startsInDay(row, device, night)) continue;
+                    int match = unusedSegment(row, device, segments, kept);
+                    if (match >= 0) {
+                        kept[match] = true;
+                        continue;
+                    }
+                    long rowStart = (Long) sleepGetStart.invoke(row);
+                    host.deleteRows(api, TABLE_SLEEP, account, device, rowStart, rowStart + 1);
+                }
+                List<OHealthSleepPlan.Segment> missing = new ArrayList<>();
+                for (int i = 0; i < segments.size(); i++) {
+                    if (!kept[i]) missing.add(segments.get(i));
+                }
+                insertSegments(api, account, device, missing);
+                existing = host.readRows(api, account, TABLE_SLEEP, device, night.dayStartMs(),
+                        night.dayEndMs(), 0, true);
+                if (!segmentsMatch(existing, device, night)) {
+                    throw new IllegalStateException("SLEEP_SEGMENT_UNCONFIRMED rows=" + existing.size()
+                            + " want=" + segments.size());
+                }
+            }
         }
         if (!sameStat) {
             // SleepDataStat is keyed by account and date, so a later insert replaces the frozen summary.
@@ -183,6 +213,24 @@ final class OHealthSleepWriter {
         return row;
     }
 
+    private void insertSegments(Object api, String account, String device,
+            List<OHealthSleepPlan.Segment> segments) throws ReflectiveOperationException {
+        if (segments.isEmpty()) return;
+        List<Object> rows = new ArrayList<>();
+        for (OHealthSleepPlan.Segment segment : segments) rows.add(segmentRow(account, device, segment));
+        host.insertRows(api, TABLE_SLEEP, rows);
+    }
+
+    private int unusedSegment(Object row, String device, List<OHealthSleepPlan.Segment> segments, boolean[] used)
+            throws ReflectiveOperationException {
+        for (int i = 0; i < segments.size(); i++) {
+            if (used[i] || !sameSegment(row, device, segments.get(i))) continue;
+            return i;
+        }
+        return -1;
+    }
+
+
     private Object statRow(String account, String device, OHealthSleepPlan.Night night)
             throws ReflectiveOperationException {
         Object row = statNew.newInstance();
@@ -213,7 +261,7 @@ final class OHealthSleepWriter {
             if (!found) return false;
         }
         for (int i = 0; i < rows.size(); i++) {
-            if (used[i] || !overlapsNight(rows.get(i), device, night)) continue;
+            if (used[i] || !startsInDay(rows.get(i), device, night)) continue;
             return false;
         }
         return true;
@@ -227,12 +275,12 @@ final class OHealthSleepWriter {
                 && segment.sleepState() == (Integer) sleepGetState.invoke(row);
     }
 
-    private boolean overlapsNight(Object row, String device, OHealthSleepPlan.Night night)
+    /** A row whose start sits in this sleep-day. A session that only overlaps from the day before stays. */
+    private boolean startsInDay(Object row, String device, OHealthSleepPlan.Night night)
             throws ReflectiveOperationException {
         if (!sleepClass.isInstance(row) || !device.equals(sleepGetDevice.invoke(row))) return false;
         long start = (Long) sleepGetStart.invoke(row);
-        long end = (Long) sleepGetEnd.invoke(row);
-        return start < night.wakeMs() && end > night.fallAsleepMs();
+        return start >= night.dayStartMs() && start < night.dayEndMs();
     }
 
     private boolean statMatches(List<?> rows, String device, OHealthSleepPlan.Night night)
