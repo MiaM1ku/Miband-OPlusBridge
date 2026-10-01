@@ -130,7 +130,7 @@ public final class BandWeatherEncoder {
         validateForecast(sample);
         if (!sample.locationKey().equals(sourceKey) || !sample.cityName().equals(sourceCity)
                 || !sample.locationName().equals(sourcePlace)
-                || bandCode == null || !bandCode.matches("weathercn:[0-9]{9}")
+                || !acceptableCityCode(bandCode)
                 || bandName == null || bandName.isBlank() || bandName.length() > 80) {
             throw new IllegalArgumentException("WEATHER_CITY_CONFIRMATION_INVALID");
         }
@@ -175,12 +175,29 @@ public final class BandWeatherEncoder {
                 .setWeather(XiaomiProto.Weather.newBuilder().setLocations(copy)).build();
     }
 
+    /** Band 10 drops a forecast whose key is absent. 10/7 adds one city and does not replace the list. */
+    public static XiaomiProto.Command addCurrentLocation(Sample sample) {
+        validateForecast(sample);
+        return XiaomiProto.Command.newBuilder().setType(10).setSubtype(7)
+                .setWeather(XiaomiProto.Weather.newBuilder().setLocation(
+                        XiaomiProto.WeatherLocation.newBuilder()
+                                .setCode(sample.locationKey()).setName(sample.locationName()))).build();
+    }
+
+    public static int acceptedCityCount(XiaomiProto.WeatherLocations configured) {
+        return validCities(configured).size();
+    }
+
+    public static boolean acceptableCityCode(String code) {
+        return code != null && code.matches("[A-Za-z0-9:_-]{1,64}");
+    }
+
     private static java.util.ArrayList<XiaomiProto.WeatherLocation> validCities(
             XiaomiProto.WeatherLocations configured) {
         var valid = new java.util.ArrayList<XiaomiProto.WeatherLocation>();
         if (configured == null) return valid;
         for (var city : configured.getLocationList()) {
-            if (city.getCode().matches("weathercn:[0-9]{9}") && city.hasName()
+            if (acceptableCityCode(city.getCode()) && city.hasName()
                     && !city.getName().isBlank() && city.getName().length() <= 80) valid.add(city);
         }
         return valid;

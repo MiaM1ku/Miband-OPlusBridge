@@ -179,6 +179,36 @@ public final class BandWeatherEncoderTest {
         assertEquals(2, BandWeatherEncoder.echoLocations(several).getWeather().getLocations().getLocationCount());
     }
 
+    @Test public void oneNonWeathercnCityIsKept() {
+        var source = sample("c", "Asia/Shanghai", 56, 21);
+        var configured = city("accu:246810", "Band city");
+        var bound = BandWeatherEncoder.bindObservedCity(source, configured, "", "");
+        assertEquals("accu:246810", bound.locationKey());
+        assertEquals("Band city", bound.locationName());
+        var echoed = BandWeatherEncoder.echoLocations(configured);
+        assertEquals(6, echoed.getSubtype());
+        assertEquals("accu:246810", echoed.getWeather().getLocations().getLocation(0).getCode());
+        assertEquals(0, BandWeatherEncoder.acceptedCityCount(city("not a code", "Band city")));
+        assertEquals("WEATHER_CITY_SETUP_REQUIRED", assertThrows(IllegalArgumentException.class,
+                () -> BandWeatherEncoder.echoLocations(city("not a code", "Band city"))).getMessage());
+    }
+
+    @Test public void emptyCityListRegistersTheSourceLocationWithoutReplacingCities() {
+        var source = sample("c", "Asia/Shanghai", 56, 21);
+        var generic = new BandWeatherEncoder.Sample("phone-location", source.cityName(), source.locationName(),
+                source.timezone(), source.unit(), source.publishedAtMs(), source.conditionCode(),
+                source.temperature(), null, null, null, null, null, null, source.daily(), source.hourly());
+        var add = BandWeatherEncoder.addCurrentLocation(generic);
+        assertEquals(10, add.getType());
+        assertEquals(7, add.getSubtype());
+        assertFalse(add.getWeather().hasLocations());
+        assertEquals("phone-location", add.getWeather().getLocation().getCode());
+        assertEquals("Source place", add.getWeather().getLocation().getName());
+        assertEquals("WEATHER_CITY_SETUP_REQUIRED", assertThrows(IllegalArgumentException.class,
+                () -> BandWeatherEncoder.echoLocations(XiaomiProto.WeatherLocations.getDefaultInstance()))
+                .getMessage());
+    }
+
     @Test public void observedHumidityAndAirQualityAreSentWithoutInventingEither() {
         var source = sample("c", "Asia/Shanghai", 56, 21);
         var measured = new BandWeatherEncoder.Sample(source.locationKey(), source.cityName(), source.locationName(),

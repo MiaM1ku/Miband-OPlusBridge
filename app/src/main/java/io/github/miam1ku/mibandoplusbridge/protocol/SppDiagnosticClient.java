@@ -763,7 +763,8 @@ public final class SppDiagnosticClient implements AutoCloseable {
                 .putString("sourcePlace", weather.locationName());
         int index = 0;
         for (var city : observedLocations.getLocationList()) {
-            if (!city.getCode().matches("weathercn:[0-9]{9}") || !city.hasName() || city.getName().isBlank()) continue;
+            if (!BandWeatherEncoder.acceptableCityCode(city.getCode()) || !city.hasName()
+                    || city.getName().isBlank()) continue;
             prefs.putString("bandCode" + index, city.getCode()).putString("bandName" + index, city.getName());
             index++;
             if (index == 4) break;

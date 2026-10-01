@@ -5,6 +5,7 @@ import android.content.Context;
 import android.database.ContentObserver;
 import android.os.Bundle;
 import io.github.miam1ku.mibandoplusbridge.integration.WeatherSnapshotProvider;
+import io.github.miam1ku.mibandoplusbridge.data.SessionLog;
 import io.github.miam1ku.mibandoplusbridge.protocol.BandWeatherEncoder;
 import io.github.miam1ku.mibandoplusbridge.protocol.LiveCommandQueue;
 import nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto;
@@ -191,6 +192,8 @@ public final class WeatherSync implements AutoCloseable {
                     try {
                         BandWeatherEncoder.Sample fresh = freshSnapshot(sample);
                         XiaomiProto.WeatherLocations cities = response.getWeather().getLocations();
+                        SessionLog.line(context, "WEATHER_CITIES raw=" + cities.getLocationCount()
+                                + " accepted=" + BandWeatherEncoder.acceptedCityCount(cities));
                         saveReview(fresh, cities);
                         if (operation == Operation.INSPECT) { finish(null); return; }
                         publish(transaction, fresh, cities);
@@ -204,7 +207,7 @@ public final class WeatherSync implements AutoCloseable {
                 .putString("sourceCity", sample.cityName()).putString("sourcePlace", sample.locationName());
         int count = 0;
         for (var city : cities.getLocationList()) {
-            if (!city.getCode().matches("weathercn:[0-9]{9}") || !city.hasName()
+            if (!BandWeatherEncoder.acceptableCityCode(city.getCode()) || !city.hasName()
                     || city.getName().isBlank() || city.getName().length() > 80) continue;
             edit.putString("bandCode" + count, city.getCode()).putString("bandName" + count, city.getName());
             count++;
@@ -234,8 +237,25 @@ public final class WeatherSync implements AutoCloseable {
                 finish(code(missing));
                 return;
             }
-            sendFrame(transaction, fresh, cities, BandWeatherEncoder.encode(fresh), 0);
+            registerCurrentCity(transaction, fresh);
         }
+    }
+
+    private void registerCurrentCity(CompletableFuture<Void> transaction, BandWeatherEncoder.Sample fresh) {
+        XiaomiProto.Command add;
+        try {
+            add = BandWeatherEncoder.addCurrentLocation(fresh);
+        } catch (IllegalArgumentException invalid) {
+            finish(code(invalid));
+            return;
+        }
+        SessionLog.line(context, "WEATHER_ADD_CITY");
+        transactionQueue.send(add).whenComplete((ignored, failure) -> dispatch(() -> {
+            if (active != transaction) return;
+            if (failure != null) { finish("WEATHER_TRANSPORT_FAILED"); return; }
+            sendFrame(transaction, fresh, XiaomiProto.WeatherLocations.getDefaultInstance(),
+                    BandWeatherEncoder.encode(fresh), 0);
+        }));
     }
 
     private BandWeatherEncoder.Sample bind(BandWeatherEncoder.Sample sample, XiaomiProto.WeatherLocations cities) {
@@ -268,6 +288,8 @@ public final class WeatherSync implements AutoCloseable {
         dispatch(() -> {
             if (closed) return;
             if (command.hasStatus() && command.getStatus() != 0) {
+                // 10/7: 1 means this device has no single-city add; 3 means the city is already there.
+                if (command.getSubtype() == 7 && (command.getStatus() == 1 || command.getStatus() == 3)) return;
                 if (active != null) finish("WEATHER_BAND_REJECTED");
                 else record("WEATHER_BAND_REJECTED");
                 return;
