@@ -14,6 +14,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -51,10 +52,13 @@ final class BleGattClient implements AutoCloseable {
     private final BleV1Codec.Reassembler commands = new BleV1Codec.Reassembler();
     private final BleV1Codec.Reassembler activity = new BleV1Codec.Reassembler();
     private final Object writeLock = new Object();
+    private final LinkedBlockingQueue<PendingWrite> pendingWrites = new LinkedBlockingQueue<>();
+    private final AtomicReference<PendingWrite> currentWrite = new AtomicReference<>();
     private final BluetoothGattCharacteristic[] subscribe = new BluetoothGattCharacteristic[3];
     private BleNotifyQueue notifies;
     private byte[] previousNotification;
     private long previousAt;
+    private volatile Thread writerThread;
 
     BleGattClient(Context context, BluetoothDevice device, JSONObject binding) {
         this.context = context;
@@ -67,6 +71,9 @@ final class BleGattClient implements AutoCloseable {
     }
 
     void connect() throws Exception {
+        writerThread = new Thread(this::drainWrites, "ble-gatt-write");
+        writerThread.setDaemon(true);
+        writerThread.start();
         BluetoothGatt created = device.connectGatt(context, false, callback, BluetoothDevice.TRANSPORT_LE);
         if (created == null) throw new SppDiagnosticClient.Failure("BLE_CONNECT_FAILED");
         gatt = created;
@@ -117,6 +124,9 @@ final class BleGattClient implements AutoCloseable {
             try { link.disconnect(); } catch (Exception ignored) {}
             try { link.close(); } catch (Exception ignored) {}
         }
+        failPending("CANCELLED");
+        Thread writer = writerThread;
+        if (writer != null) writer.interrupt();
         incoming.offer(new byte[0]);
         transportAcks.offer(new byte[0]);
     }
@@ -140,26 +150,96 @@ final class BleGattClient implements AutoCloseable {
     }
 
     private void writeRaw(BluetoothGattCharacteristic target, byte[] frame) throws Exception {
-        synchronized (writeLock) {
-            BluetoothGatt link = gatt;
-            if (target == null || link == null || closed) {
-                throw new SppDiagnosticClient.Failure("BLE_DISCONNECTED");
-            }
-            int props = target.getProperties();
-            int type = (props & BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0
-                    ? BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
-                    : BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT;
-            target.setWriteType(type);
-            target.setValue(frame);
-            if (!link.writeCharacteristic(target)) throw new SppDiagnosticClient.Failure("BLE_WRITE_FAILED");
-        }
+        PendingWrite op = enqueue(target, frame);
+        if (!op.finished.await(5, TimeUnit.SECONDS)) throw new SppDiagnosticClient.Failure("BLE_WRITE_FAILED");
+        if (op.error != null) throw new SppDiagnosticClient.Failure(op.error);
     }
 
     private void ack(BluetoothGattCharacteristic source, byte[] frame) {
         try {
-            writeRaw(source, frame);
+            enqueue(source, frame);
         } catch (Exception error) {
             SessionLog.line(context, "ble ack failed " + error.getClass().getSimpleName());
+        }
+    }
+
+    private PendingWrite enqueue(BluetoothGattCharacteristic target, byte[] frame) throws Exception {
+        if (target == null || closed) throw new SppDiagnosticClient.Failure("BLE_DISCONNECTED");
+        PendingWrite op = new PendingWrite(target, frame);
+        pendingWrites.put(op);
+        return op;
+    }
+
+    private void drainWrites() {
+        while (!closed) {
+            PendingWrite op;
+            try {
+                op = pendingWrites.take();
+            } catch (InterruptedException interrupted) {
+                if (closed) return;
+                continue;
+            }
+            if (op.error != null) {
+                op.finished.countDown();
+                continue;
+            }
+            currentWrite.set(op);
+            try {
+                if (!submit(op)) op.error = "BLE_WRITE_FAILED";
+                else if (!op.finished.await(400, TimeUnit.MILLISECONDS)
+                        && currentWrite.compareAndSet(op, null) && op.error == null) {
+                    SessionLog.line(context, "ble write callback missing");
+                }
+            } catch (Exception error) {
+                op.error = error instanceof SppDiagnosticClient.Failure typed
+                        ? typed.code : "BLE_WRITE_FAILED";
+            } finally {
+                currentWrite.compareAndSet(op, null);
+                op.finished.countDown();
+            }
+        }
+    }
+
+    private boolean submit(PendingWrite op) throws Exception {
+        synchronized (writeLock) {
+            BluetoothGatt link = gatt;
+            if (link == null || closed) throw new SppDiagnosticClient.Failure("BLE_DISCONNECTED");
+            int props = op.target.getProperties();
+            int type = (props & BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0
+                    ? BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+                    : BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT;
+            op.target.setWriteType(type);
+            op.target.setValue(op.frame);
+            for (int attempt = 0; attempt < 6; attempt++) {
+                if (link.writeCharacteristic(op.target)) return true;
+                if (closed) throw new SppDiagnosticClient.Failure("CANCELLED");
+                Thread.sleep(25L * (attempt + 1));
+            }
+            SessionLog.line(context, "ble write rejected");
+            return false;
+        }
+    }
+
+    private void failPending(String code) {
+        PendingWrite inflight = currentWrite.get();
+        if (inflight != null) inflight.error = code;
+        PendingWrite op;
+        while ((op = pendingWrites.poll()) != null) {
+            op.error = code;
+            op.finished.countDown();
+        }
+        if (inflight != null) inflight.finished.countDown();
+    }
+
+    private static final class PendingWrite {
+        final BluetoothGattCharacteristic target;
+        final byte[] frame;
+        final CountDownLatch finished = new CountDownLatch(1);
+        volatile String error;
+
+        PendingWrite(BluetoothGattCharacteristic target, byte[] frame) {
+            this.target = target;
+            this.frame = frame;
         }
     }
 
@@ -251,6 +331,17 @@ final class BleGattClient implements AutoCloseable {
         @Override public void onCharacteristicChanged(BluetoothGatt gatt,
                 BluetoothGattCharacteristic characteristic) {
             onValue(characteristic, characteristic.getValue());
+        }
+
+        @Override public void onCharacteristicWrite(BluetoothGatt gatt,
+                BluetoothGattCharacteristic characteristic, int status) {
+            PendingWrite op = currentWrite.getAndSet(null);
+            if (op == null) return;
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                SessionLog.line(context, "ble write status=" + status);
+                op.error = "BLE_WRITE_FAILED";
+            }
+            op.finished.countDown();
         }
 
         @Override public void onDescriptorWrite(BluetoothGatt gatt, BluetoothGattDescriptor descriptor, int status) {
