@@ -35,11 +35,19 @@ public final class BandLiveService extends Service {
     private volatile io.github.miam1ku.mibandoplusbridge.protocol.LiveCommandQueue commands;
     private LiveHistorySync historySync;
     private volatile boolean syncRequested;
+    private volatile boolean realtimeStatsStopPending;
     private long nextBatteryAt;
     private long nextHealthAt;
     private long nextWeatherAt;
     /** Battery and a today-file list. Unchanged files and weather stay off the radio so the ACL can sniff. */
     private static final long IDLE_POLL_MINUTES = 30;
+    /**
+     * 8/45 starts the band's live-stats stream. The band measures heart rate while that stream runs,
+     * so it is a one-shot like Gadgetbridge's heart-rate test: 8/46 stops it after the first snapshot.
+     */
+    private static final long REALTIME_STATS_TIMEOUT_SECONDS = 30;
+    private static final int REALTIME_STATS_START = 45;
+    private static final int REALTIME_STATS_STOP = 46;
     private WeatherSync weatherSync;
     private HealthReplay healthReplay;
     private volatile long sessionEpoch;
@@ -722,8 +730,11 @@ public final class BandLiveService extends Service {
                         weatherSync.refreshAndSend();
                         syncRequested = false;
                         healthReplay.request();
-                        queue.send(nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto.Command.newBuilder()
-                                .setType(8).setSubtype(45).build());
+                        queue.send(realtimeStats(REALTIME_STATS_START));
+                        realtimeStatsStopPending = true;
+                        coordinator.schedule(() -> {
+                            if (epoch == sessionEpoch) stopRealtimeStats();
+                        }, REALTIME_STATS_TIMEOUT_SECONDS, TimeUnit.SECONDS);
                         historySync.request(true);
                         syncDnd();
                         requestSleepState();
@@ -789,6 +800,7 @@ public final class BandLiveService extends Service {
                                 try {
                                     repository.recordDailySteps(steps, System.currentTimeMillis(), true);
                                 } catch (RuntimeException ignored) { }
+                                if (steps > 0) stopRealtimeStats();
                             });
                         }
                         if (command.getType() == 8 && command.hasStatus() && command.getStatus() != 0) {
@@ -805,6 +817,7 @@ public final class BandLiveService extends Service {
                 } finally {
                     client = null;
                     commands = null;
+                    realtimeStatsStopPending = false;
                     try {
                         coordinator.execute(() -> {
                             if (epoch == sessionEpoch && commands == null && historySync != null) {
@@ -887,6 +900,21 @@ public final class BandLiveService extends Service {
     private void healthCollectionStatus(String status) {
         getSharedPreferences("live-service", MODE_PRIVATE).edit().putString("healthCollectionStatus", status).apply();
         getContentResolver().notifyChange(io.github.miam1ku.mibandoplusbridge.integration.DeviceCardProvider.URI, null);
+    }
+
+    /** 45 starts the band's live-stats stream, 46 stops it, 47 is the periodic event. */
+    private static nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto.Command realtimeStats(int subtype) {
+        return nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto.Command.newBuilder()
+                .setType(8).setSubtype(subtype).build();
+    }
+
+    /** Ends the live-stats stream once; a running stream keeps the band measuring heart rate. */
+    private void stopRealtimeStats() {
+        if (!realtimeStatsStopPending) return;
+        realtimeStatsStopPending = false;
+        var queue = commands;
+        if (queue == null || stopRequested) return;
+        queue.send(realtimeStats(REALTIME_STATS_STOP));
     }
 
     private void tick() {
