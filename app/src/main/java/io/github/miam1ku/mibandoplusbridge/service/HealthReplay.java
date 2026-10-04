@@ -50,7 +50,10 @@ final class HealthReplay implements AutoCloseable {
     boolean hasCapacity() {
         if (closed) return false;
         try { return records.hasCapacity(); }
-        catch (RuntimeException unavailable) { status.accept("HEALTH_STORAGE_UNAVAILABLE"); return false; }
+        catch (RuntimeException unavailable) {
+            status.accept("HEALTH_STORAGE_UNAVAILABLE");
+            throw unavailable;
+        }
     }
 
     void request() {

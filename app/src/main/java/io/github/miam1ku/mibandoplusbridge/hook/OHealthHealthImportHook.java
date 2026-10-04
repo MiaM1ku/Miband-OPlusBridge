@@ -16,7 +16,6 @@ import de.robv.android.xposed.XposedHelpers;
 import io.github.miam1ku.mibandoplusbridge.HostIdentity;
 import io.github.miam1ku.mibandoplusbridge.data.HealthRecord;
 import io.github.miam1ku.mibandoplusbridge.integration.HealthQueueProvider;
-import java.io.File;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
@@ -54,6 +53,7 @@ public final class OHealthHealthImportHook {
     private final AtomicReference<Object> observedApi = new AtomicReference<>();
     private final AtomicLong accountEpoch = new AtomicLong();
     private long retryAfter;
+    private final ThreadLocal<Boolean> blockingTourist = ThreadLocal.withInitial(() -> false);
     private boolean stressZerosCleared;
     private String lastFailure;
     private final Runnable work = this::runScheduled;
@@ -136,21 +136,20 @@ public final class OHealthHealthImportHook {
         XposedHelpers.findAndHookMethod(Application.class, "onCreate", new XC_MethodHook() {
             @Override protected void afterHookedMethod(MethodHookParam param) {
                 restoreSystemAccount();
-                new Handler(android.os.Looper.getMainLooper()).postDelayed(() -> restoreSystemAccount(), 2_000);
+                Handler main = new Handler(android.os.Looper.getMainLooper());
+                main.postDelayed(OHealthHealthImportHook.this::restoreSystemAccount, 2_000);
+                main.postDelayed(OHealthHealthImportHook.this::restoreSystemAccount, 8_000);
                 request();
             }
         });
     }
     /**
-     * The setup activity treats a missing login task as cancellation and writes tourist mode,
-     * even when the system account is still signed in. Put that account back once.
+     * The setup activity treats a missing login task as cancellation and writes tourist mode
+     * on later launches too, even when the system account is still signed in. Put that account
+     * back whenever Health comes up as a guest. Do not cache the account from inside
+     * {@code setIsInTouristMode}: that re-enters the login screen and kills the process.
      */
     private void restoreSystemAccount() {
-        File marker = new File(context.getFilesDir(), "oplusband-account-restore");
-        if (marker.isFile()) {
-            Log.i("OplusBandBridge", "OHEALTH_ACCOUNT_RESTORE_SKIP marker");
-            return;
-        }
         try {
             ClassLoader loader = host.loader;
             Class<?> tourist = Class.forName("com.heytap.health.base.tourist.TouristHelper", false, loader);
@@ -169,9 +168,6 @@ public final class OHealthHealthImportHook {
             if (!system || (!guest && !placeholder)) return;
             tourist.getMethod("setIsInTouristMode", boolean.class).invoke(null, false);
             manager.getClass().getMethod("cacheAccountInfo", boolean.class).invoke(manager, true);
-            if (!marker.createNewFile() && !marker.isFile()) {
-                throw new IllegalStateException("ACCOUNT_RESTORE_MARKER");
-            }
             Log.i("OplusBandBridge", "OHEALTH_ACCOUNT_RESTORED");
         } catch (Throwable failure) {
             Throwable cause = failure.getCause() == null ? failure : failure.getCause();
@@ -185,20 +181,20 @@ public final class OHealthHealthImportHook {
             XposedBridge.hookAllMethods(tourist, "setIsInTouristMode", new XC_MethodHook() {
                 @Override protected void beforeHookedMethod(MethodHookParam param) {
                     if (param.args.length == 0 || !Boolean.TRUE.equals(param.args[0])) return;
+                    if (Boolean.TRUE.equals(blockingTourist.get())) {
+                        param.setResult(null);
+                        return;
+                    }
                     if (!systemLoggedIn()) return;
                     param.setResult(null);
+                    blockingTourist.set(true);
                     try {
                         tourist.getMethod("setIsInTouristMode", boolean.class).invoke(null, false);
-                        Class<?> accounts = Class.forName(
-                                "com.heytap.health.account.AccountHelper", false, host.loader);
-                        Object manager = accounts.getMethod("getAccountManager").invoke(null);
-                        if (manager != null) {
-                            manager.getClass().getMethod("cacheAccountInfo", boolean.class)
-                                    .invoke(manager, true);
-                        }
                     } catch (Throwable failure) {
                         Log.i("OplusBandBridge", "OHEALTH_ACCOUNT_RESTORE_FAILED "
                                 + failure.getClass().getSimpleName());
+                    } finally {
+                        blockingTourist.set(false);
                     }
                     Log.i("OplusBandBridge", "OHEALTH_ACCOUNT_TOURIST_BLOCKED");
                 }

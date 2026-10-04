@@ -719,8 +719,12 @@ public final class BandLiveService extends Service {
                         io.github.miam1ku.mibandoplusbridge.notify.BandNotificationListener.connectionChanged();
                         io.github.miam1ku.mibandoplusbridge.notify.NativeMusic.requestRefresh(this);
                         historySync = new LiveHistorySync(queue, coordinator, () -> {
-                            try { repository.recordSyncCompleted(); }
-                            catch (RuntimeException unavailable) { healthCollectionStatus("HEALTH_STORAGE_UNAVAILABLE"); }
+                            try {
+                                repository.recordSyncCompleted();
+                                clearStoragePause();
+                            } catch (RuntimeException unavailable) {
+                                healthCollectionStatus("HEALTH_STORAGE_UNAVAILABLE");
+                            }
                         }, this::healthCollectionStatus, healthReplay::hasCapacity);
                         long now = System.nanoTime();
                         nextBatteryAt = now + TimeUnit.MINUTES.toNanos(IDLE_POLL_MINUTES);
@@ -901,6 +905,15 @@ public final class BandLiveService extends Service {
         getSharedPreferences("live-service", MODE_PRIVATE).edit().putString("healthCollectionStatus", status).apply();
         getContentResolver().notifyChange(io.github.miam1ku.mibandoplusbridge.integration.DeviceCardProvider.URI, null);
     }
+    /** A later successful round must not keep showing a storage pause that already cleared. */
+    private void clearStoragePause() {
+        String current = getSharedPreferences("live-service", MODE_PRIVATE)
+                .getString("healthCollectionStatus", "");
+        if ("HEALTH_STORAGE_UNAVAILABLE".equals(current) || "HISTORY_STORAGE_FAILED".equals(current)) {
+            healthCollectionStatus("");
+        }
+    }
+
 
     /** 45 starts the band's live-stats stream, 46 stops it, 47 is the periodic event. */
     private static nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto.Command realtimeStats(int subtype) {

@@ -86,7 +86,12 @@ final class LiveHistorySync {
             }
             return;
         }
-        if (!capacity.getAsBoolean()) return;
+        try {
+            if (!capacity.getAsBoolean()) return;
+        } catch (RuntimeException unavailable) {
+            fail("HEALTH_STORAGE_UNAVAILABLE");
+            return;
+        }
         int count = Math.min(4, remaining.size());
         byte[] ids = new byte[count * 7];
         for (int i = 0; i < count; i++) {

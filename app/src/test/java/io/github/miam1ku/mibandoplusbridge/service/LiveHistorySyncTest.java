@@ -86,4 +86,34 @@ public final class LiveHistorySyncTest {
             worker.shutdownNow();
         }
     }
+    @Test public void storageFailureReleasesTheRound() throws Exception {
+        var worker = Executors.newSingleThreadScheduledExecutor();
+        var queueRef = new AtomicReference<LiveCommandQueue>();
+        var listed = new AtomicInteger();
+        var opens = new AtomicInteger();
+        BlockingQueue<String> outcomes = new LinkedBlockingQueue<>();
+        try (var queue = new LiveCommandQueue(0, 5_000, (sequence, command) -> {
+            var current = queueRef.get();
+            if (command.getSubtype() == 1) {
+                byte[] ids = listed.getAndIncrement() == 0 ? new byte[] {1, 0, 0, 0, 0, 4, 0} : new byte[0];
+                current.onCommand(XiaomiProto.Command.newBuilder().setType(8).setSubtype(1)
+                        .setHealth(XiaomiProto.Health.newBuilder()
+                                .setActivityRequestFileIds(ByteString.copyFrom(ids))).build());
+            }
+            current.onAck(sequence);
+        })) {
+            queueRef.set(queue);
+            var history = new LiveHistorySync(queue, worker, () -> outcomes.add("complete"), outcomes::add, () -> {
+                if (opens.getAndIncrement() == 0) throw new IllegalStateException("HEALTH_STORAGE_UNAVAILABLE");
+                return true;
+            });
+            worker.execute(() -> history.request(false));
+            assertEquals("HEALTH_STORAGE_UNAVAILABLE", outcomes.poll(5, TimeUnit.SECONDS));
+            worker.execute(() -> history.request(false));
+            assertEquals("complete", outcomes.poll(5, TimeUnit.SECONDS));
+        } finally {
+            worker.shutdownNow();
+        }
+    }
+
 }
