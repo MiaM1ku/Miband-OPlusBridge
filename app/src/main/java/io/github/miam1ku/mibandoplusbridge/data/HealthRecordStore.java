@@ -636,6 +636,34 @@ public final class HealthRecordStore extends SQLiteOpenHelper {
         }
         return files;
     }
+    /** Oldest finished archives first. Pending and unparsed files stay, so replay can still finish. */
+    synchronized List<String> finishedFileHashes(int limit) {
+        if (limit < 1) throw new IllegalArgumentException("INVALID_HISTORY_PAGE_SIZE");
+        List<String> hashes = new ArrayList<>();
+        try (Cursor rows = getReadableDatabase().rawQuery("SELECT file_hash FROM files "
+                + "WHERE parse_status='PARSED' AND next_record_index>=record_count "
+                + "ORDER BY captured_at_ms, file_hash LIMIT ?", new String[]{Integer.toString(limit)})) {
+            while (rows.moveToNext()) hashes.add(rows.getString(0));
+        }
+        return hashes;
+    }
+
+    /** Removes the index row only. The caller deletes the raw bytes after this commits. */
+    synchronized boolean dropFinishedFile(String hash) {
+        requireHash(hash);
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
+        try {
+            int removed = db.delete("files",
+                    "file_hash=? AND parse_status='PARSED' AND next_record_index>=record_count",
+                    new String[]{hash});
+            db.setTransactionSuccessful();
+            return removed == 1;
+        } finally {
+            db.endTransaction();
+        }
+    }
+
 
     synchronized boolean isFileIndexed(String hash) {
         requireHash(hash);

@@ -710,7 +710,10 @@ public final class SppDiagnosticClient implements AutoCloseable {
             progress.accept("HISTORY_FILE_ARCHIVED");
         } catch (Exception storageFailed) {
             progress.accept("HISTORY_STORAGE_FAILED");
-            SessionLog.line(context, "history storage failed");
+            String reason = storageFailed.getMessage();
+            SessionLog.line(context, "history storage failed "
+                    + storageFailed.getClass().getSimpleName()
+                    + (reason != null && reason.matches("[A-Z][A-Z0-9_]{1,90}") ? " " + reason : ""));
             return null;
         }
         if ("PARSED".equals(result.parseStatus)) {

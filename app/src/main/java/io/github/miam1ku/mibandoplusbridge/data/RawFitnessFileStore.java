@@ -65,11 +65,16 @@ public final class RawFitnessFileStore {
                         Arrays.fill(existing, (byte) 0);
                     }
                 } else {
+                    makeRoom(bytes.length);
                     File[] existing = directory.listFiles((parent, name) -> name.endsWith(".dat"));
-                    if (existing == null || existing.length >= MAX_FILES) throw new IllegalStateException("HISTORY_REPLAY_LIMIT_REACHED");
+                    if (existing == null || existing.length >= MAX_FILES) {
+                        throw new IllegalStateException("HISTORY_REPLAY_LIMIT_REACHED");
+                    }
                     long occupied = 0;
                     for (File file : existing) occupied += file.length();
-                    if (occupied > MAX_TOTAL_BYTES - bytes.length) throw new IllegalStateException("HISTORY_REPLAY_LIMIT_REACHED");
+                    if (occupied > MAX_TOTAL_BYTES - bytes.length) {
+                        throw new IllegalStateException("HISTORY_REPLAY_LIMIT_REACHED");
+                    }
                     FileOutputStream stream = null;
                     try {
                         stream = output.startWrite();
@@ -98,6 +103,46 @@ public final class RawFitnessFileStore {
             }
         }
     }
+    /** Finished archives already live in the measurement tables. Drop the oldest until one slot fits. */
+    private void makeRoom(long incomingBytes) {
+        File[] existing = directory.listFiles((parent, name) -> name.endsWith(".dat"));
+        int count = existing == null ? 0 : existing.length;
+        long occupied = 0;
+        if (existing != null) for (File file : existing) occupied += file.length();
+        if (count < MAX_FILES && occupied <= MAX_TOTAL_BYTES - incomingBytes) return;
+        try (HealthRecordStore store = new HealthRecordStore(context)) {
+            for (String hash : store.finishedFileHashes(Math.max(count, 1))) {
+                File raw = new File(directory, hash + ".dat");
+                boolean present = raw.isFile();
+                long size = present ? raw.length() : 0;
+                if (!store.dropFinishedFile(hash)) continue;
+                if (present && !raw.delete() && raw.isFile()) continue;
+                if (present) {
+                    count--;
+                    occupied -= size;
+                }
+                if (count < MAX_FILES && occupied <= MAX_TOTAL_BYTES - incomingBytes) return;
+            }
+            File[] left = directory.listFiles((parent, name) -> name.endsWith(".dat"));
+            if (left == null) return;
+            count = left.length;
+            occupied = 0;
+            for (File file : left) occupied += file.length();
+            for (File file : left) {
+                String name = file.getName();
+                if (name.length() != 68) continue;
+                String hash = name.substring(0, 64);
+                if (store.isFileIndexed(hash)) continue;
+                long size = file.length();
+                if (!file.delete() && file.isFile()) continue;
+                count--;
+                occupied -= size;
+                if (count < MAX_FILES && occupied <= MAX_TOTAL_BYTES - incomingBytes) return;
+            }
+        }
+    }
+
+
 
     private static void syncDirectory(File directory) throws Exception {
         if (!directory.isDirectory()) throw new IllegalStateException("HISTORY_DIRECTORY_UNAVAILABLE");

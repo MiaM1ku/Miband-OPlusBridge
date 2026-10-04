@@ -11,8 +11,8 @@ android {
         applicationId 'io.github.miam1ku.mibandoplusbridge'
         minSdk 36
         targetSdk 36
-        versionCode 49
-        versionName '1.4.3'
+        versionCode 50
+        versionName '1.4.4'
     }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
