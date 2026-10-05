@@ -11,15 +11,15 @@ import io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd;
 public final class OHealthDndHook {
     public static final String ACTION = "io.github.miam1ku.mibandoplusbridge.action.SET_DND";
     public static final String PERMISSION = "io.github.miam1ku.mibandoplusbridge.permission.SET_DND";
+    private static final String BRIDGE = "io.github.miam1ku.mibandoplusbridge";
 
     private OHealthDndHook() {}
 
     public static void install(Context context) {
         IntentFilter filter = new IntentFilter(ACTION);
-        filter.setPriority(999);
-        context.getApplicationContext().registerReceiver(new BroadcastReceiver() {
+        context.registerReceiver(new BroadcastReceiver() {
             @Override public void onReceive(Context ctx, Intent intent) {
-                if (intent == null || !ACTION.equals(intent.getAction())) return;
+                if (intent == null || !ACTION.equals(intent.getAction()) || !fromBridge(ctx, getSentFromUid())) return;
                 PhoneDnd.Attempt attempt = PhoneDnd.apply(ctx, intent.getBooleanExtra("on", false));
                 if (attempt.applied()) {
                     setResultCode(1);
@@ -31,5 +31,13 @@ public final class OHealthDndHook {
                         + " process=" + android.app.Application.getProcessName());
             }
         }, filter, PERMISSION, null, Context.RECEIVER_EXPORTED);
+        OHealthDeviceHook.traceLine(context, "DND_HOST_READY process=" + android.app.Application.getProcessName());
+    }
+
+    private static boolean fromBridge(Context context, int uid) {
+        String[] packages = context.getPackageManager().getPackagesForUid(uid);
+        if (packages == null) return false;
+        for (String pkg : packages) if (BRIDGE.equals(pkg)) return true;
+        return false;
     }
 }

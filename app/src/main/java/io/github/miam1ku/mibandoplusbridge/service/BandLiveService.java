@@ -98,6 +98,10 @@ public final class BandLiveService extends Service {
     private long dndSyncAtNanos;
     private final Object dndSyncLock = new Object();
     private final Runnable dndRulesAgain = this::sendDndRulesAgain;
+    private volatile boolean dndPushPhone;
+    private volatile boolean dndBandKnown;
+    private volatile boolean dndBandOn;
+    private final java.util.concurrent.atomic.AtomicBoolean dndAdopted = new java.util.concurrent.atomic.AtomicBoolean();
     private static volatile nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto.Command lastMusic;
     private final io.github.miam1ku.mibandoplusbridge.notify.SleepMusic sleepMusic =
             new io.github.miam1ku.mibandoplusbridge.notify.SleepMusic();
@@ -748,6 +752,8 @@ public final class BandLiveService extends Service {
                         if (command.getType() == 2) {
                             io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(BandLiveService.this,
                                     describeSystem(command));
+                            noteBandRules(command);
+                            if (command.getSubtype() == 109) adoptStoredBand();
                             applyBandManual(command);
                             noteSleep(command);
                         } else if (command.getType() == 7 || command.getType() == 18) {
@@ -1010,9 +1016,11 @@ public final class BandLiveService extends Service {
         long now = System.nanoTime();
         synchronized (dndSyncLock) {
             long elapsed = dndSyncAtNanos == 0 ? -1 : now - dndSyncAtNanos;
+            boolean phoneChanged = lastDndFilter != Integer.MIN_VALUE && lastDndFilter != filter;
             if (io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.repeatSync(lastDndFilter, elapsed, filter)) {
                 return;
             }
+            dndPushPhone = phoneChanged;
             lastDndFilter = filter;
             dndSyncAtNanos = now;
         }
@@ -1031,17 +1039,32 @@ public final class BandLiveService extends Service {
     }
 
     private void sendDndFollowup() {
+        pushDndState(false);
+    }
+
+    private void pushDndState(boolean resend) {
         var queue = commands;
         if (stopRequested || queue == null) return;
+        boolean phoneOn = io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.blocksNotifications(
+                io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.currentFilter(this));
+        if (!io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.sendPhoneRule(
+                dndPushPhone, phoneOn, dndBandKnown, dndBandOn)) {
+            io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this, "DND_HOLD phone=" + phoneOn
+                    + " changed=" + dndPushPhone + " bandKnown=" + dndBandKnown + " band=" + dndBandOn);
+            if (!resend) sendQuietly(queue, io.github.miam1ku.mibandoplusbridge.protocol.BandDndCommand.queryRules());
+            return;
+        }
         lastDndSentNanos = System.nanoTime();
-        int filter = io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.currentFilter(this);
-        boolean on = io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.blocksNotifications(filter);
         int activatedAt = io.github.miam1ku.mibandoplusbridge.protocol.BandDndCommand.activatedAt(
                 System.currentTimeMillis());
-        sendQuietly(queue, io.github.miam1ku.mibandoplusbridge.protocol.BandDndCommand.state(on));
-        sendQuietly(queue, io.github.miam1ku.mibandoplusbridge.protocol.BandDndCommand.phoneSilent(on));
+        sendQuietly(queue, io.github.miam1ku.mibandoplusbridge.protocol.BandDndCommand.state(phoneOn));
+        sendQuietly(queue, io.github.miam1ku.mibandoplusbridge.protocol.BandDndCommand.phoneSilent(phoneOn));
+        sendQuietly(queue, io.github.miam1ku.mibandoplusbridge.protocol.BandDndCommand.phoneRules(phoneOn, activatedAt));
+        if (resend) {
+            sendQuietly(queue, io.github.miam1ku.mibandoplusbridge.protocol.BandDndCommand.queryRules());
+            return;
+        }
         sendQuietly(queue, io.github.miam1ku.mibandoplusbridge.protocol.BandDndCommand.queryRules());
-        sendQuietly(queue, io.github.miam1ku.mibandoplusbridge.protocol.BandDndCommand.phoneRules(on, activatedAt));
         main.removeCallbacks(dndRulesAgain);
         main.postDelayed(dndRulesAgain, 2000);
     }
@@ -1082,7 +1105,10 @@ public final class BandLiveService extends Service {
         if (!io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.acceptBandManual(
                 bandOn, io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.currentFilter(this),
                 lastDndSentNanos, System.nanoTime())) return;
-        boolean on = bandOn;
+        requestPhoneDnd(bandOn);
+    }
+
+    private void requestPhoneDnd(boolean on) {
         main.post(() -> {
             if (!io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.acceptBandManual(
                     on, io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.currentFilter(this),
@@ -1171,16 +1197,22 @@ public final class BandLiveService extends Service {
     }
 
     private void sendDndRulesAgain() {
-        var queue = commands;
-        if (stopRequested || queue == null) return;
-        lastDndSentNanos = System.nanoTime();
-        int filter = io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.currentFilter(this);
-        boolean on = io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.blocksNotifications(filter);
-        sendQuietly(queue, io.github.miam1ku.mibandoplusbridge.protocol.BandDndCommand.phoneRules(
-                on, io.github.miam1ku.mibandoplusbridge.protocol.BandDndCommand.activatedAt(
-                        System.currentTimeMillis())));
-        sendQuietly(queue, io.github.miam1ku.mibandoplusbridge.protocol.BandDndCommand.phoneSilent(on));
-        sendQuietly(queue, io.github.miam1ku.mibandoplusbridge.protocol.BandDndCommand.queryRules());
+        pushDndState(true);
+    }
+
+    private void noteBandRules(nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto.Command command) {
+        Boolean on = io.github.miam1ku.mibandoplusbridge.protocol.BandDndCommand.manualState(command);
+        if (on == null) return;
+        dndBandKnown = true;
+        dndBandOn = on;
+    }
+
+    private void adoptStoredBand() {
+        if (dndPushPhone || !dndBandKnown) return;
+        boolean phoneOn = io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.blocksNotifications(
+                io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.currentFilter(this));
+        if (dndBandOn == phoneOn || !dndAdopted.compareAndSet(false, true)) return;
+        requestPhoneDnd(dndBandOn);
     }
 
     private static void sendQuietly(

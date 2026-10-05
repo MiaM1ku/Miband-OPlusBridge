@@ -14,8 +14,10 @@ public final class OwnershipShellQuoteTest {
         assertEquals("'id -u'", OwnershipController.shellQuote("id -u"));
     }
 
-    @Test public void zenCommandIsOnlyTheGlobalSwitch() {
-        assertEquals("settings put global zen_mode 0", OwnershipController.zenCommand(false));
-        assertEquals("settings put global zen_mode 1", OwnershipController.zenCommand(true));
+    @Test public void zenCommandUsesTheNotificationService() {
+        assertEquals("cmd notification set_dnd off", OwnershipController.zenCommand(false));
+        assertEquals("cmd notification set_dnd priority", OwnershipController.zenCommand(true));
+        assertEquals("cmd notification allow_dnd io.github.miam1ku.mibandoplusbridge",
+                OwnershipController.allowDndCommand());
     }
 }

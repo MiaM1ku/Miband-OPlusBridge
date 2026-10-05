@@ -115,6 +115,17 @@ public final class PhoneDnd {
     /** 0 off, 1 priority. Matches the zen values this phone reports when the tile moves. */
     public static int zenMode(boolean on) { return on ? 1 : 0; }
 
+    /**
+     * A phone toggle may overwrite the band. A connect or a failed write must not
+     * push the phone's old state over a band that is already the other way.
+     */
+    public static boolean sendPhoneRule(boolean phoneChanged, boolean phoneOn,
+            boolean bandKnown, boolean bandOn) {
+        if (phoneChanged) return true;
+        if (!bandKnown) return false;
+        return bandOn == phoneOn;
+    }
+
     private static boolean writeZen(Context context, boolean on) {
         try {
             return android.provider.Settings.Global.putInt(

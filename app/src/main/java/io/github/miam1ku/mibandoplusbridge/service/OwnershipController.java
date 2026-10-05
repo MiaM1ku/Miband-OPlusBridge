@@ -221,12 +221,19 @@ public final class OwnershipController {
     }
 
 
-    /** Only the two zen values this phone's tile writes. */
+    /** Shell uid is allowed to call this. settings put global zen_mode is reverted by ColorOS. */
     static String zenCommand(boolean on) {
-        return "settings put global zen_mode " + (on ? "1" : "0");
+        return "cmd notification set_dnd " + (on ? "priority" : "off");
+    }
+
+    static String allowDndCommand() {
+        return "cmd notification allow_dnd io.github.miam1ku.mibandoplusbridge";
     }
 
     static boolean setZenMode(boolean on) {
+        try {
+            execute(allowDndCommand(), 8);
+        } catch (Failure ignored) { }
         try {
             execute(zenCommand(on), 8);
             return true;

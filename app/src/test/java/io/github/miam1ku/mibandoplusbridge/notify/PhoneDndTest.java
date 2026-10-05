@@ -44,4 +44,12 @@ public final class PhoneDndTest {
         assertEquals(0, PhoneDnd.zenMode(false));
         assertEquals(1, PhoneDnd.zenMode(true));
     }
+
+    @Test public void unchangedPhoneDoesNotOverwriteADifferentBand() {
+        assertFalse(PhoneDnd.sendPhoneRule(false, false, false, true));
+        assertFalse(PhoneDnd.sendPhoneRule(false, false, true, true));
+        assertTrue(PhoneDnd.sendPhoneRule(false, false, true, false));
+        assertTrue(PhoneDnd.sendPhoneRule(true, false, true, true));
+        assertTrue(PhoneDnd.sendPhoneRule(true, true, false, false));
+    }
 }
