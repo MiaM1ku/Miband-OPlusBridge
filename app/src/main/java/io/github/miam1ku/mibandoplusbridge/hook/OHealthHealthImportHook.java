@@ -98,6 +98,7 @@ public final class OHealthHealthImportHook {
         }
         OHealthHealthImportHook hook = new OHealthHealthImportHook(context, contract, sleepWriter, stepWriter);
         hook.observe();
+        hook.keepStoredAccount();
         installed = hook;
         hook.request();
     }
@@ -158,6 +159,7 @@ public final class OHealthHealthImportHook {
             Object manager = accounts.getMethod("getAccountManager").invoke(null);
             boolean system = manager != null && Boolean.TRUE.equals(
                     manager.getClass().getMethod("isSystemLogin").invoke(manager));
+            boolean storedLogin = accountStillSigned();
             Class<?> prefsType = Class.forName("com.heytap.health.base.sp.SPUtils", false, loader);
             Object prefs = prefsType.getMethod("getInstance").invoke(null);
             String stored = String.valueOf(prefs.getClass().getMethod("getString", String.class)
@@ -165,19 +167,71 @@ public final class OHealthHealthImportHook {
             boolean placeholder = stored.isBlank() || "com.heytap.health".equals(stored) || "null".equals(stored);
             Class<?> status = Class.forName("com.heytap.health.base.tourist.TouristStatus", false, loader);
             boolean agreed = Boolean.TRUE.equals(status.getMethod("hasAgreeHealth").invoke(null));
-            Log.i("OplusBandBridge", "OHEALTH_ACCOUNT_RESTORE_CHECK guest=" + guest
-                    + " system=" + system + " placeholder=" + placeholder + " agreed=" + agreed);
-            // Without the health agreement, setIsInTouristMode(false) is forced back to true
-            // and rewrites user_ssoid to the package name.
-            if (!system || !agreed || (!guest && !placeholder)) return;
+            String check = "OHEALTH_ACCOUNT_RESTORE_CHECK guest=" + guest
+                    + " system=" + system + " stored=" + storedLogin
+                    + " placeholder=" + placeholder + " agreed=" + agreed;
+            Log.i("OplusBandBridge", check);
+            OHealthDeviceHook.traceLine(context, check);
+            // isSystemLogin is false until the account SDK initializes, even when the last
+            // session was signed in. Without the health agreement, set(false) is forced back
+            // to true and rewrites user_ssoid to the package name.
+            if (!(system || storedLogin) || !agreed || (!guest && !placeholder)) return;
             tourist.getMethod("setIsInTouristMode", boolean.class).invoke(null, false);
-            manager.getClass().getMethod("cacheAccountInfo", boolean.class).invoke(manager, true);
+            if (manager != null) {
+                manager.getClass().getMethod("cacheAccountInfo", boolean.class).invoke(manager, true);
+            }
             Log.i("OplusBandBridge", "OHEALTH_ACCOUNT_RESTORED");
+            OHealthDeviceHook.traceLine(context, "OHEALTH_ACCOUNT_RESTORED");
         } catch (Throwable failure) {
             Throwable cause = failure.getCause() == null ? failure : failure.getCause();
             Log.i("OplusBandBridge", "OHEALTH_ACCOUNT_RESTORE_FAILED " + cause.getClass().getSimpleName());
         }
     }
+    /**
+     * LoginCheckStage writes tourist mode when the SDK is not initialized yet.
+     * Ignore that write when the stored account is still real. Do not call back
+     * into the setter from here.
+     */
+    private void keepStoredAccount() {
+        try {
+            Class<?> helper = Class.forName(
+                    "com.heytap.health.base.tourist.TouristHelper", false, host.loader);
+            Class<?> status = Class.forName(
+                    "com.heytap.health.base.tourist.TouristStatus", false, host.loader);
+            XC_MethodHook keep = new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam param) {
+                    if (param.args.length == 0 || !Boolean.TRUE.equals(param.args[0])) return;
+                    if (!accountStillSigned()) return;
+                    param.setResult(null);
+                    Log.i("OplusBandBridge", "OHEALTH_ACCOUNT_TOURIST_IGNORED");
+                    OHealthDeviceHook.traceLine(context, "OHEALTH_ACCOUNT_TOURIST_IGNORED");
+                }
+            };
+            XposedBridge.hookAllMethods(helper, "setIsInTouristMode", keep);
+            XposedBridge.hookAllMethods(status, "setIsInTouristMode", keep);
+        } catch (Throwable failure) {
+            Log.i("OplusBandBridge", "OHEALTH_ACCOUNT_GUARD_FAILED "
+                    + failure.getClass().getSimpleName());
+        }
+    }
+
+    /** Last session's login flag or SSO. Does not call isSystemLogin. */
+    private boolean accountStillSigned() {
+        try {
+            Class<?> prefsType = Class.forName("com.heytap.health.base.sp.SPUtils", false, host.loader);
+            Object prefs = prefsType.getMethod("getInstance").invoke(null);
+            boolean login = Boolean.TRUE.equals(prefs.getClass()
+                    .getMethod("getBoolean", String.class, boolean.class)
+                    .invoke(prefs, "login_status", false));
+            String stored = String.valueOf(prefs.getClass().getMethod("getString", String.class)
+                    .invoke(prefs, "user_ssoid"));
+            boolean placeholder = stored.isBlank() || "com.heytap.health".equals(stored) || "null".equals(stored);
+            return login || !placeholder;
+        } catch (Throwable failure) {
+            return false;
+        }
+    }
+
     private void request() {
         if (scheduled.compareAndSet(false, true)) worker.post(work);
     }

@@ -213,7 +213,10 @@ public final class OHealthDeviceHook {
             });
             // The first provider call often races process start. A miss used to leave the device tab empty.
             boolean giveUp = result == null && snapshotAttempts >= 14;
-            if (!snapshotTraced && (result != null || giveUp)) {
+            boolean nowRegistered = result != null && result.getBoolean("registered");
+            Bundle shownNow = snapshot;
+            boolean wasRegistered = shownNow != null && shownNow.getBoolean("registered", false);
+            if ((!snapshotTraced && (result != null || giveUp)) || (result != null && nowRegistered != wasRegistered)) {
                 snapshotTraced = true;
                 trace(result == null ? "OHEALTH_DEVICE_SNAPSHOT missing"
                         : "OHEALTH_DEVICE_SNAPSHOT registered=" + result.getBoolean("registered")
@@ -248,6 +251,9 @@ public final class OHealthDeviceHook {
             if (result == null || !(result.get("registered") instanceof Boolean)) return null;
             if (result.getBoolean("registered") && (result.getString("deviceId", "").isBlank()
                     || result.getString("mac", "").isBlank() || result.getString("name", "").isBlank())) return null;
+            // An empty state file is not an unregister. Unregister keeps the MAC and device id.
+            if (!result.getBoolean("registered") && result.getString("deviceId", "").isBlank()
+                    && result.getString("mac", "").isBlank()) return null;
             return new Bundle(result);
         } catch (Throwable failure) {
             String detail = failure.getMessage() == null ? "" : failure.getMessage();
