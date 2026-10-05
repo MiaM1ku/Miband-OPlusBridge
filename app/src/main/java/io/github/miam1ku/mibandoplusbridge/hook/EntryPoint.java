@@ -152,7 +152,7 @@ public final class EntryPoint implements IXposedHookLoadPackage {
             android.util.Log.i("OplusBandBridge", "OHEALTH_HOME_METRIC_HOOK_UNAVAILABLE");
         }
         try {
-            OHealthNotificationAccessHook.install(loader);
+            OHealthNotificationAccessHook.install(context, loader);
             android.util.Log.i("OplusBandBridge", "OHEALTH_NOTIFICATION_ACCESS_HOOK_INSTALLED");
         } catch (Throwable incompatible) {
             android.util.Log.i("OplusBandBridge", "OHEALTH_NOTIFICATION_ACCESS_HOOK_UNAVAILABLE");
