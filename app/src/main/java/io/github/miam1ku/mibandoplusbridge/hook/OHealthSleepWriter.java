@@ -25,7 +25,7 @@ final class OHealthSleepWriter {
     private final Class<?> statClass;
     private final Constructor<?> sleepNew;
     private final Constructor<?> statNew;
-    private final Method sleepAccount, sleepDevice, sleepStart, sleepEnd, sleepState, sleepType, sleepDisplay;
+    private final Method sleepAccount, sleepDevice, sleepStart, sleepEnd, sleepState, sleepDisplay;
     private final Method sleepGetDevice, sleepGetStart, sleepGetEnd, sleepGetState;
     private final Method statAccount, statDevice, statDate, statFall, statWake, statSleep, statDeep, statLight,
             statRem, statAwake;
@@ -44,7 +44,6 @@ final class OHealthSleepWriter {
         sleepStart = sleepClass.getMethod("setStartTimestamp", long.class);
         sleepEnd = sleepClass.getMethod("setEndTimestamp", long.class);
         sleepState = sleepClass.getMethod("setSleepState", int.class);
-        sleepType = sleepClass.getMethod("setSleepType", int.class);
         sleepDisplay = sleepClass.getMethod("setDisplay", int.class);
         sleepGetDevice = getter(sleepClass, "getDeviceUniqueId", String.class);
         sleepGetStart = getter(sleepClass, "getStartTimestamp", long.class);
@@ -80,8 +79,9 @@ final class OHealthSleepWriter {
         if (band == null || band.getString("deviceId", "").isBlank()) {
             throw new IllegalStateException("SLEEP_DEVICE_NOT_READY");
         }
-        String device = band.getString("deviceId", "");
-        List<HealthRecord> records = history(context, account, device);
+        String queued = band.getString("deviceId", "");
+        String device = OHealthDeviceHook.healthId(queued);
+        List<HealthRecord> records = history(context, account, queued);
         List<OHealthSleepPlan.Night> nights = OHealthSleepPlan.nights(records);
         if (nights.isEmpty()) return;
         nights.sort(Comparator.comparingInt(OHealthSleepPlan.Night::date)
@@ -93,8 +93,16 @@ final class OHealthSleepWriter {
         int held = 0;
         for (OHealthSleepPlan.Night night : nights) {
             if (!account.equals(host.account())) throw new SecurityException("IMPORT_ACCOUNT_CHANGED");
+            if (!queued.equals(device)) {
+                try {
+                    host.deleteRows(api, TABLE_SLEEP, account, queued, night.fallAsleepMs(), night.wakeMs());
+                } catch (RuntimeException ignored) {
+                    Log.i("OplusBandBridge", "OHEALTH_SLEEP_PREVIOUS_DEVICE_KEPT date=" + night.date());
+                }
+            }
             try {
-                String skip = writeNight(api, account, device, night);
+                String skip = writeNight(api, account, device, night,
+                        OHealthSleepPlan.summary(nights, night));
                 if (skip == null) inserted++;
                 else {
                     skipped++;
@@ -114,8 +122,8 @@ final class OHealthSleepWriter {
     }
 
     /** @return null when the night was written; otherwise {@code other-device} or {@code already-ours}. */
-    private String writeNight(Object api, String account, String device, OHealthSleepPlan.Night night)
-            throws Exception {
+    private String writeNight(Object api, String account, String device, OHealthSleepPlan.Night night,
+            boolean summary) throws Exception {
         long statStart = night.dayStartMs();
         long statEnd = night.dayEndMs() + 1;
         List<?> stats = host.readRows(api, account, TABLE_STAT, null, statStart, statEnd, 4, false);
@@ -123,19 +131,11 @@ final class OHealthSleepWriter {
         List<?> existing = host.readRows(api, account, TABLE_SLEEP, device, night.dayStartMs(),
                 night.dayEndMs(), 0, true);
         boolean sameSegments = segmentsMatch(existing, device, night);
-        boolean sameStat = statMatches(stats, device, night);
+        boolean sameStat = !summary || statMatches(stats, device, night);
         if (sameSegments && sameStat) return "already-ours";
         if (!sameSegments) {
-            // The 20:00 window is not what confirms. Delete the chosen session plus every
-            // in-day row. SleepStore.delete is a no-op; the data service performs this delete.
-            long delStart = night.fallAsleepMs();
-            long coveredEnd = night.wakeMs();
-            for (Object row : existing) {
-                if (!startsInDay(row, device, night)) continue;
-                delStart = Math.min(delStart, (Long) sleepGetStart.invoke(row));
-                coveredEnd = Math.max(coveredEnd, (Long) sleepGetEnd.invoke(row));
-            }
-            host.deleteRows(api, TABLE_SLEEP, account, device, delStart, coveredEnd + 1);
+            // Delete only this session. A nap later the same day stays in the table.
+            host.deleteRows(api, TABLE_SLEEP, account, device, night.fallAsleepMs(), night.wakeMs());
             insertSegments(api, account, device, night.segments());
             existing = host.readRows(api, account, TABLE_SLEEP, device, night.dayStartMs(),
                     night.dayEndMs(), 0, true);
@@ -143,7 +143,7 @@ final class OHealthSleepWriter {
                 boolean[] kept = new boolean[night.segments().size()];
                 List<OHealthSleepPlan.Segment> segments = night.segments();
                 for (Object row : existing) {
-                    if (!startsInDay(row, device, night)) continue;
+                    if (!overlapsSession(row, device, night)) continue;
                     int match = unusedSegment(row, device, segments, kept);
                     if (match >= 0) {
                         kept[match] = true;
@@ -165,7 +165,7 @@ final class OHealthSleepWriter {
                 }
             }
         }
-        if (!sameStat) {
+        if (summary && !statMatches(stats, device, night)) {
             // SleepDataStat is keyed by account and date, so a later insert replaces the frozen summary.
             host.insertRows(api, TABLE_STAT, List.of(statRow(account, device, night)));
             List<?> written = host.readRows(api, account, TABLE_STAT, device, statStart, statEnd, 4, false);
@@ -208,7 +208,6 @@ final class OHealthSleepWriter {
         sleepStart.invoke(row, segment.startMs());
         sleepEnd.invoke(row, segment.endMs());
         sleepState.invoke(row, segment.sleepState());
-        sleepType.invoke(row, chartType(segment.sleepState()));
         sleepDisplay.invoke(row, 1);
         return row;
     }
@@ -261,7 +260,7 @@ final class OHealthSleepWriter {
             if (!found) return false;
         }
         for (int i = 0; i < rows.size(); i++) {
-            if (used[i] || !startsInDay(rows.get(i), device, night)) continue;
+            if (used[i] || !overlapsSession(rows.get(i), device, night)) continue;
             return false;
         }
         return true;
@@ -275,12 +274,13 @@ final class OHealthSleepWriter {
                 && segment.sleepState() == (Integer) sleepGetState.invoke(row);
     }
 
-    /** A row whose start sits in this sleep-day. A session that only overlaps from the day before stays. */
-    private boolean startsInDay(Object row, String device, OHealthSleepPlan.Night night)
+    /** A row that meets this session. Another session the same day is left in place. */
+    private boolean overlapsSession(Object row, String device, OHealthSleepPlan.Night night)
             throws ReflectiveOperationException {
         if (!sleepClass.isInstance(row) || !device.equals(sleepGetDevice.invoke(row))) return false;
         long start = (Long) sleepGetStart.invoke(row);
-        return start >= night.dayStartMs() && start < night.dayEndMs();
+        long end = (Long) sleepGetEnd.invoke(row);
+        return start < night.wakeMs() && end > night.fallAsleepMs();
     }
 
     private boolean statMatches(List<?> rows, String device, OHealthSleepPlan.Night night)
@@ -307,16 +307,6 @@ final class OHealthSleepWriter {
             if (owner != null && !owner.isBlank() && !device.equals(owner)) return true;
         }
         return false;
-    }
-
-    private static int chartType(int sleepState) {
-        return switch (sleepState) {
-            case OHealthSleepPlan.DEEP -> 1;
-            case OHealthSleepPlan.REM -> 3;
-            case OHealthSleepPlan.LIGHT -> 2;
-            case OHealthSleepPlan.AWAKE -> 4;
-            default -> throw new IllegalArgumentException("SLEEP_STATE_UNMAPPED");
-        };
     }
 
     private static Method getter(Class<?> type, String name, Class<?> returnType) throws NoSuchMethodException {

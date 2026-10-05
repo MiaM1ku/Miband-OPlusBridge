@@ -32,6 +32,7 @@ public final class OHealthDeviceHook {
     private static final String CONSTANTS = "com.heytap.health.device_manager_base.DeviceConstants";
 
     private static volatile Bundle snapshot;
+    private static volatile String remembered;
     private static int snapshotAttempts;
     private static boolean snapshotTraced;
 
@@ -135,6 +136,46 @@ public final class OHealthDeviceHook {
     public static Bundle registeredSnapshot() {
         Bundle shown = display();
         return shown == null ? null : new Bundle(shown);
+    }
+
+    /**
+     * Official rows use the Bluetooth MAC as deviceUniqueId.
+     * The bridge queue keeps the miband11 id.
+     */
+    public static String healthId(String bridgeId) {
+        Bundle band = registeredSnapshot();
+        if (band == null || bridgeId == null) return bridgeId;
+        String mac = band.getString("mac", "");
+        String id = band.getString("deviceId", "");
+        if (mac.isBlank() || id.isBlank() || !id.equals(bridgeId)) return bridgeId;
+        return mac;
+    }
+
+    /** Writes this band into the account's bound-device list. The list stays after the module stops. */
+    public static void rememberBand(ClassLoader loader) {
+        Bundle shown = registeredSnapshot();
+        if (shown == null || loader == null) return;
+        String mac = shown.getString("mac", "");
+        if (mac.isBlank()) return;
+        try {
+            Class<?> accounts = Class.forName("com.heytap.health.account.AccountHelper", false, loader);
+            Object manager = accounts.getMethod("getAccountManager").invoke(null);
+            String ssoid = String.valueOf(manager.getClass().getMethod("getSsoid").invoke(manager));
+            if (ssoid.isBlank() || "com.heytap.health".equals(ssoid) || "null".equals(ssoid)) return;
+            String key = ssoid + "|" + mac;
+            if (key.equals(remembered)) return;
+            Object info = deviceInfo(loader, shown);
+            if (info == null) return;
+            Class<?> local = Class.forName(
+                    "com.heytap.health.devicemanagerimpl.processor.DMLocalDeviceManager", false, loader);
+            Object instance = local.getField("INSTANCE").get(null);
+            local.getMethod("saveUserBoundDevice", info.getClass()).invoke(instance, info);
+            remembered = key;
+            Log.i("OplusBandBridge", "OHEALTH_DEVICE_REMEMBERED");
+        } catch (Throwable failure) {
+            Log.i("OplusBandBridge", "OHEALTH_DEVICE_REMEMBER_FAILED "
+                    + failure.getClass().getSimpleName());
+        }
     }
 
     /** True when the health app's current or third-party selection is this band. */
@@ -308,8 +349,10 @@ public final class OHealthDeviceHook {
             return null;
         }
         Object info = XposedHelpers.newInstance(XposedHelpers.findClass(INFO, loader));
-        XposedHelpers.callMethod(info, "setMac", display.getString("mac"));
-        XposedHelpers.callMethod(info, "setDeviceUniqueId", display.getString("deviceId"));
+        String mac = display.getString("mac", "");
+        XposedHelpers.callMethod(info, "setMac", mac);
+        XposedHelpers.callMethod(info, "setDeviceUniqueId", mac.isBlank()
+                ? display.getString("deviceId") : mac);
         XposedHelpers.callMethod(info, "setModel", model);
         XposedHelpers.callMethod(info, "setDeviceType", type);
         XposedHelpers.callMethod(info, "setManufacturer", "OPPO");

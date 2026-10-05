@@ -9,13 +9,17 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 
-/** One band session per host sleep-day. A later nap is not glued onto that axis. */
+/**
+ * Every band session on a sleep-day is kept. OHealth splits a later session off when the
+ * gap is at least two hours, and calls it a nap when that session is under 120 minutes.
+ */
 public final class OHealthSleepPlan {
-    /** Host Sleep.sleepState. SleepDataMapping turns these into the chart. */
+    /** Host Sleep.sleepState. SleepDataMapping turns 2/3/4 into deep/REM/light and every other state into wake. */
     public static final int DEEP = 2;
     public static final int REM = 3;
     public static final int LIGHT = 4;
-    public static final int AWAKE = 1;
+    /** Official short wake. Chart type 4; not a counted sleep minute. */
+    public static final int AWAKE = 5;
 
     public record Segment(long startMs, long endMs, int sleepState) {}
 
@@ -44,11 +48,10 @@ public final class OHealthSleepPlan {
     }
 
     /**
-     * The host chart runs from fall-asleep to wake, so two sessions on one date leave a hole
-     * that looks like one broken night. Keep the longer session. Clear from {@code dayStartMs}
-     * (20:00, or earlier when the session began before then) through {@code dayEndMs}.
-     * An interval with no stages is one light bar. That bar does not claim deep sleep or REM.
-     * Stages that share a minute are trimmed to one partition, so deep and light are not stacked.
+     * A session that begins before 20:00 extends its own clear window back to that start.
+     * Another session on the same date does not. An interval with no stages is one light bar.
+     * That bar does not claim deep sleep or REM. Stages that share a minute are trimmed to
+     * one partition, so deep and light are not stacked.
      */
     public static List<Night> nights(List<HealthRecord> records) {
         List<HealthRecord> intervals = new ArrayList<>();
@@ -82,13 +85,9 @@ public final class OHealthSleepPlan {
         }
         List<Night> nights = new ArrayList<>();
         for (int i = 0; i < sessions.size(); i++) {
-            if (!chosen(sessions, i)) continue;
             Session session = sessions.get(i);
             long[] window = sleepDayWindow(session.date, session.zone);
-            long purgeStart = window[0];
-            for (Session other : sessions) {
-                if (other.date == session.date) purgeStart = Math.min(purgeStart, other.fall);
-            }
+            long purgeStart = Math.min(window[0], session.fall);
             List<Segment> flat = flatten(session.segments);
             Count counted = count(flat);
             nights.add(new Night(session.date, session.fall, session.wake, counted.sleep, counted.deep,
@@ -99,15 +98,17 @@ public final class OHealthSleepPlan {
         return nights;
     }
 
-    private static boolean chosen(List<Session> sessions, int index) {
-        Session session = sessions.get(index);
-        for (int i = 0; i < sessions.size(); i++) {
-            if (i == index) continue;
-            Session other = sessions.get(i);
-            if (other.date != session.date) continue;
-            if (other.sleep > session.sleep) return false;
-            if (other.sleep == session.sleep && other.fall < session.fall) return false;
-            if (other.sleep == session.sleep && other.fall == session.fall && i < index) return false;
+    /**
+     * The date summary is the longest session of at least 120 minutes.
+     * A shorter session is a nap and must not replace that summary.
+     */
+    public static boolean summary(List<Night> nights, Night night) {
+        if (night.sleepMinutes() < 120) return false;
+        for (Night other : nights) {
+            if (other.date() != night.date() || other == night) continue;
+            if (other.sleepMinutes() > night.sleepMinutes()) return false;
+            if (other.sleepMinutes() == night.sleepMinutes()
+                    && other.fallAsleepMs() < night.fallAsleepMs()) return false;
         }
         return true;
     }

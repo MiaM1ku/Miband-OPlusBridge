@@ -53,7 +53,6 @@ public final class OHealthHealthImportHook {
     private final AtomicReference<Object> observedApi = new AtomicReference<>();
     private final AtomicLong accountEpoch = new AtomicLong();
     private long retryAfter;
-    private final ThreadLocal<Boolean> blockingTourist = ThreadLocal.withInitial(() -> false);
     private boolean stressZerosCleared;
     private String lastFailure;
     private final Runnable work = this::runScheduled;
@@ -99,7 +98,6 @@ public final class OHealthHealthImportHook {
         }
         OHealthHealthImportHook hook = new OHealthHealthImportHook(context, contract, sleepWriter, stepWriter);
         hook.observe();
-        hook.keepSystemAccount();
         installed = hook;
         hook.request();
     }
@@ -139,6 +137,8 @@ public final class OHealthHealthImportHook {
                 Handler main = new Handler(android.os.Looper.getMainLooper());
                 main.postDelayed(OHealthHealthImportHook.this::restoreSystemAccount, 2_000);
                 main.postDelayed(OHealthHealthImportHook.this::restoreSystemAccount, 8_000);
+                main.postDelayed(OHealthHealthImportHook.this::restoreSystemAccount, 20_000);
+                main.postDelayed(OHealthHealthImportHook.this::restoreSystemAccount, 45_000);
                 request();
             }
         });
@@ -163,9 +163,13 @@ public final class OHealthHealthImportHook {
             String stored = String.valueOf(prefs.getClass().getMethod("getString", String.class)
                     .invoke(prefs, "user_ssoid"));
             boolean placeholder = stored.isBlank() || "com.heytap.health".equals(stored) || "null".equals(stored);
+            Class<?> status = Class.forName("com.heytap.health.base.tourist.TouristStatus", false, loader);
+            boolean agreed = Boolean.TRUE.equals(status.getMethod("hasAgreeHealth").invoke(null));
             Log.i("OplusBandBridge", "OHEALTH_ACCOUNT_RESTORE_CHECK guest=" + guest
-                    + " system=" + system + " placeholder=" + placeholder);
-            if (!system || (!guest && !placeholder)) return;
+                    + " system=" + system + " placeholder=" + placeholder + " agreed=" + agreed);
+            // Without the health agreement, setIsInTouristMode(false) is forced back to true
+            // and rewrites user_ssoid to the package name.
+            if (!system || !agreed || (!guest && !placeholder)) return;
             tourist.getMethod("setIsInTouristMode", boolean.class).invoke(null, false);
             manager.getClass().getMethod("cacheAccountInfo", boolean.class).invoke(manager, true);
             Log.i("OplusBandBridge", "OHEALTH_ACCOUNT_RESTORED");
@@ -174,50 +178,6 @@ public final class OHealthHealthImportHook {
             Log.i("OplusBandBridge", "OHEALTH_ACCOUNT_RESTORE_FAILED " + cause.getClass().getSimpleName());
         }
     }
-    private void keepSystemAccount() {
-        try {
-            Class<?> tourist = Class.forName(
-                    "com.heytap.health.base.tourist.TouristHelper", false, host.loader);
-            XposedBridge.hookAllMethods(tourist, "setIsInTouristMode", new XC_MethodHook() {
-                @Override protected void beforeHookedMethod(MethodHookParam param) {
-                    if (param.args.length == 0 || !Boolean.TRUE.equals(param.args[0])) return;
-                    if (Boolean.TRUE.equals(blockingTourist.get())) {
-                        param.setResult(null);
-                        return;
-                    }
-                    if (!systemLoggedIn()) return;
-                    param.setResult(null);
-                    blockingTourist.set(true);
-                    try {
-                        tourist.getMethod("setIsInTouristMode", boolean.class).invoke(null, false);
-                    } catch (Throwable failure) {
-                        Log.i("OplusBandBridge", "OHEALTH_ACCOUNT_RESTORE_FAILED "
-                                + failure.getClass().getSimpleName());
-                    } finally {
-                        blockingTourist.set(false);
-                    }
-                    Log.i("OplusBandBridge", "OHEALTH_ACCOUNT_TOURIST_BLOCKED");
-                }
-            });
-        } catch (Throwable failure) {
-            Log.i("OplusBandBridge", "OHEALTH_ACCOUNT_GUARD_FAILED "
-                    + failure.getClass().getSimpleName());
-        }
-    }
-
-    private boolean systemLoggedIn() {
-        try {
-            Class<?> accounts = Class.forName("com.heytap.health.account.AccountHelper", false, host.loader);
-            Object manager = accounts.getMethod("getAccountManager").invoke(null);
-            return manager != null && Boolean.TRUE.equals(
-                    manager.getClass().getMethod("isSystemLogin").invoke(manager));
-        } catch (Throwable failure) {
-            return false;
-        }
-    }
-
-
-
     private void request() {
         if (scheduled.compareAndSet(false, true)) worker.post(work);
     }
@@ -236,6 +196,7 @@ public final class OHealthHealthImportHook {
                 scheduleRetry(5_000);
                 return;
             }
+            OHealthDeviceHook.rememberBand(host.loader);
             if (sleep != null) {
                 try {
                     sleep.write(context);
@@ -286,7 +247,7 @@ public final class OHealthHealthImportHook {
         }
         int table = OHealthHealthModels.Kind.STRESS.table;
         for (int i = 0; i < starts.length; i++) {
-            host.deleteRows(api, table, account, devices[i], starts[i], ends[i]);
+            host.deleteRows(api, table, account, OHealthDeviceHook.healthId(devices[i]), starts[i], ends[i]);
         }
         if (starts.length > 0) host.syncCloud(api, table);
         Bundle forgotten = context.getContentResolver().call(HealthQueueProvider.URI,
@@ -441,6 +402,7 @@ public final class OHealthHealthImportHook {
                     requireAccount(account, epoch);
                     host.insert(api, option);
                     host.syncCloud(api, model.kind.table);
+                    forgetPreviousDevice(api, account, model.kind.table, records);
                     inserted = true;
                     requireAccount(account, epoch);
                     found = host.read(api, account, model, records);
@@ -469,6 +431,26 @@ public final class OHealthHealthImportHook {
             if (acknowledged == 0 && released == 0) throw new IllegalStateException("IMPORT_READBACK_INCOMPLETE");
         }
     }
+    /** Rows stored under the bridge id are not visible once the band is addressed by MAC. */
+    private void forgetPreviousDevice(Object api, String account, int table, List<HealthRecord> records)
+            throws Exception {
+        String previous = records.get(0).deviceId;
+        String stored = OHealthDeviceHook.healthId(previous);
+        if (previous == null || previous.equals(stored)) return;
+        long start = Long.MAX_VALUE;
+        long end = 0;
+        for (HealthRecord record : records) {
+            start = Math.min(start, record.startMs);
+            end = Math.max(end, record.startMs);
+        }
+        if (end < start) return;
+        try {
+            host.deleteRows(api, table, account, previous, Math.max(0, start - 1), end + 1);
+        } catch (RuntimeException ignored) {
+            Log.i("OplusBandBridge", "OHEALTH_PREVIOUS_DEVICE_KEPT table=" + table);
+        }
+    }
+
     /** Host keeps one visible row per account, timestamp and type. An insert merged into that minute is delivered. */
     private static boolean delivered(Set<OHealthHealthModels.Point> found, OHealthHealthModels.Point key,
             boolean inserted) {
@@ -674,10 +656,14 @@ public final class OHealthHealthImportHook {
             throw new NoSuchMethodException("CLOUD_SYNC_OPTION");
         }
 
+        /**
+         * DataHelper.syncInsertSportData on 6.9.40. Heart, sleep, oxygen and stress are
+         * not in this switch; the service insert starts WorkManager for those tables.
+         */
         private static int[] cloudRequest(int table) {
             return switch (table) {
                 case 1001, 1002 -> new int[]{1, 1};
-                case 1004, 1008, 1010, 1011, 1012, 1014, 1017 -> new int[]{1000, 0};
+                case 1004, 1012 -> new int[]{1000, 0};
                 case 1024 -> new int[]{13, 1};
                 case 1075 -> new int[]{18, 0};
                 case 1172, 1173, 1174, 1175, 1176, 1177 -> new int[]{17, 1};
@@ -758,7 +744,7 @@ public final class OHealthHealthImportHook {
             readStart.invoke(option, Math.max(0, start - 1));
             readEnd.invoke(option, end + 1);
             readTable.invoke(option, model.kind.table);
-            readDevice.invoke(option, records.get(0).deviceId);
+            readDevice.invoke(option, OHealthDeviceHook.healthId(records.get(0).deviceId));
             readType.invoke(option, -1);
             Object bean = awaitRead(read.invoke(api, option));
             if (!beanClass.isInstance(bean)) throw new IllegalStateException("IMPORT_READ_BEAN_TYPE");

@@ -84,7 +84,7 @@ final class OHealthHealthModels {
         int type = kind.type(record);
         Object model = constructor.newInstance();
         setAccount.invoke(model, account);
-        setDevice.invoke(model, record.deviceId);
+        setDevice.invoke(model, OHealthDeviceHook.healthId(record.deviceId));
         setTime.invoke(model, record.startMs);
         setDisplay.invoke(model, 1);
         setSync.invoke(model, 0);
@@ -98,7 +98,8 @@ final class OHealthHealthModels {
     record Point(String account, String device, long timestamp, int type, int value) { }
 
     Point key(String account, HealthRecord record) {
-        return new Point(account, record.deviceId, record.startMs, kind.type(record), record.value.intValue());
+        return new Point(account, OHealthDeviceHook.healthId(record.deviceId), record.startMs,
+                kind.type(record), record.value.intValue());
     }
 
     Point key(Object model) throws ReflectiveOperationException {

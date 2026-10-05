@@ -7,7 +7,9 @@ import java.time.ZonedDateTime;
 import java.util.List;
 import org.junit.Test;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertThrows;
+import static org.junit.Assert.assertTrue;
 
 public final class OHealthSleepPlanTest {
     private static final ZoneId ZONE = ZoneId.of("+08:00");
@@ -17,7 +19,7 @@ public final class OHealthSleepPlanTest {
         HealthRecord nap = interval("nap", at(2026, 9, 25, 13, 18), at(2026, 9, 25, 15, 23));
         HealthRecord late = interval("late", at(2026, 9, 25, 21, 0), at(2026, 9, 25, 22, 0));
         List<OHealthSleepPlan.Night> nights = OHealthSleepPlan.nights(List.of(nap, late, morning));
-        assertEquals(2, nights.size());
+        assertEquals(3, nights.size());
         OHealthSleepPlan.Night day = nights.get(0);
         assertEquals(20260925, day.date());
         assertEquals(morning.startMs, day.fallAsleepMs());
@@ -30,12 +32,19 @@ public final class OHealthSleepPlanTest {
         assertEquals(OHealthSleepPlan.LIGHT, day.segments().get(0).sleepState());
         assertEquals(at(2026, 9, 24, 20, 0), day.dayStartMs());
         assertEquals(at(2026, 9, 25, 20, 0), day.dayEndMs());
-        assertEquals(20260926, nights.get(1).date());
-        assertEquals(60, nights.get(1).sleepMinutes());
-        assertEquals(late.startMs, nights.get(1).fallAsleepMs());
+        assertTrue(OHealthSleepPlan.summary(nights, day));
+        OHealthSleepPlan.Night afternoon = nights.get(1);
+        assertEquals(20260925, afternoon.date());
+        assertEquals(nap.startMs, afternoon.fallAsleepMs());
+        assertEquals(125, afternoon.sleepMinutes());
+        assertFalse(OHealthSleepPlan.summary(nights, afternoon));
+        assertEquals(20260926, nights.get(2).date());
+        assertEquals(60, nights.get(2).sleepMinutes());
+        assertEquals(late.startMs, nights.get(2).fallAsleepMs());
+        assertFalse(OHealthSleepPlan.summary(nights, nights.get(2)));
     }
 
-    @Test public void stagedNightDropsTheLaterNap() {
+    @Test public void stagedNightKeepsTheLaterNap() {
         long start = at(2026, 9, 28, 2, 10);
         long wake = at(2026, 9, 28, 5, 57);
         HealthRecord night = interval("night", start, wake);
@@ -43,7 +52,7 @@ public final class OHealthSleepPlanTest {
         HealthRecord light = stage("light", start + 3_600_000, wake, 3);
         HealthRecord nap = interval("nap", at(2026, 9, 28, 15, 33), at(2026, 9, 28, 16, 34));
         List<OHealthSleepPlan.Night> nights = OHealthSleepPlan.nights(List.of(nap, night, light, deep));
-        assertEquals(1, nights.size());
+        assertEquals(2, nights.size());
         OHealthSleepPlan.Night chosen = nights.get(0);
         assertEquals(start, chosen.fallAsleepMs());
         assertEquals(wake, chosen.wakeMs());
@@ -51,16 +60,26 @@ public final class OHealthSleepPlanTest {
         assertEquals(OHealthSleepPlan.DEEP, chosen.segments().get(0).sleepState());
         assertEquals(OHealthSleepPlan.LIGHT, chosen.segments().get(1).sleepState());
         assertEquals(227, chosen.sleepMinutes());
+        assertTrue(OHealthSleepPlan.summary(nights, chosen));
+        OHealthSleepPlan.Night kept = nights.get(1);
+        assertEquals(nap.startMs, kept.fallAsleepMs());
+        assertEquals(nap.endMs, kept.wakeMs());
+        assertEquals(61, kept.sleepMinutes());
+        assertEquals(OHealthSleepPlan.LIGHT, kept.segments().get(0).sleepState());
+        assertFalse(OHealthSleepPlan.summary(nights, kept));
     }
 
     @Test public void sessionStartingBeforeTwentyExtendsTheClearWindow() {
         HealthRecord early = interval("early", at(2026, 9, 24, 19, 30), at(2026, 9, 25, 2, 0));
         HealthRecord nap = interval("nap", at(2026, 9, 25, 14, 0), at(2026, 9, 25, 15, 0));
         List<OHealthSleepPlan.Night> nights = OHealthSleepPlan.nights(List.of(nap, early));
-        assertEquals(1, nights.size());
+        assertEquals(2, nights.size());
         assertEquals(early.startMs, nights.get(0).fallAsleepMs());
         assertEquals(early.startMs, nights.get(0).dayStartMs());
         assertEquals(at(2026, 9, 25, 20, 0), nights.get(0).dayEndMs());
+        assertEquals(nap.startMs, nights.get(1).fallAsleepMs());
+        assertEquals(60, nights.get(1).sleepMinutes());
+        assertEquals(at(2026, 9, 24, 20, 0), nights.get(1).dayStartMs());
     }
 
     @Test public void stagesMapOntoHostStatesAndAreNotDuplicated() {
@@ -78,6 +97,7 @@ public final class OHealthSleepPlanTest {
         assertEquals(OHealthSleepPlan.DEEP, night.segments().get(0).sleepState());
         assertEquals(OHealthSleepPlan.LIGHT, night.segments().get(1).sleepState());
         assertEquals(OHealthSleepPlan.REM, night.segments().get(2).sleepState());
+        assertEquals(5, OHealthSleepPlan.AWAKE);
         assertEquals(OHealthSleepPlan.AWAKE, night.segments().get(3).sleepState());
         assertEquals(180, night.sleepMinutes());
         assertEquals(60, night.deepMinutes());
