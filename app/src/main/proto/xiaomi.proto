@@ -338,7 +338,7 @@ message PhoneZenRule {
   optional string name = 2;
   optional int32 state = 3; // 0 off, 1 on
   optional int32 conditionOverride = 4;
-  optional uint32 lastActivation = 5; // low 32 bits of epoch millis, as Mi Fitness casts it
+  optional uint32 lastActivation = 5; // unix seconds, as the band stores on watch_manual
   optional PhoneZenSchedule schedule = 6;
 }
 

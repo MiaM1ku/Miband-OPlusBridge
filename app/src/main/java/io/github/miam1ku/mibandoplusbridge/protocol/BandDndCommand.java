@@ -28,7 +28,8 @@ import nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto;
 
     /** Subtype 110. Mi Fitness names the phone's manual rule manual_zen_rule.
      * watch_manual is the band's own rule and does not drive phone sync.
-     * activatedAt is the low 32 bits of epoch millis. */
+     * activatedAt is unix seconds. The band stores the same unit on watch_manual;
+     * the low 32 bits of epoch millis are about ten times smaller and lose the comparison. */
     public static XiaomiProto.Command phoneRules(boolean enabled, int activatedAt) {
         return XiaomiProto.Command.newBuilder().setType(2).setSubtype(110)
                 .setSystem(XiaomiProto.System.newBuilder().setPhoneZenRules(
@@ -67,10 +68,25 @@ import nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto;
         return null;
     }
 
+    /** Unix seconds. Values past 2038 do not fit this uint32. */
+    public static int activatedAt(long epochMillis) {
+        long seconds = epochMillis / 1000L;
+        if (seconds <= 0 || seconds > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException("DND_ACTIVATION_TIME_INVALID");
+        }
+        return (int) seconds;
+    }
+
+    /** Subtype 110 is a band toggle. Subtype 109 is the stored list: watch_manual stays off while the phone rule is on. */
+    public static Boolean pushedManualState(XiaomiProto.Command command) {
+        if (command == null || command.getSubtype() != 110) return null;
+        return manualState(command);
+    }
+
     /** Sync switch, the old quiet flag, then the phone rules. */
     public static List<XiaomiProto.Command> mirror(int filter) {
         boolean on = PhoneDnd.blocksNotifications(filter);
-        int now = (int) System.currentTimeMillis();
+        int now = activatedAt(System.currentTimeMillis());
         return List.of(syncWithPhone(), state(on), phoneRules(on, now), phoneSilent(on));
     }
  }

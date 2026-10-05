@@ -2,6 +2,7 @@
 package io.github.miam1ku.mibandoplusbridge.protocol;
 
 import io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd;
+import nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto;
 import org.junit.Test;
 import static org.junit.Assert.*;
 
@@ -46,8 +47,26 @@ public final class BandDndCommandTest {
         assertNull(BandDndCommand.manualState(null));
     }
 
+    @Test public void activationTimeIsUnixSecondsNotMillisLowBits() {
+        assertEquals(1_791_184_800, BandDndCommand.activatedAt(1_791_184_800_123L));
+        assertNotEquals((int) 1_791_184_800_123L, BandDndCommand.activatedAt(1_791_184_800_123L));
+    }
+
+    @Test public void storedRuleListIsNotABandToggle() {
+        var stored = XiaomiProto.Command.newBuilder().setType(2).setSubtype(109)
+                .setSystem(XiaomiProto.System.newBuilder().setPhoneZenRules(
+                        XiaomiProto.PhoneZenRuleList.newBuilder().addRule(
+                                XiaomiProto.PhoneZenRule.newBuilder()
+                                        .setManual(true).setName("watch_manual").setState(0))))
+                .build();
+        assertNull(BandDndCommand.pushedManualState(stored));
+        assertEquals(Boolean.FALSE, BandDndCommand.pushedManualState(stored.toBuilder().setSubtype(110).build()));
+        assertEquals(Boolean.TRUE, BandDndCommand.pushedManualState(BandDndCommand.phoneRules(true, 1)));
+        assertNull(BandDndCommand.pushedManualState(null));
+    }
+
     @Test public void mirrorAlwaysSendsTheSwitchThenTheLiveStatus() {
-        int before = (int) System.currentTimeMillis();
+        int before = BandDndCommand.activatedAt(System.currentTimeMillis());
         for (int filter : new int[] {PhoneDnd.NONE, PhoneDnd.ALL, PhoneDnd.UNKNOWN}) {
             var packets = BandDndCommand.mirror(filter);
             assertEquals(4, packets.size());
@@ -66,7 +85,7 @@ public final class BandDndCommandTest {
             assertEquals(on ? 1 : 0, rule.getState());
             assertTrue(rule.getManual());
             assertTrue(rule.getLastActivation() - before >= 0);
-            assertTrue(rule.getLastActivation() - before < 5_000);
+            assertTrue(rule.getLastActivation() - before < 5);
             assertEquals(1, rules.getSystem().getPhoneZenRules().getRuleCount());
             assertEquals(44, silent.getSubtype());
             assertEquals(on, silent.getSystem().getPhoneSilentModeSet().getPhoneSilentMode().getSilent());
