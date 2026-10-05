@@ -220,6 +220,20 @@ public final class OwnershipController {
         return "am start-service --user 0 -n " + packageName + "/" + className;
     }
 
+
+    /** Only the two zen values this phone's tile writes. */
+    static String zenCommand(boolean on) {
+        return "settings put global zen_mode " + (on ? "1" : "0");
+    }
+
+    static boolean setZenMode(boolean on) {
+        try {
+            execute(zenCommand(on), 8);
+            return true;
+        } catch (Failure failure) {
+            return false;
+        }
+    }
     static boolean rootStart(String packageName, String className, boolean foreground) {
         String command = rootStartCommand(packageName, className, foreground);
         if (command == null) return false;

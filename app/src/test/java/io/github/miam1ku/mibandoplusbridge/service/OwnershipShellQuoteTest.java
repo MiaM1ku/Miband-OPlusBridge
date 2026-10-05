@@ -13,4 +13,9 @@ public final class OwnershipShellQuoteTest {
     @Test public void wrapsPlainCommands() {
         assertEquals("'id -u'", OwnershipController.shellQuote("id -u"));
     }
+
+    @Test public void zenCommandIsOnlyTheGlobalSwitch() {
+        assertEquals("settings put global zen_mode 0", OwnershipController.zenCommand(false));
+        assertEquals("settings put global zen_mode 1", OwnershipController.zenCommand(true));
+    }
 }

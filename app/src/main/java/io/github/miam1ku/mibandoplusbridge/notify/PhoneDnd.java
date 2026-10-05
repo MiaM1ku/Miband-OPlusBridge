@@ -84,12 +84,43 @@ public final class PhoneDnd {
         return sentAtNanos == 0 || nowNanos - sentAtNanos >= 3_000_000_000L;
     }
 
-    public static boolean apply(Context context, boolean on) {
+    public record Attempt(boolean applied, boolean policy, String via) {}
+
+    /**
+     * ColorOS keeps the status-bar switch in zen_mode. setInterruptionFilter can return
+     * without writing it, and a normal app cannot write zen_mode. Callers that still
+     * see applied=false retry from a system process.
+     */
+    public static Attempt apply(Context context, boolean on) {
+        boolean policy = policyGranted(context);
+        if (blocksNotifications(currentFilter(context)) == on) return new Attempt(true, policy, "already");
+        if (policy) {
+            NotificationManager manager = context.getSystemService(NotificationManager.class);
+            try {
+                if (manager != null) manager.setInterruptionFilter(on ? PRIORITY : ALL);
+            } catch (RuntimeException ignored) { }
+            if (blocksNotifications(currentFilter(context)) == on) return new Attempt(true, true, "filter");
+        }
+        if (writeZen(context, on) && blocksNotifications(currentFilter(context)) == on) {
+            return new Attempt(true, policy, "zen");
+        }
+        return new Attempt(false, policy, "none");
+    }
+
+    public static boolean policyGranted(Context context) {
         NotificationManager manager = context.getSystemService(NotificationManager.class);
-        if (manager == null || !manager.isNotificationPolicyAccessGranted()) return false;
-        int want = on ? PRIORITY : ALL;
-        if (currentFilter(context) == want) return true;
-        manager.setInterruptionFilter(want);
-        return currentFilter(context) == want || blocksNotifications(currentFilter(context)) == on;
+        return manager != null && manager.isNotificationPolicyAccessGranted();
+    }
+
+    /** 0 off, 1 priority. Matches the zen values this phone reports when the tile moves. */
+    public static int zenMode(boolean on) { return on ? 1 : 0; }
+
+    private static boolean writeZen(Context context, boolean on) {
+        try {
+            return android.provider.Settings.Global.putInt(
+                    context.getContentResolver(), "zen_mode", zenMode(on));
+        } catch (RuntimeException ignored) {
+            return false;
+        }
     }
 }

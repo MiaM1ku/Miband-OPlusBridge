@@ -2,6 +2,9 @@
     <permission android:name="io.github.miam1ku.mibandoplusbridge.permission.FIND_PHONE"
         android:protectionLevel="signature" />
     <uses-permission android:name="io.github.miam1ku.mibandoplusbridge.permission.FIND_PHONE" />
+    <permission android:name="io.github.miam1ku.mibandoplusbridge.permission.SET_DND"
+        android:protectionLevel="signature" />
+    <uses-permission android:name="io.github.miam1ku.mibandoplusbridge.permission.SET_DND" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />

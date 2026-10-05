@@ -1087,10 +1087,33 @@ public final class BandLiveService extends Service {
             if (!io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.acceptBandManual(
                     on, io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.currentFilter(this),
                     lastDndSentNanos, System.nanoTime())) return;
-            boolean applied = io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.apply(this, on);
+            var attempt = io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.apply(this, on);
             io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this, "DND_FROM_BAND on=" + on
-                    + " applied=" + applied);
-            if (!applied) android.util.Log.i("OplusBandBridge", "PHONE_DND_POLICY_REQUIRED");
+                    + " applied=" + attempt.applied() + " policy=" + attempt.policy()
+                    + " via=" + attempt.via());
+            if (attempt.applied()) return;
+            Intent intent = new Intent(io.github.miam1ku.mibandoplusbridge.hook.OHealthDndHook.ACTION)
+                    .setPackage("com.heytap.health")
+                    .putExtra("on", on);
+            sendOrderedBroadcast(intent, null, new BroadcastReceiver() {
+                @Override public void onReceive(Context context, Intent done) {
+                    boolean applied = getResultCode() == 1;
+                    io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(BandLiveService.this,
+                            "DND_FROM_BAND_HOST on=" + on + " applied=" + applied
+                                    + " via=" + getResultData());
+                    if (!applied) askRootZen(on);
+                }
+            }, main, 0, null, null);
+        });
+    }
+
+    private void askRootZen(boolean on) {
+        HostKeepAlive.runRoot(() -> {
+            boolean wrote = OwnershipController.setZenMode(on);
+            boolean applied = wrote && io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.blocksNotifications(
+                    io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.currentFilter(this)) == on;
+            io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this, "DND_FROM_BAND_ROOT on=" + on
+                    + " wrote=" + wrote + " applied=" + applied);
         });
     }
 

@@ -52,6 +52,11 @@ public final class HostKeepAlive {
         });
     }
 
+    /** One su thread. Callers on a binder or the main thread must not wait. */
+    public static void runRoot(Runnable task) {
+        if (task != null) root.execute(task);
+    }
+
     static boolean claim(AtomicLong last, long nowMs, long gapMs) {
         while (true) {
             long previous = last.get();

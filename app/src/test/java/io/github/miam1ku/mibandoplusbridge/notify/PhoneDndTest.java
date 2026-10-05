@@ -39,4 +39,9 @@ public final class PhoneDndTest {
         assertEquals(PhoneDnd.NONE, PhoneDnd.resolve(2, 0, 0, 0, PhoneDnd.ALL));
         assertEquals(PhoneDnd.ALARMS, PhoneDnd.resolve(3, -1, -1, -1, PhoneDnd.ALL));
     }
+
+    @Test public void zenModeUsesTheValuesThisPhoneReports() {
+        assertEquals(0, PhoneDnd.zenMode(false));
+        assertEquals(1, PhoneDnd.zenMode(true));
+    }
 }
