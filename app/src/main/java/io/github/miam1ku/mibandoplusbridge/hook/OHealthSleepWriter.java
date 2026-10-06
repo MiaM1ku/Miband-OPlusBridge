@@ -98,7 +98,7 @@ final class OHealthSleepWriter {
             if (!queued.equals(device)) {
                 try {
                     host.deleteRows(api, TABLE_SLEEP, account, queued, night.fallAsleepMs(), night.wakeMs());
-                } catch (RuntimeException ignored) {
+                } catch (Exception ignored) {
                     Log.i("OplusBandBridge", "OHEALTH_SLEEP_PREVIOUS_DEVICE_KEPT date=" + night.date());
                 }
             }

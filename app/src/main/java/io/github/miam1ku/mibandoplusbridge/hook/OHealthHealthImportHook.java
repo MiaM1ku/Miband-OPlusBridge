@@ -500,7 +500,7 @@ public final class OHealthHealthImportHook {
         if (end < start) return;
         try {
             host.deleteRows(api, table, account, previous, Math.max(0, start - 1), end + 1);
-        } catch (RuntimeException ignored) {
+        } catch (Exception ignored) {
             Log.i("OplusBandBridge", "OHEALTH_PREVIOUS_DEVICE_KEPT table=" + table);
         }
     }
@@ -651,7 +651,7 @@ public final class OHealthHealthImportHook {
         }
 
         void deleteRows(Object api, int table, String account, String device, long start, long end)
-                throws ReflectiveOperationException {
+                throws Exception {
             if (device == null || device.isBlank() || end <= start) {
                 throw new IllegalArgumentException("HEALTH_DELETE_WINDOW");
             }
@@ -666,12 +666,23 @@ public final class OHealthHealthImportHook {
             Object observer = observerConstructor.newInstance();
             try {
                 subscribe.invoke(api.getClass().getMethod("deleteSportHealthData", type).invoke(api, option), observer);
-                if (!Boolean.TRUE.equals(observerResult.invoke(observer))) {
-                    throw new IllegalStateException("HEALTH_DELETE_UNCONFIRMED");
-                }
+                // deleteSportHealthData reports the number of deleted rows through the same
+                // SyncObserver callback the insert path uses for error codes, so its boolean is
+                // not a success flag: a delete that removed rows reports false. Wait for the call
+                // to finish, then confirm that the window is actually empty.
+                observerResult.invoke(observer);
             } finally {
                 try { observerDispose.invoke(observer); } catch (ReflectiveOperationException ignored) { }
             }
+            if (leftover(api, account, table, device, start, end)) {
+                throw new IllegalStateException("HEALTH_DELETE_UNCONFIRMED");
+            }
+        }
+
+        /** The deleted window uses the same inclusive bounds as the host read, so an empty read confirms it. */
+        private boolean leftover(Object api, String account, int table, String device, long start, long end)
+                throws Exception {
+            return !readRows(api, account, table, device, Math.max(0, start), end - 1, 0, false, 1).isEmpty();
         }
 
         /** Same post-insert cloud request as databaseengineservice. A cloud failure leaves the local row. */
