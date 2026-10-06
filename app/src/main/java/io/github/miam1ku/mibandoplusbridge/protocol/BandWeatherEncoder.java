@@ -166,6 +166,32 @@ public final class BandWeatherEncoder {
         return copy(sample, chosen.getCode(), cityName, locationName);
     }
 
+    /**
+     * Xiaomi Sports writes the current city first, drops the previous automatic city,
+     * and keeps any other cities. A single city with no saved key is that previous city.
+     */
+    public static XiaomiProto.Command replaceCurrentLocation(Sample sample,
+            XiaomiProto.WeatherLocations configured, String previousKey) {
+        validateForecast(sample);
+        var ordered = new java.util.ArrayList<XiaomiProto.WeatherLocation>();
+        ordered.add(XiaomiProto.WeatherLocation.newBuilder()
+                .setCode(sample.locationKey()).setName(sample.locationName()).build());
+        String previous = previousKey == null ? "" : previousKey;
+        var existing = validCities(configured);
+        boolean dropSole = previous.isEmpty() && existing.size() == 1
+                && !existing.get(0).getCode().equals(sample.locationKey());
+        for (var city : existing) {
+            if (city.getCode().equals(sample.locationKey())) continue;
+            if (!previous.isEmpty() && city.getCode().equals(previous)) continue;
+            if (dropSole) continue;
+            ordered.add(city);
+        }
+        var copy = XiaomiProto.WeatherLocations.newBuilder();
+        for (var city : ordered) copy.addLocation(city);
+        return XiaomiProto.Command.newBuilder().setType(10).setSubtype(6)
+                .setWeather(XiaomiProto.Weather.newBuilder().setLocations(copy)).build();
+    }
+
     /** Official sync writes the band's current list back unchanged before the forecast frames. */
     public static XiaomiProto.Command echoLocations(XiaomiProto.WeatherLocations configured) {
         var copy = XiaomiProto.WeatherLocations.newBuilder();

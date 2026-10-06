@@ -219,64 +219,42 @@ public final class WeatherSync implements AutoCloseable {
     private void publish(CompletableFuture<Void> transaction, BandWeatherEncoder.Sample fresh,
                          XiaomiProto.WeatherLocations cities) {
         var review = context.getSharedPreferences("weather-city-review", 0);
+        XiaomiProto.Command city;
         try {
-            XiaomiProto.Command city = BandWeatherEncoder.echoLocations(cities);
-            BandWeatherEncoder.Sample bound = BandWeatherEncoder.bindObservedCity(fresh, cities,
-                    review.getString("confirmedBandCode", ""), review.getString("confirmedBandName", ""));
-            transactionQueue.request(city, 10, 6).whenComplete((set, setFailure) -> dispatch(() -> {
-                if (active != transaction) return;
-                if (setFailure != null) { finish("WEATHER_TRANSPORT_FAILED"); return; }
-                if (set != null && set.hasStatus() && set.getStatus() != 0) {
-                    finish("WEATHER_BAND_REJECTED");
-                    return;
-                }
-                sendFrame(transaction, fresh, cities, BandWeatherEncoder.encode(bound), 0);
-            }));
-        } catch (IllegalArgumentException missing) {
-            if (!"WEATHER_CITY_SETUP_REQUIRED".equals(missing.getMessage())) {
-                finish(code(missing));
-                return;
-            }
-            registerCurrentCity(transaction, fresh);
-        }
-    }
-
-    private void registerCurrentCity(CompletableFuture<Void> transaction, BandWeatherEncoder.Sample fresh) {
-        XiaomiProto.Command add;
-        try {
-            add = BandWeatherEncoder.addCurrentLocation(fresh);
+            city = BandWeatherEncoder.replaceCurrentLocation(fresh, cities,
+                    review.getString("currentLocationKey", ""));
         } catch (IllegalArgumentException invalid) {
             finish(code(invalid));
             return;
         }
-        SessionLog.line(context, "WEATHER_ADD_CITY");
-        transactionQueue.send(add).whenComplete((ignored, failure) -> dispatch(() -> {
+        SessionLog.line(context, "WEATHER_SET_CURRENT_CITY");
+        transactionQueue.request(city, 10, 6).whenComplete((set, setFailure) -> dispatch(() -> {
             if (active != transaction) return;
-            if (failure != null) { finish("WEATHER_TRANSPORT_FAILED"); return; }
-            sendFrame(transaction, fresh, XiaomiProto.WeatherLocations.getDefaultInstance(),
-                    BandWeatherEncoder.encode(fresh), 0);
+            if (setFailure != null) { finish("WEATHER_TRANSPORT_FAILED"); return; }
+            if (set != null && set.hasStatus() && set.getStatus() != 0) {
+                finish("WEATHER_BAND_REJECTED");
+                return;
+            }
+            sendFrame(transaction, fresh, BandWeatherEncoder.encode(fresh), 0);
         }));
     }
 
-    private BandWeatherEncoder.Sample bind(BandWeatherEncoder.Sample sample, XiaomiProto.WeatherLocations cities) {
-        var prefs = context.getSharedPreferences("weather-city-review", 0);
-        try {
-            return BandWeatherEncoder.bindObservedCity(sample, cities,
-                    prefs.getString("confirmedBandCode", ""), prefs.getString("confirmedBandName", ""));
-        } catch (IllegalArgumentException changed) { throw new Failure(changed.getMessage()); }
-    }
-
     private void sendFrame(CompletableFuture<Void> transaction, BandWeatherEncoder.Sample sample,
-                           XiaomiProto.WeatherLocations cities, List<XiaomiProto.Command> frames, int index) {
+                           List<XiaomiProto.Command> frames, int index) {
         if (active != transaction) return;
-        if (index == frames.size()) { lastSent = sample; finish(null); return; }
+        if (index == frames.size()) {
+            lastSent = sample;
+            rememberCurrent(sample);
+            finish(null);
+            return;
+        }
         try {
-            bind(freshSnapshot(sample), cities);
+            freshSnapshot(sample);
             if (transactionQueue != queue.get()) throw new Failure("WEATHER_DISCONNECTED");
             transactionQueue.send(frames.get(index)).whenComplete((ignored, failure) -> dispatch(() -> {
                 if (active != transaction) return;
                 if (failure != null) finish("WEATHER_TRANSPORT_FAILED");
-                else sendFrame(transaction, sample, cities, frames, index + 1);
+                else sendFrame(transaction, sample, frames, index + 1);
             }));
         } catch (Exception failure) { finish(code(failure)); }
     }
@@ -296,8 +274,12 @@ public final class WeatherSync implements AutoCloseable {
             }
             if (command.getSubtype() == 5 && !ownCityResponse) refreshAndSend();
             else if (command.getSubtype() == 3 && command.hasWeather() && command.getWeather().hasLocation()) {
-                String bound = context.getSharedPreferences("weather-city-review", 0).getString("confirmedBandCode", "");
-                if (!bound.isEmpty() && bound.equals(command.getWeather().getLocation().getCode())) refreshAndSend();
+                var review = context.getSharedPreferences("weather-city-review", 0);
+                String current = review.getString("currentLocationKey", "");
+                String confirmed = review.getString("confirmedBandCode", "");
+                String code = command.getWeather().getLocation().getCode();
+                if (code.isEmpty() || current.isEmpty() || code.equals(current)
+                        || (!confirmed.isEmpty() && code.equals(confirmed))) refreshAndSend();
             }
         });
     }
@@ -313,6 +295,13 @@ public final class WeatherSync implements AutoCloseable {
                 observing = false;
             }
         });
+    }
+
+    private void rememberCurrent(BandWeatherEncoder.Sample sample) {
+        context.getSharedPreferences("weather-city-review", 0).edit()
+                .putString("currentLocationKey", sample.locationKey())
+                .putString("currentLocationName", sample.locationName())
+                .apply();
     }
 
     private void cancelExpiry() { if (expiry != null) { expiry.cancel(false); expiry = null; } }

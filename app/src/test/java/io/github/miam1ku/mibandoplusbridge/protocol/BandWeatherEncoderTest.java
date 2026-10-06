@@ -193,6 +193,32 @@ public final class BandWeatherEncoderTest {
                 () -> BandWeatherEncoder.echoLocations(city("not a code", "Band city"))).getMessage());
     }
 
+    @Test public void movingReplacesTheAutomaticCityAndKeepsManualOnes() {
+        var source = sample("c", "Asia/Shanghai", 56, 21);
+        var here = new BandWeatherEncoder.Sample("phone-shanghai", "上海", "徐汇",
+                source.timezone(), source.unit(), source.publishedAtMs(), source.conditionCode(),
+                source.temperature(), null, null, null, null, null, null, source.daily(), source.hourly());
+        var stuck = city("phone-beijing", "北京");
+        var replaced = BandWeatherEncoder.replaceCurrentLocation(here, stuck, "");
+        assertEquals(6, replaced.getSubtype());
+        assertEquals(1, replaced.getWeather().getLocations().getLocationCount());
+        assertEquals("phone-shanghai", replaced.getWeather().getLocations().getLocation(0).getCode());
+        assertEquals("徐汇", replaced.getWeather().getLocations().getLocation(0).getName());
+        var manual = stuck.toBuilder().addLocation(
+                XiaomiProto.WeatherLocation.newBuilder().setCode("weathercn:000000002").setName("杭州")).build();
+        var kept = BandWeatherEncoder.replaceCurrentLocation(here, manual, "phone-beijing");
+        assertEquals(List.of("phone-shanghai", "weathercn:000000002"),
+                kept.getWeather().getLocations().getLocationList().stream()
+                        .map(XiaomiProto.WeatherLocation::getCode).toList());
+        var same = BandWeatherEncoder.replaceCurrentLocation(source, city(BAND_CODE, "Band city"), "");
+        assertEquals(List.of(BAND_CODE), same.getWeather().getLocations().getLocationList().stream()
+                .map(XiaomiProto.WeatherLocation::getCode).toList());
+        var current = frame(BandWeatherEncoder.encode(here), 0).getWeather().getCurrent().getMetadata();
+        assertEquals("phone-shanghai", current.getLocationKey());
+        assertEquals("徐汇", current.getLocationName());
+        assertTrue(current.getIsCurrentLocation());
+    }
+
     @Test public void emptyCityListRegistersTheSourceLocationWithoutReplacingCities() {
         var source = sample("c", "Asia/Shanghai", 56, 21);
         var generic = new BandWeatherEncoder.Sample("phone-location", source.cityName(), source.locationName(),
