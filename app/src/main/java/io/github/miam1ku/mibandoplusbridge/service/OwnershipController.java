@@ -161,6 +161,16 @@ public final class OwnershipController {
         if (!"0".equals(execute("id -u"))) throw new Failure("ROOT_REQUIRED");
     }
 
+    /** Doze whitelist plus background execution, so a swiped task does not freeze the bridge. */
+    public void keepAwake() {
+        if (!probeRoot()) return;
+        ensureDoze();
+        try {
+            execute("cmd appops set " + BRIDGE + " RUN_ANY_IN_BACKGROUND allow");
+            execute("cmd appops set " + BRIDGE + " RUN_IN_BACKGROUND allow");
+        } catch (Failure ignored) { }
+    }
+
     private void ensureDoze() {
         try {
             String list = execute("cmd deviceidle whitelist");

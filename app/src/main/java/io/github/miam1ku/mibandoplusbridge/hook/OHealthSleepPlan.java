@@ -10,8 +10,9 @@ import java.util.Comparator;
 import java.util.List;
 
 /**
- * Every band session on a sleep-day is kept. OHealth splits a later session off when the
- * gap is at least two hours, and calls it a nap when that session is under 120 minutes.
+ * Every band session on a sleep-day is kept. Rows use sleep protocol version 11:
+ * a later session stays separate once the gap is over 20 minutes, and a session
+ * under 120 minutes is a nap.
  */
 public final class OHealthSleepPlan {
     /** Host Sleep.sleepState. SleepDataMapping turns 2/3/4 into deep/REM/light and every other state into wake. */
@@ -178,7 +179,33 @@ public final class OHealthSleepPlan {
             current = next;
         }
         parted.add(current);
-        return merge(parted);
+        return stitch(merge(parted));
+    }
+
+    /**
+     * Watch protocol version 11 keeps one card only while the gap is at most 20 minutes.
+     * A shorter gap is joined exactly, because any hole starts a new card.
+     */
+    private static List<Segment> stitch(List<Segment> segments) {
+        if (segments.size() < 2) return segments;
+        List<Segment> stitched = new ArrayList<>();
+        Segment current = segments.get(0);
+        for (int i = 1; i < segments.size(); i++) {
+            Segment next = segments.get(i);
+            long gap = next.startMs() - current.endMs();
+            if (gap > 0 && gap <= 1_200_000L) {
+                if (gap < 60_000L) {
+                    current = new Segment(current.startMs(), next.startMs(), current.sleepState());
+                } else {
+                    stitched.add(current);
+                    current = new Segment(current.endMs(), next.startMs(), AWAKE);
+                }
+            }
+            stitched.add(current);
+            current = next;
+        }
+        stitched.add(current);
+        return stitched;
     }
 
     /** Awake minutes stay out of {@code sleep}. */

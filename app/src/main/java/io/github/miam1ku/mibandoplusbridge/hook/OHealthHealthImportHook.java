@@ -175,7 +175,7 @@ public final class OHealthHealthImportHook {
             // isSystemLogin is false until the account SDK initializes, even when the last
             // session was signed in. Without the health agreement, set(false) is forced back
             // to true and rewrites user_ssoid to the package name.
-            if (!(system || storedLogin) || !agreed || (!guest && !placeholder)) return;
+            if (!agreed || !(system || storedLogin) || (!guest && !placeholder)) return;
             tourist.getMethod("setIsInTouristMode", boolean.class).invoke(null, false);
             if (manager != null) {
                 manager.getClass().getMethod("cacheAccountInfo", boolean.class).invoke(manager, true);

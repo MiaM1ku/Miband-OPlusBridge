@@ -25,8 +25,8 @@ final class OHealthSleepWriter {
     private final Class<?> statClass;
     private final Constructor<?> sleepNew;
     private final Constructor<?> statNew;
-    private final Method sleepAccount, sleepDevice, sleepStart, sleepEnd, sleepState, sleepDisplay;
-    private final Method sleepGetDevice, sleepGetStart, sleepGetEnd, sleepGetState;
+    private final Method sleepAccount, sleepDevice, sleepStart, sleepEnd, sleepState, sleepDisplay, sleepVersion;
+    private final Method sleepGetDevice, sleepGetStart, sleepGetEnd, sleepGetState, sleepGetVersion;
     private final Method statAccount, statDevice, statDate, statFall, statWake, statSleep, statDeep, statLight,
             statRem, statAwake;
     private final Method statGetDevice, statGetDate, statGetFall, statGetWake, statGetSleep,
@@ -45,10 +45,12 @@ final class OHealthSleepWriter {
         sleepEnd = sleepClass.getMethod("setEndTimestamp", long.class);
         sleepState = sleepClass.getMethod("setSleepState", int.class);
         sleepDisplay = sleepClass.getMethod("setDisplay", int.class);
+        sleepVersion = optional(sleepClass, "setDataVersion", int.class);
         sleepGetDevice = getter(sleepClass, "getDeviceUniqueId", String.class);
         sleepGetStart = getter(sleepClass, "getStartTimestamp", long.class);
         sleepGetEnd = getter(sleepClass, "getEndTimestamp", long.class);
         sleepGetState = getter(sleepClass, "getSleepState", int.class);
+        sleepGetVersion = optional(sleepClass, "getDataVersion");
         statAccount = statClass.getMethod("setSsoid", String.class);
         statDevice = statClass.getMethod("setDeviceUniqueId", String.class);
         statDate = statClass.getMethod("setDate", int.class);
@@ -127,7 +129,7 @@ final class OHealthSleepWriter {
         long statStart = night.dayStartMs();
         long statEnd = night.dayEndMs() + 1;
         List<?> stats = host.readRows(api, account, TABLE_STAT, null, statStart, statEnd, 4, false);
-        if (ownedByOther(stats, night.date(), device)) return "other-device";
+        if (ownedByOther(stats, night.date(), device, previousDevice())) return "other-device";
         List<?> existing = host.readRows(api, account, TABLE_SLEEP, device, night.dayStartMs(),
                 night.dayEndMs(), 0, true);
         boolean sameSegments = segmentsMatch(existing, device, night);
@@ -209,6 +211,8 @@ final class OHealthSleepWriter {
         sleepEnd.invoke(row, segment.endMs());
         sleepState.invoke(row, segment.sleepState());
         sleepDisplay.invoke(row, 1);
+        // Version 11 is the watch rule: a gap over 20 minutes stays a separate nap.
+        if (sleepVersion != null) sleepVersion.invoke(row, 11);
         return row;
     }
 
@@ -269,9 +273,11 @@ final class OHealthSleepWriter {
     private boolean sameSegment(Object row, String device, OHealthSleepPlan.Segment segment)
             throws ReflectiveOperationException {
         if (!sleepClass.isInstance(row) || !device.equals(sleepGetDevice.invoke(row))) return false;
-        return segment.startMs() == (Long) sleepGetStart.invoke(row)
-                && segment.endMs() == (Long) sleepGetEnd.invoke(row)
-                && segment.sleepState() == (Integer) sleepGetState.invoke(row);
+        if (segment.startMs() != (Long) sleepGetStart.invoke(row)
+                || segment.endMs() != (Long) sleepGetEnd.invoke(row)
+                || segment.sleepState() != (Integer) sleepGetState.invoke(row)) return false;
+        if (sleepGetVersion == null) return true;
+        return Integer.valueOf(11).equals(sleepGetVersion.invoke(row));
     }
 
     /** A row that meets this session. Another session the same day is left in place. */
@@ -300,13 +306,29 @@ final class OHealthSleepWriter {
         return false;
     }
 
-    private boolean ownedByOther(List<?> rows, int date, String device) throws ReflectiveOperationException {
+    /** The queue id used before rows were stored under the Bluetooth MAC. */
+    private static String previousDevice() {
+        android.os.Bundle band = OHealthDeviceHook.registeredSnapshot();
+        if (band == null) return "";
+        String id = band.getString("deviceId", "");
+        String mac = band.getString("mac", "");
+        return id.equals(mac) ? "" : id;
+    }
+
+    private boolean ownedByOther(List<?> rows, int date, String device, String previous)
+            throws ReflectiveOperationException {
         for (Object row : rows) {
             if (!statClass.isInstance(row) || date != (Integer) statGetDate.invoke(row)) continue;
             String owner = (String) statGetDevice.invoke(row);
-            if (owner != null && !owner.isBlank() && !device.equals(owner)) return true;
+            if (owner == null || owner.isBlank() || device.equals(owner) || owner.equals(previous)) continue;
+            return true;
         }
         return false;
+    }
+
+    private static Method optional(Class<?> type, String name, Class<?>... parameters) {
+        try { return type.getMethod(name, parameters); }
+        catch (NoSuchMethodException missing) { return null; }
     }
 
     private static Method getter(Class<?> type, String name, Class<?> returnType) throws NoSuchMethodException {

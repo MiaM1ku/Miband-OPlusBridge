@@ -585,6 +585,12 @@ public final class BandLiveService extends Service {
         });
         calls = new io.github.miam1ku.mibandoplusbridge.notify.PhoneCallMonitor(this, coordinator);
         io.github.miam1ku.mibandoplusbridge.notify.BandNotificationListener.ensureEnabled(this);
+        HostKeepAlive.runRoot(() -> {
+            try {
+                new OwnershipController(this).keepAwake();
+                io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this, "KEEP_AWAKE");
+            } catch (RuntimeException ignored) { }
+        });
         instance = this;
         sleepPauseOn = io.github.miam1ku.mibandoplusbridge.notify.SleepMusic.enabled(this);
         long armed = io.github.miam1ku.mibandoplusbridge.notify.SleepMusic.armedAt(this);
@@ -637,7 +643,22 @@ public final class BandLiveService extends Service {
             show("正在连接手环");
             worker.execute(this::supervise);
         }
+        io.github.miam1ku.mibandoplusbridge.notify.BandNotificationListener.ensureEnabled(this);
         return START_STICKY;
+    }
+
+    /** ColorOS freezes a process whose task was swiped, even while this service is still running. */
+    @Override public void onTaskRemoved(android.content.Intent rootIntent) {
+        if (stopRequested || !mayWake(this)) return;
+        io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this, "TASK_REMOVED keep");
+        String title = noticeTitle == null || noticeTitle.isBlank() ? "正在连接手环" : noticeTitle;
+        noticeTitle = null;
+        show(title);
+        io.github.miam1ku.mibandoplusbridge.notify.BandNotificationListener.ensureEnabled(this);
+        synchronized (stopLock) {
+            retryNow = true;
+            stopLock.notifyAll();
+        }
     }
 
     private void requestStop() {

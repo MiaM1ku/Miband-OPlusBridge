@@ -144,6 +144,27 @@ public final class OHealthSleepPlanTest {
         assertEquals(60, night.lightMinutes());
     }
 
+    @Test public void gapsInsideOneNapStayOneSession() {
+        long start = at(2026, 10, 5, 14, 0);
+        long deepEnd = start + 20 * 60_000L;
+        long lightStart = deepEnd + 20_000L;
+        long lightEnd = lightStart + 15 * 60_000L;
+        long remStart = lightEnd + 2 * 60_000L;
+        long remEnd = remStart + 10 * 60_000L;
+        List<OHealthSleepPlan.Night> nights = OHealthSleepPlan.nights(List.of(
+                interval("nap", start, remEnd),
+                stage("deep", start, deepEnd, 2),
+                stage("light", lightStart, lightEnd, 3),
+                stage("rem", remStart, remEnd, 4)));
+        assertEquals(1, nights.size());
+        List<OHealthSleepPlan.Segment> segments = nights.get(0).segments();
+        assertEquals(4, segments.size());
+        assertEquals(lightStart, segments.get(0).endMs());
+        assertEquals(OHealthSleepPlan.AWAKE, segments.get(2).sleepState());
+        assertEquals(segments.get(2).endMs(), segments.get(3).startMs());
+        assertFalse(OHealthSleepPlan.summary(nights, nights.get(0)));
+    }
+
     private static HealthRecord interval(String id, long start, long end) {
         return new HealthRecord(id, "band", "sleep_interval", start, end, null, null, 1, "+08:00", "sleep", true);
     }

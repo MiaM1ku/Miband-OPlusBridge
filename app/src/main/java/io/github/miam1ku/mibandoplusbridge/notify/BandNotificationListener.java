@@ -110,6 +110,14 @@ public final class BandNotificationListener extends NotificationListenerService 
         listenerConnected = false;
         relay.disconnected();
         BandLiveService.cancelNotifications(this);
+        if (!BandLiveService.isRunning()) return;
+        main.postDelayed(() -> {
+            if (listenerConnected || !BandLiveService.isRunning() || !accessGranted(this)) return;
+            try {
+                requestRebind(new ComponentName(this, BandNotificationListener.class));
+                SessionLog.line(this, "NOTIFY_LISTENER rebind");
+            } catch (RuntimeException ignored) { }
+        }, 1_000);
     }
 
     private boolean sessionAllowed() {
