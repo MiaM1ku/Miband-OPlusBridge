@@ -52,6 +52,8 @@ public final class OHealthHealthImportHook {
     private final AtomicReference<String> observedAccount = new AtomicReference<>();
     private final AtomicReference<Object> observedApi = new AtomicReference<>();
     private final AtomicLong accountEpoch = new AtomicLong();
+    private final AtomicBoolean sdkUnknownLogged = new AtomicBoolean();
+    private volatile long accountWaitFrom;
     private long retryAfter;
     private boolean stressZerosCleared;
     private String lastFailure;
@@ -100,7 +102,12 @@ public final class OHealthHealthImportHook {
         hook.observe();
         hook.keepStoredAccount();
         installed = hook;
-        hook.request();
+        // Do not request() here. runScheduled() reads host.account() through
+        // DataRepositoryHelper.getSsoId() -> AccountHelper.getAccountManager().getSsoid(),
+        // which triggers AccountSdk.init. Doing that from SportHealthApplication.onCreate
+        // initializes the account SDK before the app does, and it then misses the account
+        // package and wedges as "other brand". The app's own getSsoId/getDbApi reads and the
+        // content observers below start the import once the app is up.
     }
 
     private void observe() {
@@ -134,13 +141,25 @@ public final class OHealthHealthImportHook {
         });
         XposedHelpers.findAndHookMethod(Application.class, "onCreate", new XC_MethodHook() {
             @Override protected void afterHookedMethod(MethodHookParam param) {
-                restoreSystemAccount();
                 Handler main = new Handler(android.os.Looper.getMainLooper());
                 main.postDelayed(OHealthHealthImportHook.this::restoreSystemAccount, 2_000);
                 main.postDelayed(OHealthHealthImportHook.this::restoreSystemAccount, 8_000);
                 main.postDelayed(OHealthHealthImportHook.this::restoreSystemAccount, 20_000);
                 main.postDelayed(OHealthHealthImportHook.this::restoreSystemAccount, 45_000);
-                request();
+                // Defer the first import until the app has initialized the account SDK:
+                // request() reads host.account() and would otherwise start AccountSdk.init
+                // before the app does (see install()).
+                main.postDelayed(new Runnable() {
+                    int tries;
+
+                    @Override public void run() {
+                        if (hasInitializedAccountSdk(host.loader) || tries++ >= 30) {
+                            OHealthHealthImportHook.this.request();
+                            return;
+                        }
+                        main.postDelayed(this, 1_000);
+                    }
+                }, 2_000);
             }
         });
     }
@@ -155,10 +174,6 @@ public final class OHealthHealthImportHook {
             ClassLoader loader = host.loader;
             Class<?> tourist = Class.forName("com.heytap.health.base.tourist.TouristHelper", false, loader);
             boolean guest = Boolean.TRUE.equals(tourist.getMethod("getIsInTouristMode").invoke(null));
-            Class<?> accounts = Class.forName("com.heytap.health.account.AccountHelper", false, loader);
-            Object manager = accounts.getMethod("getAccountManager").invoke(null);
-            boolean system = manager != null && Boolean.TRUE.equals(
-                    manager.getClass().getMethod("isSystemLogin").invoke(manager));
             boolean storedLogin = accountStillSigned();
             Class<?> prefsType = Class.forName("com.heytap.health.base.sp.SPUtils", false, loader);
             Object prefs = prefsType.getMethod("getInstance").invoke(null);
@@ -167,25 +182,55 @@ public final class OHealthHealthImportHook {
             boolean placeholder = stored.isBlank() || "com.heytap.health".equals(stored) || "null".equals(stored);
             Class<?> status = Class.forName("com.heytap.health.base.tourist.TouristStatus", false, loader);
             boolean agreed = Boolean.TRUE.equals(status.getMethod("hasAgreeHealth").invoke(null));
+            boolean sdkInit = hasInitializedAccountSdk(loader);
             String check = "OHEALTH_ACCOUNT_RESTORE_CHECK guest=" + guest
-                    + " system=" + system + " stored=" + storedLogin
+                    + " sdkInit=" + sdkInit + " stored=" + storedLogin
                     + " placeholder=" + placeholder + " agreed=" + agreed;
             Log.i("OplusBandBridge", check);
             OHealthDeviceHook.traceLine(context, check);
-            // isSystemLogin is false until the account SDK initializes, even when the last
-            // session was signed in. Without the health agreement, set(false) is forced back
-            // to true and rewrites user_ssoid to the package name.
-            if (!agreed || !(system || storedLogin) || (!guest && !placeholder)) return;
+            // Do not call AccountHelper.getAccountManager().isSystemLogin() or cacheAccountInfo()
+            // here: those trigger AccountSdk.init before the app initializes the account SDK,
+            // which makes AcApkUtils miss the account package and wedges the SDK as
+            // "other brand"/never-initialized, so the app then gets no ssoid or token. Act on
+            // the stored session flags only, after the app has had time to reach its own init.
+            if (!agreed || !storedLogin || (!guest && !placeholder)) return;
             tourist.getMethod("setIsInTouristMode", boolean.class).invoke(null, false);
-            if (manager != null) {
-                manager.getClass().getMethod("cacheAccountInfo", boolean.class).invoke(manager, true);
-            }
             Log.i("OplusBandBridge", "OHEALTH_ACCOUNT_RESTORED");
             OHealthDeviceHook.traceLine(context, "OHEALTH_ACCOUNT_RESTORED");
         } catch (Throwable failure) {
             Throwable cause = failure.getCause() == null ? failure : failure.getCause();
             Log.i("OplusBandBridge", "OHEALTH_ACCOUNT_RESTORE_FAILED " + cause.getClass().getSimpleName());
         }
+    }
+
+    /** Reads the SDK init flag without triggering init. Unknown = do not block import. */
+    private boolean hasInitializedAccountSdk(ClassLoader loader) {
+        try {
+            Class<?> sdk = Class.forName("com.heytap.health.account.sdk.AccountSdk", false, loader);
+            return Boolean.TRUE.equals(sdk.getMethod("isInitialized").invoke(null));
+        } catch (Throwable unavailable) {
+            // A renamed or removed SDK must not disable import forever; only a definite
+            // "not initialized" waits.
+            if (sdkUnknownLogged.compareAndSet(false, true)) {
+                Log.i("OplusBandBridge", "OHEALTH_ACCOUNT_SDK_UNKNOWN "
+                        + unavailable.getClass().getSimpleName());
+            }
+            return true;
+        }
+    }
+
+    /** Waits for the account SDK, but only for a bounded time so import never stalls forever. */
+    private boolean accountReady() {
+        if (hasInitializedAccountSdk(host.loader)) {
+            accountWaitFrom = 0;
+            return true;
+        }
+        long now = SystemClock.elapsedRealtime();
+        if (accountWaitFrom == 0) accountWaitFrom = now;
+        if (now - accountWaitFrom < 60_000) return false;
+        accountWaitFrom = now;
+        Log.i("OplusBandBridge", "OHEALTH_ACCOUNT_SDK_TIMEOUT proceeding");
+        return true;
     }
     /**
      * LoginCheckStage writes tourist mode when the SDK is not initialized yet.
@@ -201,7 +246,9 @@ public final class OHealthHealthImportHook {
             XC_MethodHook keep = new XC_MethodHook() {
                 @Override protected void beforeHookedMethod(MethodHookParam param) {
                     if (param.args.length == 0 || !Boolean.TRUE.equals(param.args[0])) return;
-                    if (!accountStillSigned()) return;
+                    // Only hold the app out of tourist mode for a confirmed, live login. A
+                    // stored ssoid alone could keep a logged-out device looking signed in.
+                    if (!hasInitializedAccountSdk(host.loader) || !accountLoggedIn()) return;
                     param.setResult(null);
                     Log.i("OplusBandBridge", "OHEALTH_ACCOUNT_TOURIST_IGNORED");
                     OHealthDeviceHook.traceLine(context, "OHEALTH_ACCOUNT_TOURIST_IGNORED");
@@ -232,6 +279,18 @@ public final class OHealthHealthImportHook {
         }
     }
 
+    /** A live signed-in system account. Only call after the SDK is initialized. */
+    private boolean accountLoggedIn() {
+        try {
+            Class<?> accounts = Class.forName("com.heytap.health.account.AccountHelper", false, host.loader);
+            Object manager = accounts.getMethod("getAccountManager").invoke(null);
+            return manager != null && Boolean.TRUE.equals(
+                    manager.getClass().getMethod("isSystemLogin").invoke(manager));
+        } catch (Throwable unavailable) {
+            return false;
+        }
+    }
+
     private void request() {
         if (scheduled.compareAndSet(false, true)) worker.post(work);
     }
@@ -243,6 +302,12 @@ public final class OHealthHealthImportHook {
             return;
         }
         scheduled.set(false);
+        // Never read the account before the app has initialized the account SDK: doing so
+        // starts AccountSdk.init early and wedges it as "other brand" (no ssoid/token).
+        if (!accountReady()) {
+            scheduleRetry(2_000);
+            return;
+        }
         boolean retrySoon = false;
         try {
             ensureAccount();
