@@ -132,18 +132,18 @@ final class OHealthSleepWriter {
         if (ownedByOther(stats, night.date(), device, previousDevice())) return "other-device";
         List<?> existing = host.readRows(api, account, TABLE_SLEEP, device, night.dayStartMs(),
                 night.dayEndMs(), 0, true);
-        boolean sameSegments = segmentsMatch(existing, device, night);
+        List<OHealthSleepPlan.Segment> segments = minuteRows(night.segments());
+        boolean sameSegments = segmentsMatch(existing, device, segments, night);
         boolean sameStat = !summary || statMatches(stats, device, night);
         if (sameSegments && sameStat) return "already-ours";
         if (!sameSegments) {
             // Delete only this session. A nap later the same day stays in the table.
             host.deleteRows(api, TABLE_SLEEP, account, device, night.fallAsleepMs(), night.wakeMs());
-            insertSegments(api, account, device, night.segments());
+            insertSegments(api, account, device, segments);
             existing = host.readRows(api, account, TABLE_SLEEP, device, night.dayStartMs(),
                     night.dayEndMs(), 0, true);
-            if (!segmentsMatch(existing, device, night)) {
-                boolean[] kept = new boolean[night.segments().size()];
-                List<OHealthSleepPlan.Segment> segments = night.segments();
+            if (!segmentsMatch(existing, device, segments, night)) {
+                boolean[] kept = new boolean[segments.size()];
                 for (Object row : existing) {
                     if (!overlapsSession(row, device, night)) continue;
                     int match = unusedSegment(row, device, segments, kept);
@@ -161,7 +161,7 @@ final class OHealthSleepWriter {
                 insertSegments(api, account, device, missing);
                 existing = host.readRows(api, account, TABLE_SLEEP, device, night.dayStartMs(),
                         night.dayEndMs(), 0, true);
-                if (!segmentsMatch(existing, device, night)) {
+                if (!segmentsMatch(existing, device, segments, night)) {
                     throw new IllegalStateException("SLEEP_SEGMENT_UNCONFIRMED rows=" + existing.size()
                             + " want=" + segments.size());
                 }
@@ -251,10 +251,32 @@ final class OHealthSleepWriter {
         return row;
     }
 
-    private boolean segmentsMatch(List<?> rows, String device, OHealthSleepPlan.Night night)
-            throws ReflectiveOperationException {
+    /**
+     * OHealth stores one {@code DBSleep} row per minute. Its device writer sets
+     * {@code endTimestamp = start + TIME_ONE_MINUTE} and the sleep-score pass indexes the stage
+     * array by each row's start minute, so a bar that spans several minutes must be split into
+     * one-minute rows. Writing a whole stage bar as a single row leaves the neighbouring minutes at
+     * the default wake state, the score pass sees almost no sleep, and the night scores zero.
+     */
+    static List<OHealthSleepPlan.Segment> minuteRows(List<OHealthSleepPlan.Segment> segments) {
+        List<OHealthSleepPlan.Segment> rows = new ArrayList<>();
+        for (OHealthSleepPlan.Segment segment : segments) {
+            long start = segment.startMs();
+            long end = segment.endMs();
+            if (end <= start) continue;
+            while (start < end) {
+                long next = Math.min(start + 60_000L, end);
+                rows.add(new OHealthSleepPlan.Segment(start, next, segment.sleepState()));
+                start = next;
+            }
+        }
+        return rows;
+    }
+
+    private boolean segmentsMatch(List<?> rows, String device, List<OHealthSleepPlan.Segment> segments,
+            OHealthSleepPlan.Night night) throws ReflectiveOperationException {
         boolean[] used = new boolean[rows.size()];
-        for (OHealthSleepPlan.Segment segment : night.segments()) {
+        for (OHealthSleepPlan.Segment segment : segments) {
             boolean found = false;
             for (int i = 0; i < rows.size(); i++) {
                 if (used[i] || !sameSegment(rows.get(i), device, segment)) continue;
