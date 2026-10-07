@@ -165,6 +165,16 @@ public final class OHealthSleepPlanTest {
         assertFalse(OHealthSleepPlan.summary(nights, nights.get(0)));
     }
 
+    @Test public void summaryClockUsesSleepDayMinutes() {
+        // Matches the host's StoreUtil.changeMillisToCurrentDayMinutes: 20:00-23:59 keep their
+        // clock value, 00:00-19:59 count into the next day.
+        assertEquals(1200, OHealthSleepPlan.sleepDayMinutes(at(2026, 10, 4, 20, 0), ZONE));
+        assertEquals(1395, OHealthSleepPlan.sleepDayMinutes(at(2026, 10, 4, 23, 15), ZONE));
+        assertEquals(1539, OHealthSleepPlan.sleepDayMinutes(at(2026, 10, 5, 1, 39), ZONE));
+        assertEquals(2065, OHealthSleepPlan.sleepDayMinutes(at(2026, 10, 5, 10, 25), ZONE));
+        assertEquals(2639, OHealthSleepPlan.sleepDayMinutes(at(2026, 10, 5, 19, 59), ZONE));
+    }
+
     private static HealthRecord interval(String id, long start, long end) {
         return new HealthRecord(id, "band", "sleep_interval", start, end, null, null, 1, "+08:00", "sleep", true);
     }

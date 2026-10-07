@@ -37,6 +37,18 @@ public final class OHealthSleepPlan {
         return day.getYear() * 10000 + day.getMonthValue() * 100 + day.getDayOfMonth();
     }
 
+    /**
+     * OHealth keeps the sleep summary clock as minutes of the sleep day, the same conversion the
+     * host applies in StoreUtil.changeMillisToCurrentDayMinutes: 20:00 stays 1200 and 01:39 becomes
+     * 1539. The public insert path stores the value verbatim, so the bridge has to convert it.
+     */
+    public static long sleepDayMinutes(long epochMs, ZoneId zone) {
+        var local = Instant.ofEpochMilli(epochMs).atZone(zone).toLocalDateTime();
+        int hour = local.getHour();
+        if (hour < 20) hour += 24;
+        return hour * 60L + local.getMinute();
+    }
+
     /** Xiaomi SleepState: 2 deep, 3 light, 4 REM, 5 awake. There is no separate 熟睡. */
     public static int hostState(int bandStage) {
         return switch (bandStage) {

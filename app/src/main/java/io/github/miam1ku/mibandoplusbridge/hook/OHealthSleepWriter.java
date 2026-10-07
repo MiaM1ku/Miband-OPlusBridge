@@ -240,8 +240,9 @@ final class OHealthSleepWriter {
         statAccount.invoke(row, account);
         statDevice.invoke(row, device);
         statDate.invoke(row, night.date());
-        statFall.invoke(row, night.fallAsleepMs());
-        statWake.invoke(row, night.wakeMs());
+        // The host stores the summary clock as sleep-day minutes, not the raw timestamps.
+        statFall.invoke(row, OHealthSleepPlan.sleepDayMinutes(night.fallAsleepMs(), java.time.ZoneId.systemDefault()));
+        statWake.invoke(row, OHealthSleepPlan.sleepDayMinutes(night.wakeMs(), java.time.ZoneId.systemDefault()));
         statSleep.invoke(row, night.sleepMinutes());
         statDeep.invoke(row, night.deepMinutes());
         statLight.invoke(row, night.lightMinutes());
@@ -295,8 +296,10 @@ final class OHealthSleepWriter {
             if (!statClass.isInstance(row) || night.date() != (Integer) statGetDate.invoke(row)) continue;
             String owner = (String) statGetDevice.invoke(row);
             if (owner != null && !owner.isBlank() && !device.equals(owner)) continue;
-            return night.fallAsleepMs() == (Long) statGetFall.invoke(row)
-                    && night.wakeMs() == (Long) statGetWake.invoke(row)
+            return OHealthSleepPlan.sleepDayMinutes(night.fallAsleepMs(), java.time.ZoneId.systemDefault())
+                            == (Long) statGetFall.invoke(row)
+                    && OHealthSleepPlan.sleepDayMinutes(night.wakeMs(), java.time.ZoneId.systemDefault())
+                            == (Long) statGetWake.invoke(row)
                     && night.sleepMinutes() == (Long) statGetSleep.invoke(row)
                     && night.deepMinutes() == (Long) statGetDeep.invoke(row)
                     && night.lightMinutes() == (Long) statGetLight.invoke(row)
