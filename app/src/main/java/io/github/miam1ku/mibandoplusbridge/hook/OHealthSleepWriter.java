@@ -21,6 +21,7 @@ final class OHealthSleepWriter {
     static final int TABLE_STAT = 1011;
     private static final String[] COLUMNS = {"recordId", "revision", "record"};
     private final OHealthHealthImportHook.HostContract host;
+    private final OHealthSleepDerivedWriter derived;
     private final Class<?> sleepClass;
     private final Class<?> statClass;
     private final Constructor<?> sleepNew;
@@ -34,6 +35,14 @@ final class OHealthSleepWriter {
 
     OHealthSleepWriter(OHealthHealthImportHook.HostContract host) throws ReflectiveOperationException {
         this.host = host;
+        OHealthSleepDerivedWriter derivedWriter;
+        try {
+            derivedWriter = new OHealthSleepDerivedWriter(host);
+        } catch (ReflectiveOperationException unavailable) {
+            Log.i("OplusBandBridge", "OHEALTH_SLEEP_DERIVED_CONTRACT " + unavailable);
+            derivedWriter = null;
+        }
+        this.derived = derivedWriter;
         ClassLoader loader = host.loader;
         sleepClass = Class.forName("com.heytap.databaseengine.model.Sleep", false, loader);
         statClass = Class.forName("com.heytap.databaseengine.model.SleepDataStat", false, loader);
@@ -112,6 +121,21 @@ final class OHealthSleepWriter {
                     Log.i("OplusBandBridge", line);
                     OHealthDeviceHook.traceLine(context, line);
                 }
+                if (derived != null && !"other-device".equals(skip)) {
+                    try {
+                        if (skip == null || !indexPresent(api, account, device, night)) {
+                            writeDerived(api, account, device, night, context, queued);
+                        }
+                        if (skip == null || !dayStatPresent(api, account, device, night)) {
+                            derived.writeDayStat(api, account, device, night);
+                        }
+                    } catch (Exception derivedFailure) {
+                        Log.i("OplusBandBridge", "OHEALTH_SLEEP_DERIVED_FAILED date=" + night.date()
+                                + " " + derivedFailure);
+                    }
+                }
+            } catch (SecurityException paused) {
+                throw paused;
             } catch (IllegalStateException heldNight) {
                 String reason = heldNight.getMessage();
                 if (reason == null || !reason.startsWith("SLEEP_SEGMENT_UNCONFIRMED")) throw heldNight;
@@ -200,6 +224,67 @@ final class OHealthSleepWriter {
             }
         }
         return records;
+    }
+
+    /** Band measurements of one kind inside [start, end). */
+    private List<HealthRecord> window(Context context, String account, String device, String kind,
+            long start, long end) throws Exception {
+        List<HealthRecord> records = new ArrayList<>();
+        String after = null;
+        for (;;) {
+            Uri uri = after == null ? HealthQueueProvider.RECORDS_URI
+                    : HealthQueueProvider.RECORDS_URI.buildUpon().appendQueryParameter("after", after).build();
+            int count = 0;
+            try (Cursor rows = context.getContentResolver().query(uri, COLUMNS,
+                    "account=? AND deviceId=? AND kind=? AND startMs<? AND endMs>?",
+                    new String[] {account, device, kind, Long.toString(end), Long.toString(start)}, null)) {
+                if (rows == null) return records;
+                while (rows.moveToNext()) {
+                    records.add(HealthRecord.fromJson(new JSONObject(rows.getString(2))));
+                    after = rows.getString(0);
+                    count++;
+                }
+            }
+            if (count < 200) break;
+        }
+        return records;
+    }
+
+    private void writeDerived(Object api, String account, String device, OHealthSleepPlan.Night night,
+            Context context, String queued) throws Exception {
+        long start = night.fallAsleepMs();
+        long end = night.wakeMs();
+        OHealthSleepDerivedWriter.Summary heart = summarize(context, account, queued, "heart_rate",
+                start, end, 40, 220);
+        OHealthSleepDerivedWriter.Summary spo2 = summarize(context, account, queued, "spo2",
+                start, end, 60, 100);
+        derived.write(api, account, device, night, heart, spo2);
+    }
+
+    private boolean indexPresent(Object api, String account, String device,
+            OHealthSleepPlan.Night night) throws Exception {
+        return !host.readRows(api, account, OHealthSleepDerivedWriter.TABLE_INDEX, device,
+                night.fallAsleepMs(), night.wakeMs(), 0, false).isEmpty();
+    }
+
+    private boolean dayStatPresent(Object api, String account, String device,
+            OHealthSleepPlan.Night night) throws Exception {
+        return !host.readRows(api, account, OHealthSleepDerivedWriter.TABLE_DAY_STAT, device,
+                night.fallAsleepMs(), night.wakeMs(), 0, false).isEmpty();
+    }
+
+    private OHealthSleepDerivedWriter.Summary summarize(Context context, String account, String device,
+            String kind, long start, long end, int low, int high) throws Exception {
+        List<HealthRecord> records = window(context, account, device, kind, start, end);
+        int[] values = new int[records.size()];
+        int used = 0;
+        for (HealthRecord record : records) {
+            if (record.value == null) continue;
+            int value = record.value.intValue();
+            if (value < low || value > high) continue;
+            values[used++] = value;
+        }
+        return OHealthSleepDerivedWriter.summarize(values, used);
     }
 
     private Object segmentRow(String account, String device, OHealthSleepPlan.Segment segment)
