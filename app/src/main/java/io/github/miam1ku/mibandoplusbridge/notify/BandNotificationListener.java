@@ -14,7 +14,10 @@ import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PowerManager;
 import android.service.notification.NotificationListenerService;
+import android.service.notification.NotificationListenerService.Ranking;
+import android.service.notification.NotificationListenerService.RankingMap;
 import android.service.notification.StatusBarNotification;
 import android.telecom.TelecomManager;
 import io.github.miam1ku.mibandoplusbridge.data.SessionLog;
@@ -165,6 +168,9 @@ public final class BandNotificationListener extends NotificationListenerService 
                 if (baseline.size() > NotificationRelay.CAPACITY) break;
             }
             relay.connected(baseline);
+            if (!"NOTIFICATION_BASELINE_CAPACITY".equals(relay.lastFailureCode())) {
+                for (NotificationRelay.Event event : hold.drain()) relay.posted(event);
+            }
         } catch (SecurityException unavailable) { relay.disconnected(); }
     }
 
@@ -198,6 +204,82 @@ public final class BandNotificationListener extends NotificationListenerService 
             skip("call", item.getPackageName());
             return;
         }
+        Notification n = item.getNotification();
+        Ranking ranking = new Ranking();
+        if (!admit(item, n, rankings, ranking)) {
+            skip(skipReason(item, n, rankings, ranking), item.getPackageName());
+            hold.remove(item.getKey());
+            relay.removed(item.getKey());
+            return;
+        }
+        NotificationRelay.Event event = event(item, n, ranking);
+        if (!BandLiveService.notificationSessionReady(this)) {
+            hold.put(event);
+            skip("session", item.getPackageName());
+            wakeLive();
+            return;
+        }
+        hold.remove(item.getKey());
+        String appName = event.appName();
+        SessionLog.line(this, "NOTIFY_POST pkg=" + item.getPackageName()
+                + " app=" + (appName.equals(item.getPackageName()) ? "package" : "label"));
+        relay.posted(event);
+    }
+
+    private boolean admit(StatusBarNotification item, Notification notification, RankingMap rankings, Ranking ranking) {
+        if (getPackageName().equals(item.getPackageName())) return false;
+        if (PhoneAlarmNotice.CLOCK.equals(item.getPackageName())) return false;
+        if (!NotifyAdmission.packageAllowed(settings.getStringSet("packages", Set.of()), item.getPackageName())) return false;
+        if (!NotifyAdmission.healthAllows(settings.getBoolean("mainSwitchKnown", false),
+                settings.getBoolean("mainSwitch", true), settings.getStringSet("deniedPackages", Set.of()),
+                item.getPackageName())) return false;
+        if (notification == null) return false;
+        if ((notification.flags & (Notification.FLAG_FOREGROUND_SERVICE | Notification.FLAG_GROUP_SUMMARY)) != 0) return false;
+        if (notification.visibility == Notification.VISIBILITY_SECRET) return false;
+        if (rankings == null || !rankings.getRanking(item.getKey(), ranking)) return false;
+        if (ranking.getImportance() <= NotificationManager.IMPORTANCE_LOW) return false;
+        return !screenBlocks();
+    }
+
+    private boolean screenBlocks() {
+        PowerManager power = getSystemService(PowerManager.class);
+        boolean interactive = power != null && power.isInteractive();
+        return NotifyAdmission.screenBlocks(settings.getBoolean("screenOnPush", true), interactive, locked(this));
+    }
+
+    private NotificationRelay.Event event(StatusBarNotification item, Notification n, Ranking ranking) {
+        boolean locked = locked(this);
+        Notification visible = n;
+        boolean bodyAllowed = settings.getBoolean("showBody", true);
+        if (locked && n.visibility == Notification.VISIBILITY_PRIVATE) {
+            if (n.publicVersion != null && n.publicVersion.visibility != Notification.VISIBILITY_SECRET) visible = n.publicVersion;
+            else bodyAllowed = false;
+        }
+        String title = extra(visible, Notification.EXTRA_TITLE);
+        String body = bodyAllowed ? extra(visible, Notification.EXTRA_BIG_TEXT) : "";
+        if (bodyAllowed && body.isBlank()) body = extra(visible, Notification.EXTRA_TEXT);
+        String appName = AppLabels.label(this, item.getPackageName());
+        if (appName.isBlank()) appName = item.getPackageName();
+        return new NotificationRelay.Event(item.getPackageName(), appName, item.getKey(),
+                title, body, visible != n ? title : null, visible != n ? body : null,
+                item.getPostTime(), n.visibility, locked, false, false, ranking.getImportance());
+    }
+
+    private String skipReason(StatusBarNotification item, Notification notification, RankingMap rankings, Ranking ranking) {
+        if (getPackageName().equals(item.getPackageName())) return "self";
+        if (PhoneAlarmNotice.CLOCK.equals(item.getPackageName())) return "clock";
+        if (!NotifyAdmission.packageAllowed(settings.getStringSet("packages", Set.of()), item.getPackageName())) return "package";
+        if (!NotifyAdmission.healthAllows(settings.getBoolean("mainSwitchKnown", false),
+                settings.getBoolean("mainSwitch", true), settings.getStringSet("deniedPackages", Set.of()),
+                item.getPackageName())) return "health";
+        if (notification == null) return "empty";
+        if ((notification.flags & Notification.FLAG_GROUP_SUMMARY) != 0) return "summary";
+        if ((notification.flags & Notification.FLAG_FOREGROUND_SERVICE) != 0) return "foreground";
+        if (notification.visibility == Notification.VISIBILITY_SECRET) return "secret";
+        if (rankings == null || !rankings.getRanking(item.getKey(), ranking)) return "ranking";
+        if (ranking.getImportance() <= NotificationManager.IMPORTANCE_LOW) return "importance";
+        if (screenBlocks()) return "screen";
+        return "filtered";
     }
 
 
