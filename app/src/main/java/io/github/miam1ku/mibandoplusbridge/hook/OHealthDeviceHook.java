@@ -1097,15 +1097,20 @@ public final class OHealthDeviceHook {
                     forwardHostNotification(param.args[0], true);
                 }
             });
+            // Forward before skipping. Swallowing this call never reaches the register center.
             String manager = "com.heytap.health.watch.notification.impl.transceiver.NotificationEventManager";
             XposedHelpers.findAndHookMethod(manager, loader, "onNotificationPosted", bean, new XC_MethodHook() {
                 @Override protected void beforeHookedMethod(MethodHookParam param) {
-                    if (registeredBand()) param.setResult(null);
+                    if (!registeredBand()) return;
+                    forwardHostNotification(param.args[0], false);
+                    param.setResult(null);
                 }
             });
             XposedHelpers.findAndHookMethod(manager, loader, "onNotificationRemoved", bean, new XC_MethodHook() {
                 @Override protected void beforeHookedMethod(MethodHookParam param) {
-                    if (registeredBand()) param.setResult(null);
+                    if (!registeredBand()) return;
+                    forwardHostNotification(param.args[0], true);
+                    param.setResult(null);
                 }
             });
             XposedHelpers.findAndHookMethod("com.heytap.health.base.app.ToastUtil", loader,
