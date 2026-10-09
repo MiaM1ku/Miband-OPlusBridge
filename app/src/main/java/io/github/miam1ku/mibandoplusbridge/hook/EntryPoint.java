@@ -16,6 +16,11 @@ public final class EntryPoint implements IXposedHookLoadPackage {
     private static final AtomicBoolean healthInstalled = new AtomicBoolean();
 
     @Override public void handleLoadPackage(XC_LoadPackage.LoadPackageParam load) {
+        if (HostIdentity.MI_PACKAGE.equals(load.packageName)
+                || HostIdentity.DEVICES_PACKAGE.equals(load.packageName)
+                || "com.coloros.alarmclock".equals(load.packageName)) {
+            probe("PACKAGE_LOADED pkg=" + load.packageName + " process=" + load.processName);
+        }
         if ("com.coloros.alarmclock".equals(load.packageName)) {
             XposedHelpers.findAndHookMethod(Application.class, "attach", Context.class, new XC_MethodHook() {
                 @Override protected void afterHookedMethod(MethodHookParam param) {
@@ -25,7 +30,7 @@ public final class EntryPoint implements IXposedHookLoadPackage {
                     try {
                         ClockAlarmHook.install(app, load.classLoader);
                     } catch (Throwable failure) {
-                        android.util.Log.i("OplusBandBridge", "CLOCK_ALARM_HOOK_SKIPPED "
+                        probe("CLOCK_ALARM_HOOK_SKIPPED "
                                 + failure.getClass().getSimpleName());
                     }
                 }
@@ -36,9 +41,7 @@ public final class EntryPoint implements IXposedHookLoadPackage {
                 && !"com.heytap.mydevices".equals(load.packageName)
                 && !"com.heytap.health".equals(load.packageName)) return;
         if ("com.heytap.health".equals(load.packageName)) {
-            android.util.Log.i("OplusBandBridge", "OHEALTH_PACKAGE_LOADED process=" + load.processName);
-            de.robv.android.xposed.XposedBridge.log("OplusBandBridge OHEALTH_PACKAGE_LOADED process="
-                    + load.processName);
+            probe("OHEALTH_PACKAGE_LOADED process=" + load.processName);
             OHealthLoginDebug.install(load.classLoader);
             XposedHelpers.findAndHookMethod("com.heytap.health.SportHealthApplication", load.classLoader,
                     "onCreate", new XC_MethodHook() {
@@ -59,109 +62,120 @@ public final class EntryPoint implements IXposedHookLoadPackage {
         XposedHelpers.findAndHookMethod(Application.class, "attach", Context.class, new XC_MethodHook() {
             @Override protected void afterHookedMethod(MethodHookParam param) {
                 if (!installed.compareAndSet(false, true)) return;
+                probe("ATTACH process=" + load.processName);
                 Context context = (Context) param.args[0];
                 if ("com.heytap.mydevices".equals(load.packageName)) {
                     try {
                         MyDevicesHook.install(context, load.classLoader);
-                        android.util.Log.i("OplusBandBridge", "DEVICE_CARD_HOOK_INSTALLED");
+                        probe("DEVICE_CARD_HOOK_INSTALLED");
                     } catch (Throwable skipped) {
-                        android.util.Log.i("OplusBandBridge", "DEVICE_CARD_HOOK_SKIPPED "
+                        probe("DEVICE_CARD_HOOK_SKIPPED "
                                 + skipped.getClass().getSimpleName()
                                 + (skipped.getMessage() == null ? "" : " " + skipped.getMessage()));
                     }
                     return;
                 }
                 if (!HostIdentity.installed(context, HostIdentity.MI_PACKAGE)) {
-                    android.util.Log.i("OplusBandBridge", "MI_PACKAGE_ABSENT");
+                    probe("MI_PACKAGE_ABSENT");
                     return;
                 }
                 try {
                     MiFitnessImportHook.install(context, load.classLoader);
-                    android.util.Log.i("OplusBandBridge", "OplusBandBridge: IMPORT_HOOK_INSTALLED");
+                    probe("OplusBandBridge: IMPORT_HOOK_INSTALLED");
                 } catch (Throwable incompatible) {
-                    android.util.Log.i("OplusBandBridge", "OplusBandBridge: HOST_VERSION_UNSUPPORTED");
+                    probe("OplusBandBridge: HOST_VERSION_UNSUPPORTED");
                 }
                 try {
                     TransportProbeHook.install(context, load.classLoader);
                 } catch (Throwable incompatible) {
-                    android.util.Log.i("OplusBandBridge", "TRANSPORT_PROBE_UNAVAILABLE");
+                    probe("TRANSPORT_PROBE_UNAVAILABLE");
                 }
                 try {
                     ProtocolCaptureHook.install(context, load.classLoader);
                 } catch (Throwable incompatible) {
-                    android.util.Log.i("OplusBandBridge", "PROTOCOL_CAPTURE_UNAVAILABLE");
+                    probe("PROTOCOL_CAPTURE_UNAVAILABLE");
                 }
             }
         });
     }
 
+    /**
+     * LSPosed only relays XposedBridge.log into its own log on this device; a plain
+     * android.util.Log call from this module never showed up there. Write to both so a
+     * missing line means "not injected" rather than "logged on the invisible channel".
+     */
+    private static void probe(String line) {
+        android.util.Log.i("OplusBandBridge", line);
+        XposedBridge.log("OplusBandBridge " + line);
+    }
+
     private static void installHealth(Context context, ClassLoader loader) {
         if (context == null || !healthInstalled.compareAndSet(false, true)) return;
-        android.util.Log.i("OplusBandBridge", "OHEALTH_HOOKS_BEGIN");
+        probe("OHEALTH_HOOKS_BEGIN");
         try {
             OHealthWeatherHook.install(context, loader);
-            android.util.Log.i("OplusBandBridge", "OHEALTH_WEATHER_HOOK_INSTALLED");
+            probe("OHEALTH_WEATHER_HOOK_INSTALLED");
         } catch (Throwable incompatible) {
-            android.util.Log.i("OplusBandBridge", "HOST_VERSION_UNSUPPORTED_OHEALTH");
+            probe("HOST_VERSION_UNSUPPORTED_OHEALTH");
         }
         try {
             OHealthDeviceHook.install(context, loader);
-            android.util.Log.i("OplusBandBridge", "OHEALTH_DEVICE_HOOK_INSTALLED");
+            probe("OHEALTH_DEVICE_HOOK_INSTALLED");
         } catch (Throwable incompatible) {
-            android.util.Log.i("OplusBandBridge", "OHEALTH_DEVICE_HOOK_UNAVAILABLE");
+            probe("OHEALTH_DEVICE_HOOK_UNAVAILABLE");
         }
         try {
             OHealthFindPhoneHook.install(context, loader);
-            android.util.Log.i("OplusBandBridge", "OHEALTH_FIND_PHONE_HOOK_INSTALLED");
+            probe("OHEALTH_FIND_PHONE_HOOK_INSTALLED");
         } catch (Throwable incompatible) {
-            android.util.Log.i("OplusBandBridge", "OHEALTH_FIND_PHONE_HOOK_UNAVAILABLE");
+            probe("OHEALTH_FIND_PHONE_HOOK_UNAVAILABLE");
         }
         try {
             OHealthMusicHook.install(context, loader);
-            android.util.Log.i("OplusBandBridge", "OHEALTH_MUSIC_HOOK_INSTALLED");
+            probe("OHEALTH_MUSIC_HOOK_INSTALLED");
         } catch (Throwable incompatible) {
-            android.util.Log.i("OplusBandBridge", "OHEALTH_MUSIC_HOOK_UNAVAILABLE");
+            probe("OHEALTH_MUSIC_HOOK_UNAVAILABLE");
         }
         String process = Application.getProcessName();
         if (process != null && process.endsWith(":SportDaemonService")) {
             try {
                 installSleepRowDelete(context, loader);
                 installSleepStatReplace(loader);
-                android.util.Log.i("OplusBandBridge", "OHEALTH_SLEEP_DELETE_HOOKED");
+                probe("OHEALTH_SLEEP_DELETE_HOOKED");
             } catch (Throwable incompatible) {
-                android.util.Log.i("OplusBandBridge", "OHEALTH_SLEEP_DELETE_HOOK_UNAVAILABLE "
+                probe("OHEALTH_SLEEP_DELETE_HOOK_UNAVAILABLE "
                         + incompatible.getClass().getSimpleName());
             }
         }
         try {
             OHealthHealthImportHook.install(context, loader);
-            android.util.Log.i("OplusBandBridge", "OHEALTH_IMPORT_HOOK_INSTALLED");
+            probe("OHEALTH_IMPORT_HOOK_INSTALLED");
         } catch (Throwable incompatible) {
-            android.util.Log.i("OplusBandBridge", "OHEALTH_IMPORT_HOOK_UNAVAILABLE");
+            probe("OHEALTH_IMPORT_HOOK_UNAVAILABLE");
         }
         try {
             OHealthSleepHook.install(context, loader);
-            android.util.Log.i("OplusBandBridge", "OHEALTH_SLEEP_HOOK_INSTALLED");
+            probe("OHEALTH_SLEEP_HOOK_INSTALLED");
         } catch (Throwable incompatible) {
-            android.util.Log.i("OplusBandBridge", "OHEALTH_SLEEP_HOOK_UNAVAILABLE");
+            probe("OHEALTH_SLEEP_HOOK_UNAVAILABLE");
         }
         try {
             OHealthHomeMetricHook.install(context, loader);
-            android.util.Log.i("OplusBandBridge", "OHEALTH_HOME_METRIC_HOOK_INSTALLED");
+            probe("OHEALTH_HOME_METRIC_HOOK_INSTALLED");
         } catch (Throwable incompatible) {
-            android.util.Log.i("OplusBandBridge", "OHEALTH_HOME_METRIC_HOOK_UNAVAILABLE");
+            probe("OHEALTH_HOME_METRIC_HOOK_UNAVAILABLE");
         }
         try {
             OHealthNotificationAccessHook.install(context, loader);
-            android.util.Log.i("OplusBandBridge", "OHEALTH_NOTIFICATION_ACCESS_HOOK_INSTALLED");
+            probe("OHEALTH_NOTIFICATION_ACCESS_HOOK_INSTALLED");
         } catch (Throwable incompatible) {
-            android.util.Log.i("OplusBandBridge", "OHEALTH_NOTIFICATION_ACCESS_HOOK_UNAVAILABLE");
+            probe("OHEALTH_NOTIFICATION_ACCESS_HOOK_UNAVAILABLE");
         }
         try {
             OHealthDndHook.install(context);
-            android.util.Log.i("OplusBandBridge", "OHEALTH_DND_HOOK_INSTALLED");
+            probe("OHEALTH_DND_HOOK_INSTALLED");
         } catch (Throwable incompatible) {
-            android.util.Log.i("OplusBandBridge", "OHEALTH_DND_HOOK_UNAVAILABLE");
+            probe("OHEALTH_DND_HOOK_UNAVAILABLE");
         }
     }
 
