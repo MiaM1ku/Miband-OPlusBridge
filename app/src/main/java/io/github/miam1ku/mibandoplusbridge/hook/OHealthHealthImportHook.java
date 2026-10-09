@@ -664,25 +664,32 @@ public final class OHealthHealthImportHook {
             // end is exclusive. Inclusive host filters must not eat the next real sample.
             type.getMethod("setEndTime", long.class).invoke(option, end - 1);
             Object observer = observerConstructor.newInstance();
+            boolean reportedSuccess = false;
             try {
                 subscribe.invoke(api.getClass().getMethod("deleteSportHealthData", type).invoke(api, option), observer);
-                // deleteSportHealthData reports the number of deleted rows through the same
-                // SyncObserver callback the insert path uses for error codes, so its boolean is
-                // not a success flag: a delete that removed rows reports false. Wait for the call
-                // to finish, then confirm that the window is actually empty.
-                observerResult.invoke(observer);
+                reportedSuccess = Boolean.TRUE.equals(observerResult.invoke(observer));
             } finally {
                 try { observerDispose.invoke(observer); } catch (ReflectiveOperationException ignored) { }
             }
-            if (leftover(api, account, table, device, start, end)) {
-                throw new IllegalStateException("HEALTH_DELETE_UNCONFIRMED");
+            // Table 1001 store.delete returns the deleted row count on this callback, and
+            // SyncObserver treats every non-zero value as failure. Wait above, then confirm
+            // the window is empty. Sleep 1010, step stat 1002 and stress 1017 inherit
+            // SportDataStore.delete, which returns 0 and removes nothing. An empty-window
+            // check there fails a no-op and stops the night or the stress cleanup.
+            if (table == OHealthStepWriter.TABLE_DETAIL) {
+                if (minuteRowsRemain(api, account, device, start, end)) {
+                    throw new IllegalStateException("HEALTH_DELETE_UNCONFIRMED");
+                }
+                return;
             }
+            if (!reportedSuccess) throw new IllegalStateException("HEALTH_DELETE_UNCONFIRMED");
         }
 
-        /** The deleted window uses the same inclusive bounds as the host read, so an empty read confirms it. */
-        private boolean leftover(Object api, String account, int table, String device, long start, long end)
+        /** Detail deletes use the same inclusive host end as the read, so an empty read confirms one. */
+        private boolean minuteRowsRemain(Object api, String account, String device, long start, long end)
                 throws Exception {
-            return !readRows(api, account, table, device, Math.max(0, start), end - 1, 0, false, 1).isEmpty();
+            return !readRows(api, account, OHealthStepWriter.TABLE_DETAIL, device,
+                    Math.max(0, start), end - 1, 0, false, 1).isEmpty();
         }
 
         /** Same post-insert cloud request as databaseengineservice. A cloud failure leaves the local row. */
