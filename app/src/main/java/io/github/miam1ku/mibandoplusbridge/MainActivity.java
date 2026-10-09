@@ -38,6 +38,7 @@ import io.github.miam1ku.mibandoplusbridge.integration.HealthQueueProvider;
 import io.github.miam1ku.mibandoplusbridge.data.BandStateRepository;
 import io.github.miam1ku.mibandoplusbridge.service.OwnershipController;
 import io.github.miam1ku.mibandoplusbridge.service.BandLiveService;
+import io.github.miam1ku.mibandoplusbridge.notify.BandNotificationListener;
 import io.github.miam1ku.mibandoplusbridge.notify.SleepMusic;
 import io.github.miam1ku.mibandoplusbridge.protocol.BandNotificationCommand;
 import io.github.miam1ku.mibandoplusbridge.protocol.SppDiagnosticClient;
@@ -56,6 +57,7 @@ public final class MainActivity extends AppCompatActivity {
     private LinearLayout bonded;
     private LinearLayout advanced;
     private LinearLayout setupCard;
+    private LinearLayout healthAccessCard;
     private String selectedAddress = "";
     private TextView status;
     private TextView ownershipStatus;
@@ -111,6 +113,11 @@ public final class MainActivity extends AppCompatActivity {
         healthLine = screen.caption(statusCard, "");
         healthLine.setVisibility(View.GONE);
         screen.setLastChildMargin(statusCard, 0);
+        healthAccessCard = screen.card();
+        screen.bodyText(healthAccessCard, "系统没有真正给 OPPO 健康通知使用权。请关掉再打开一次。");
+        screen.outlined(healthAccessCard, "打开健康的通知使用权", this::openHealthListenerSettings);
+        screen.setLastChildMargin(healthAccessCard, 0);
+        healthAccessCard.setVisibility(View.GONE);
         setupCard = screen.card();
         screen.overline(setupCard, "首次设置");
         checklistRoot = screen.caption(setupCard, "");
@@ -257,9 +264,35 @@ public final class MainActivity extends AppCompatActivity {
 
     @Override protected void onResume() {
         super.onResume();
+        refreshHealthAccessCard();
         promptHostVersions();
         if (!rootGranted) requestRoot();
         else continueInit();
+    }
+
+    private void refreshHealthAccessCard() {
+        if (healthAccessCard == null) return;
+        io.github.miam1ku.mibandoplusbridge.data.LocalPrefs prefs =
+                io.github.miam1ku.mibandoplusbridge.data.LocalPrefs.open(this, BandNotificationListener.SETTINGS);
+        boolean show = prefs.getBoolean("healthSecure", false)
+                && !prefs.getBoolean("healthApproved", true)
+                && prefs.getBoolean("healthGrantFailed", false);
+        healthAccessCard.setVisibility(show ? View.VISIBLE : View.GONE);
+    }
+
+    private void openHealthListenerSettings() {
+        Intent detail = new Intent("android.settings.NOTIFICATION_LISTENER_DETAIL_SETTINGS");
+        detail.putExtra("android.provider.extra.NOTIFICATION_LISTENER_COMPONENT_NAME",
+                "com.heytap.health/com.heytap.health.watch.commonnotification.HeytapNotificationListenerService");
+        try {
+            startActivity(detail);
+        } catch (RuntimeException failure) {
+            try {
+                startActivity(new Intent("android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS"));
+            } catch (RuntimeException ignored) {
+                ownershipStatus.setText("打不开通知使用权设置。");
+            }
+        }
     }
 
     private void continueInit() {

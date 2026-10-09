@@ -1113,6 +1113,19 @@ public final class OHealthDeviceHook {
                     param.setResult(null);
                 }
             });
+            try {
+                XposedHelpers.findAndHookMethod(
+                        "com.heytap.health.watch.notification.impl.transceiver.BaseInterceptWorker",
+                        loader, "sendInterceptMessage", new XC_MethodHook() {
+                            @Override protected void beforeHookedMethod(MethodHookParam param) {
+                                if (registeredBand()) param.setResult(null);
+                            }
+                        });
+            } catch (Throwable failure) {
+                Log.i("OplusBandBridge", "OHEALTH_INTERCEPT_MESSAGE_UNAVAILABLE "
+                        + failure.getClass().getSimpleName());
+            }
+            installPolicyPush(loader);
             XposedHelpers.findAndHookMethod("com.heytap.health.base.app.ToastUtil", loader,
                     "showShort", String.class, new XC_MethodHook() {
                         @Override protected void beforeHookedMethod(MethodHookParam param) {
@@ -1135,8 +1148,11 @@ public final class OHealthDeviceHook {
                 thread.setDaemon(true);
                 return thread;
             });
+    private static final Map<String, Boolean> FORWARDED_EVENTS = new java.util.LinkedHashMap<>();
+    private static final java.util.concurrent.atomic.AtomicInteger policyGeneration =
+            new java.util.concurrent.atomic.AtomicInteger();
 
-    private static boolean registeredBand() {
+    static boolean registeredBand() {
         Bundle shown = snapshot;
         return shown != null && shown.getBoolean("registered", false);
     }
@@ -1152,49 +1168,73 @@ public final class OHealthDeviceHook {
         }
     }
 
-    /** OHealth already applied its own allowlist. Translate in this process, send via the bridge provider. */
-    private static boolean forwardHostNotification(Object bean, boolean removed) {
+    /** Health already decided. Translate in this process and send through the bridge provider. */
+    private static void forwardHostNotification(Object bean, boolean removed) {
         String process = android.app.Application.getProcessName();
         Bundle shown = liveSnapshot();
         if (bean == null || hostContext == null || shown == null || !shown.getBoolean("registered", false)) {
             notifyDrop("snapshot bean=" + (bean != null) + " context=" + (hostContext != null)
                     + " registered=" + (shown != null && shown.getBoolean("registered", false)), "", process);
-            return false;
+            return;
         }
         try {
             String pkg = text(bean, "getPackageName");
             String key = text(bean, "getKey");
             if (pkg.isBlank() || key.isBlank()) {
                 notifyDrop("identity pkg=" + !pkg.isBlank() + " key=" + !key.isBlank(), pkg, process);
-                return false;
+                return;
             }
-            if (deliverPhoneAlarm(bean, pkg, key, removed)) return true;
+            if (deliverPhoneAlarm(bean, pkg, key, removed)) return;
+            Object posted = XposedHelpers.callMethod(bean, "getPostTimeMillis");
+            long when = posted instanceof Number time && time.longValue() > 0
+                    ? time.longValue() : System.currentTimeMillis();
+            String title = text(bean, "getTitle");
+            String body = text(bean, "getContent");
+            String token = (removed ? "r|" : "p|") + key + "|" + when + "|" + title + "|" + body;
+            if (!OHealthNotifyFilter.claim(FORWARDED_EVENTS, token, 64)) {
+                notifyDrop("duplicate", pkg, process);
+                return;
+            }
+            ALLOWLIST.execute(() -> deliverForward(bean, removed, process, pkg, key, when, title, body));
+        } catch (Throwable failure) {
+            Log.i("OplusBandBridge", "OHEALTH_NOTIFICATION_FORWARD_FAILED "
+                    + failure.getClass().getSimpleName());
+            trace("OHEALTH_NOTIFICATION_FORWARD_FAILED " + failure.getClass().getSimpleName());
+        }
+    }
+
+    private static void deliverForward(Object bean, boolean removed, String process, String pkg, String key,
+            long when, String title, String body) {
+        try {
             boolean call = isIncomingCall(bean);
             if (!removed && !call) {
-                String blocked = readAllowBlock(bean);
-                if (blocked != null) {
-                    notifyDrop(blocked, pkg, process);
-                    return false;
-                }
-                if (screenOnBlocks(bean)) {
-                    notifyDrop("screen", pkg, process);
-                    return false;
-                }
                 Object importance = XposedHelpers.callMethod(bean, "getImportance");
                 if (importance instanceof Number level && level.intValue() <= 2) {
                     notifyDrop("importance level=" + level.intValue(), pkg, process);
-                    return false;
+                    return;
+                }
+                Boolean blocked = healthIntercept(bean);
+                if (blocked == null) {
+                    String fallback = readAllowBlock(bean);
+                    if (fallback != null) {
+                        notifyDrop(fallback, pkg, process);
+                        return;
+                    }
+                    if (screenOnBlocks(bean)) {
+                        notifyDrop("screen", pkg, process);
+                        return;
+                    }
+                } else if (blocked) {
+                    notifyDrop("intercept", pkg, process);
+                    return;
                 }
             }
             Integer id = OHealthNotifyFilter.id(HOST_NOTIFICATIONS, key, removed && !call);
             if (id == null) {
                 notifyDrop("not-forwarded", pkg, process);
-                return false;
+                return;
             }
             if (removed && call) HOST_NOTIFICATIONS.remove(key);
-            Object posted = XposedHelpers.callMethod(bean, "getPostTimeMillis");
-            long when = posted instanceof Number time && time.longValue() > 0
-                    ? time.longValue() : System.currentTimeMillis();
             Bundle extras = new Bundle();
             extras.putBoolean("removed", removed);
             extras.putBoolean("call", call);
@@ -1209,19 +1249,32 @@ public final class OHealthDeviceHook {
                 if (!resolved.isBlank()) app = resolved;
             }
             extras.putString("app", app);
-            extras.putString("title", text(bean, "getTitle"));
-            extras.putString("body", text(bean, "getContent"));
+            extras.putString("title", title);
+            extras.putString("body", body);
             extras.putLong("when", when);
             Bundle result = hostContext.getContentResolver().call(
                     io.github.miam1ku.mibandoplusbridge.integration.HostNotifyProvider.URI, "forward", null, extras);
             String status = result == null ? "NULL" : result.getString("status", "");
             Log.i("OplusBandBridge", "OHEALTH_NOTIFICATION_FORWARD removed=" + removed
                     + " call=" + call + " pkg=" + pkg + " status=" + status);
-            return true;
         } catch (Throwable failure) {
             Log.i("OplusBandBridge", "OHEALTH_NOTIFICATION_FORWARD_FAILED "
                     + failure.getClass().getSimpleName());
-            return false;
+            trace("OHEALTH_NOTIFICATION_FORWARD_FAILED " + failure.getClass().getSimpleName());
+        }
+    }
+
+    /** Null when Health's own intercept cannot be called. True means Health would drop it. */
+    private static Boolean healthIntercept(Object bean) {
+        try {
+            Class<?> manager = bean.getClass().getClassLoader().loadClass(
+                    "com.heytap.health.watch.notification.impl.transceiver.NotificationEventManager");
+            Object intercept = XposedHelpers.getStaticObjectField(manager, "mIntercept");
+            Object blocked = XposedHelpers.callMethod(intercept, "intercept", bean, true);
+            return Boolean.TRUE.equals(blocked);
+        } catch (Throwable failure) {
+            trace("OHEALTH_INTERCEPT_UNAVAILABLE " + failure.getClass().getSimpleName());
+            return null;
         }
     }
 
@@ -1333,7 +1386,6 @@ public final class OHealthDeviceHook {
                     "com.heytap.health.watch.notification.impl.whitelist.NotificationRoomHolder"), "INSTANCE");
             boolean on = io.github.miam1ku.mibandoplusbridge.notify.NotifySwitch.on(
                     XposedHelpers.callMethod(holder, "getPackageSwitchStatus", "screen_on_push"));
-            remember(null, null, null, on);
             if (on) return false;
             Object utils = XposedHelpers.getStaticObjectField(loader.loadClass(
                     "com.heytap.health.watch.notification.impl.utils.NotificationScreenUtils"), "INSTANCE");
@@ -1377,13 +1429,11 @@ public final class OHealthDeviceHook {
                     "INSTANCE");
             Object mainSwitch = XposedHelpers.callMethod(holder, "getPackageSwitchStatus", "main_switch");
             if (!io.github.miam1ku.mibandoplusbridge.notify.NotifySwitch.on(mainSwitch)) {
-                remember(false, null, null, null);
                 return "main_switch value=" + String.valueOf(mainSwitch);
             }
             String pkg = text(bean, "getPackageName");
             Object appSwitch = XposedHelpers.callMethod(holder, "getPackageSwitchStatus", pkg);
             boolean packageOn = io.github.miam1ku.mibandoplusbridge.notify.NotifySwitch.on(appSwitch);
-            remember(true, pkg, packageOn, null);
             if (!packageOn) return "package value=" + String.valueOf(appSwitch);
             return null;
         } catch (Throwable unavailable) {
@@ -1394,25 +1444,104 @@ public final class OHealthDeviceHook {
         }
     }
 
-    private static String lastPolicy = "";
-
-    private static void remember(Boolean main, String pkg, Boolean packageOn, Boolean screenOnPush) {
-        String token = String.valueOf(main) + "|" + pkg + "|" + packageOn + "|" + screenOnPush;
-        if (token.equals(lastPolicy) || hostContext == null) return;
-        lastPolicy = token;
-        android.os.Bundle extras = new android.os.Bundle();
-        if (main != null) extras.putBoolean("main", main);
-        if (pkg != null && packageOn != null) {
-            extras.putString("pkg", pkg);
-            extras.putBoolean("packageOn", packageOn);
-        }
-        if (screenOnPush != null) extras.putBoolean("screenOnPush", screenOnPush);
+    private static void installPolicyPush(ClassLoader loader) {
+        String process = android.app.Application.getProcessName();
+        if (!"com.heytap.health:transport".equals(process)) return;
         try {
-            hostContext.getContentResolver().call(
-                    io.github.miam1ku.mibandoplusbridge.integration.HostNotifyProvider.URI, "policy", null, extras);
-        } catch (RuntimeException failure) {
-            lastPolicy = "";
+            Class<?> holder = XposedHelpers.findClass(
+                    "com.heytap.health.watch.notification.impl.whitelist.NotificationRoomHolder", loader);
+            XC_MethodHook later = new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam param) { schedulePolicy(500); }
+            };
+            for (String name : new String[] {"update", "updateWithSync", "batchUpdate", "batchUpdateWithSync",
+                    "insert", "delete", "updateDbData"}) {
+                XposedBridge.hookAllMethods(holder, name, later);
+            }
+            schedulePolicy(3_000);
+        } catch (Throwable failure) {
+            Log.i("OplusBandBridge", "OHEALTH_POLICY_PUSH_UNAVAILABLE " + failure.getClass().getSimpleName());
+            trace("OHEALTH_POLICY_PUSH_UNAVAILABLE " + failure.getClass().getSimpleName());
         }
+    }
+
+    private static void schedulePolicy(long delayMs) {
+        int generation = policyGeneration.incrementAndGet();
+        ALLOWLIST.execute(() -> {
+            try {
+                Thread.sleep(Math.max(0, delayMs));
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+            if (generation == policyGeneration.get()) pushPolicy();
+        });
+    }
+
+    private static void pushPolicy() {
+        if (hostContext == null) {
+            schedulePolicy(5_000);
+            return;
+        }
+        try {
+            ClassLoader loader = hostContext.getClassLoader();
+            Object holder = XposedHelpers.getStaticObjectField(loader.loadClass(
+                    "com.heytap.health.watch.notification.impl.whitelist.NotificationRoomHolder"), "INSTANCE");
+            boolean main = io.github.miam1ku.mibandoplusbridge.notify.NotifySwitch.on(
+                    XposedHelpers.callMethod(holder, "getPackageSwitchStatus", "main_switch"));
+            boolean screen = io.github.miam1ku.mibandoplusbridge.notify.NotifySwitch.on(
+                    XposedHelpers.callMethod(holder, "getPackageSwitchStatus", "screen_on_push"));
+            ArrayList<String> open = new ArrayList<>();
+            ArrayList<String> closed = new ArrayList<>();
+            Object beans = XposedHelpers.callMethod(holder, "queryAll");
+            if (beans instanceof List<?> list) {
+                for (Object bean : list) {
+                    Object name = XposedHelpers.callMethod(bean, "getPackageName");
+                    if (!(name instanceof String pkg) || pkg.isBlank()) continue;
+                    Object enabled = XposedHelpers.callMethod(bean, "isOpen");
+                    (Boolean.TRUE.equals(enabled) ? open : closed).add(pkg);
+                }
+            }
+            Object notificationHolder = XposedHelpers.getStaticObjectField(loader.loadClass(
+                    "com.heytap.health.watch.notification.impl.module.NotificationHolder"), "INSTANCE");
+            String[] defaults = stringArray(whitelist(notificationHolder));
+            String[] mms = stringArray(XposedHelpers.callMethod(notificationHolder, "mms"));
+            Bundle extras = new Bundle();
+            extras.putBoolean("main", main);
+            extras.putBoolean("screenOnPush", screen);
+            extras.putStringArray("open", open.toArray(String[]::new));
+            extras.putStringArray("closed", closed.toArray(String[]::new));
+            if (defaults != null) extras.putStringArray("defaults", defaults);
+            if (mms != null) extras.putStringArray("mms", mms);
+            hostContext.getContentResolver().call(
+                    io.github.miam1ku.mibandoplusbridge.integration.HostNotifyProvider.URI,
+                    "policySnapshot", null, extras);
+            String pushed = "OHEALTH_POLICY_PUSH main=" + main + " screen=" + screen
+                    + " open=" + open.size() + " closed=" + closed.size();
+            Log.i("OplusBandBridge", pushed);
+            trace(pushed);
+        } catch (Throwable failure) {
+            String detail = String.valueOf(failure);
+            if (detail.length() > 180) detail = detail.substring(0, 180);
+            Log.i("OplusBandBridge", "OHEALTH_POLICY_PUSH_FAILED " + detail);
+            trace("OHEALTH_POLICY_PUSH_FAILED " + failure.getClass().getSimpleName());
+            schedulePolicy(5_000);
+        }
+    }
+
+    private static Object whitelist(Object notificationHolder) {
+        try {
+            Object config = XposedHelpers.callMethod(notificationHolder, "getMConfig");
+            return config == null ? null : XposedHelpers.callMethod(config, "getWhiteList");
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static String[] stringArray(Object value) {
+        if (!(value instanceof List<?> list)) return null;
+        ArrayList<String> items = new ArrayList<>();
+        for (Object item : list) if (item instanceof String text && !text.isBlank()) items.add(text);
+        return items.toArray(String[]::new);
     }
 
     private static boolean localListenerConnected() {

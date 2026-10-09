@@ -19,6 +19,25 @@ final class OHealthNotifyFilter {
         return hash == 0 ? 1 : hash;
     }
 
+    /** First sight of a token wins. The map keeps insertion order and drops the oldest past {@code cap}. */
+    static boolean claim(java.util.Map<String, Boolean> seen, String token, int cap) {
+        if (seen == null || token == null || token.isBlank() || cap < 1) return false;
+        synchronized (seen) {
+            if (seen.containsKey(token)) {
+                seen.remove(token);
+                seen.put(token, Boolean.TRUE);
+                return false;
+            }
+            seen.put(token, Boolean.TRUE);
+            java.util.Iterator<String> iterator = seen.keySet().iterator();
+            while (seen.size() > cap && iterator.hasNext()) {
+                iterator.next();
+                iterator.remove();
+            }
+            return true;
+        }
+    }
+
     /** {@code package absent} is a real deny. A database or thread failure is not a closed switch. */
     static String allowlistFailure(Throwable error) {
         Throwable cause = cause(error);

@@ -26,6 +26,8 @@ public final class HostNotifyProvider extends ContentProvider {
         HostIdentity.requireCaller(getContext(), HostIdentity.HEALTH_PACKAGE);
         if ("trace".equals(method)) return trace(extras);
         if ("policy".equals(method)) return policy(extras);
+        if ("policySnapshot".equals(method)) return policySnapshot(extras);
+        if ("healthListener".equals(method)) return healthListener(extras);
         if ("listener".equals(method)) return listenerState();
         if ("findWatch".equals(method) || "music".equals(method) || "forward".equals(method)) {
             HostKeepAlive.ensureBridge(getContext());
@@ -145,6 +147,110 @@ public final class HostNotifyProvider extends ContentProvider {
         Bundle result = new Bundle();
         result.putString("status", "LOGGED");
         return result;
+    }
+
+    private static final java.util.concurrent.atomic.AtomicBoolean HEALTH_GRANT_TRIED =
+            new java.util.concurrent.atomic.AtomicBoolean();
+
+    private Bundle healthListener(Bundle extras) {
+        long identity = Binder.clearCallingIdentity();
+        try {
+            return healthListenerBody(extras);
+        } finally {
+            Binder.restoreCallingIdentity(identity);
+        }
+    }
+
+    private Bundle healthListenerBody(Bundle extras) {
+        boolean connected = extras != null && extras.getBoolean("connected", false);
+        boolean reportsConnection = extras != null && extras.containsKey("connected");
+        String process = extras == null ? "" : extras.getString("process", "");
+        if (reportsConnection && (connected || process.endsWith(":transport"))) {
+            io.github.miam1ku.mibandoplusbridge.notify.HealthListenerState.connected(connected);
+        }
+        var prefs = io.github.miam1ku.mibandoplusbridge.data.LocalPrefs.open(getContext(),
+                io.github.miam1ku.mibandoplusbridge.notify.BandNotificationListener.SETTINGS);
+        var edit = prefs.edit();
+        if (extras != null && extras.containsKey("approved")) {
+            boolean approved = extras.getBoolean("approved");
+            boolean secure = extras.getBoolean("secure");
+            edit.putBoolean("healthApproved", approved).putBoolean("healthSecure", secure);
+            if (!approved && secure && HEALTH_GRANT_TRIED.compareAndSet(false, true)) {
+                boolean ok = io.github.miam1ku.mibandoplusbridge.service.OwnershipController.allowHealthListener();
+                edit.putBoolean("healthGrantFailed", !ok);
+                io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(getContext(),
+                        "HEALTH_LISTENER_ALLOW " + (ok ? "ok" : "failed"));
+            }
+        }
+        edit.commit();
+        String line = "HEALTH_LISTENER connected=" + io.github.miam1ku.mibandoplusbridge.notify.HealthListenerState.connected()
+                + " approved=" + (extras != null && extras.getBoolean("approved"))
+                + " secure=" + (extras != null && extras.getBoolean("secure"))
+                + " process=" + (process.isBlank() ? "none" : process);
+        io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(getContext(), line);
+        Bundle result = new Bundle();
+        result.putString("status", "OK");
+        return result;
+    }
+
+    private Bundle policySnapshot(Bundle extras) {
+        long identity = Binder.clearCallingIdentity();
+        try {
+            return policySnapshotBody(extras);
+        } finally {
+            Binder.restoreCallingIdentity(identity);
+        }
+    }
+
+    private Bundle policySnapshotBody(Bundle extras) {
+        var edit = io.github.miam1ku.mibandoplusbridge.data.LocalPrefs.open(getContext(),
+                io.github.miam1ku.mibandoplusbridge.notify.BandNotificationListener.SETTINGS).edit();
+        edit.putBoolean("policyKnown", extras != null);
+        edit.putBoolean("policyMain", extras != null && extras.getBoolean("main", true));
+        edit.putBoolean("policyScreenOnPush", extras != null && extras.getBoolean("screenOnPush", true));
+        edit.putString("policyOpenList", join(extras == null ? null : extras.getStringArray("open")));
+        edit.putString("policyClosedList", join(extras == null ? null : extras.getStringArray("closed")));
+        if (extras != null && extras.containsKey("defaults")) {
+            edit.putBoolean("policyDefaultsKnown", true);
+            edit.putString("policyDefaultsList", join(extras.getStringArray("defaults")));
+        } else {
+            edit.putBoolean("policyDefaultsKnown", false);
+            edit.remove("policyDefaultsList");
+        }
+        edit.putString("policyMmsOrder", join(extras == null ? null : extras.getStringArray("mms")));
+        edit.putLong("policyAtMs", System.currentTimeMillis());
+        edit.commit();
+        Bundle result = new Bundle();
+        result.putString("status", "OK");
+        return result;
+    }
+
+    private android.content.SharedPreferences notificationPrefs() {
+        return getContext().getSharedPreferences(
+                io.github.miam1ku.mibandoplusbridge.notify.BandNotificationListener.SETTINGS,
+                android.content.Context.MODE_PRIVATE);
+    }
+
+    private static java.util.Set<String> setOf(Bundle extras, String key) {
+        java.util.Set<String> values = new java.util.HashSet<>();
+        if (extras == null) return values;
+        String[] items = extras.getStringArray(key);
+        if (items == null) return values;
+        for (String item : items) {
+            if (item != null && !item.isBlank()) values.add(item);
+        }
+        return values;
+    }
+
+    private static String join(String[] items) {
+        if (items == null || items.length == 0) return "";
+        StringBuilder builder = new StringBuilder();
+        for (String item : items) {
+            if (item == null || item.isBlank() || item.indexOf('\n') >= 0) continue;
+            if (builder.length() > 0) builder.append('\n');
+            builder.append(item);
+        }
+        return builder.toString();
     }
 
     private Bundle listenerState() {

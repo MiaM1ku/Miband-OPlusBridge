@@ -317,6 +317,9 @@ public final class BandLiveService extends Service {
         io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this, "features local="
                 + (up ? "up" : access ? "granted" : "absent")
                 + " healthListener=" + health
+                + " healthApproved=" + io.github.miam1ku.mibandoplusbridge.data.LocalPrefs.open(this,
+                        "notification-settings").getBoolean("healthApproved", false)
+                + " healthLive=" + io.github.miam1ku.mibandoplusbridge.notify.HealthListenerState.connected()
                 + " notify=" + settings.getBoolean("enabled", true)
                 + " packages=" + settings.getStringSet("packages", java.util.Set.of()).size()
                 + " calls=" + settings.getBoolean("callsEnabled", false)

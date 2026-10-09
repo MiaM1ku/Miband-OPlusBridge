@@ -13,16 +13,6 @@ public final class NotifyAdmission {
         return packages == null || packages.isEmpty() || packages.contains(packageName);
     }
 
-    /**
-     * Before health has reported a switch, unknown packages stay allowed.
-     * An explicit deny or a closed main switch blocks.
-     */
-    public static boolean healthAllows(boolean mainKnown, boolean mainOn, Set<String> denied, String packageName) {
-        if (packageName == null || packageName.isBlank()) return false;
-        if (mainKnown && !mainOn) return false;
-        return denied == null || !denied.contains(packageName);
-    }
-
     /** {@code screen_on_push} false blocks only while the screen is on and unlocked. */
     public static boolean screenBlocks(boolean screenOnPush, boolean interactive, boolean locked) {
         return !screenOnPush && interactive && !locked;

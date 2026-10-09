@@ -41,7 +41,8 @@ public final class BandNotificationListener extends NotificationListenerService 
     private String lastWake = "";
     private String lastSkip = "";
     private final SharedPreferences.OnSharedPreferenceChangeListener settingsChanged = (prefs, key) -> {
-        if (!"observedPackages".equals(key)) main.post(this::resetSession);
+        if (key == null || "observedPackages".equals(key) || key.startsWith("policy") || key.startsWith("health")) return;
+        main.post(this::resetSession);
     };
     private final BroadcastReceiver lockChanged = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
@@ -204,6 +205,10 @@ public final class BandNotificationListener extends NotificationListenerService 
             skip("call", item.getPackageName());
             return;
         }
+        if (HealthListenerState.connected()) {
+            skip("health-live", item.getPackageName());
+            return;
+        }
         Notification n = item.getNotification();
         Ranking ranking = new Ranking();
         if (!admit(item, n, rankings, ranking)) {
@@ -230,21 +235,54 @@ public final class BandNotificationListener extends NotificationListenerService 
         if (getPackageName().equals(item.getPackageName())) return false;
         if (PhoneAlarmNotice.CLOCK.equals(item.getPackageName())) return false;
         if (!NotifyAdmission.packageAllowed(settings.getStringSet("packages", Set.of()), item.getPackageName())) return false;
-        if (!NotifyAdmission.healthAllows(settings.getBoolean("mainSwitchKnown", false),
-                settings.getBoolean("mainSwitch", true), settings.getStringSet("deniedPackages", Set.of()),
-                item.getPackageName())) return false;
+        if (healthBlock(item, notification) != null) return false;
         if (notification == null) return false;
-        if ((notification.flags & (Notification.FLAG_FOREGROUND_SERVICE | Notification.FLAG_GROUP_SUMMARY)) != 0) return false;
         if (notification.visibility == Notification.VISIBILITY_SECRET) return false;
         if (rankings == null || !rankings.getRanking(item.getKey(), ranking)) return false;
         if (ranking.getImportance() <= NotificationManager.IMPORTANCE_LOW) return false;
-        return !screenBlocks();
+        return true;
     }
 
-    private boolean screenBlocks() {
+    private String healthBlock(StatusBarNotification item, Notification notification) {
+        java.util.List<String> mms = mmsPackages();
         PowerManager power = getSystemService(PowerManager.class);
         boolean interactive = power != null && power.isInteractive();
-        return NotifyAdmission.screenBlocks(settings.getBoolean("screenOnPush", true), interactive, locked(this));
+        io.github.miam1ku.mibandoplusbridge.data.LocalPrefs policyStore =
+                io.github.miam1ku.mibandoplusbridge.data.LocalPrefs.open(this, SETTINGS);
+        String policy = HealthPolicy.blockReason(policyStore.getBoolean("policyKnown", false),
+                policyStore.getBoolean("policyMain", true), policyStore.getBoolean("policyScreenOnPush", true),
+                splitSet(policyStore.getString("policyOpenList", "")),
+                splitSet(policyStore.getString("policyClosedList", "")),
+                policyStore.getBoolean("policyDefaultsKnown", false)
+                        ? splitSet(policyStore.getString("policyDefaultsList", "")) : null,
+                mms, item.getPackageName(), interactive, locked(this));
+        if (policy != null || notification == null) return policy;
+        boolean sms = false;
+        for (String candidate : mms) if (item.getPackageName().equals(candidate)) sms = true;
+        String template = notification.extras == null ? null
+                : String.valueOf(notification.extras.getCharSequence(Notification.EXTRA_TEMPLATE, ""));
+        if (template != null && template.isBlank()) template = null;
+        int progress = notification.extras == null ? 0
+                : notification.extras.getInt(Notification.EXTRA_PROGRESS_MAX, 0);
+        String title = extra(notification, Notification.EXTRA_TITLE);
+        String text = extra(notification, Notification.EXTRA_TEXT);
+        return HealthContentFilter.blockReason(notification.extras == null, template, notification.flags,
+                notification.getGroup(), notification.category, progress, item.getTag(), item.getKey(),
+                title, text, notification.getChannelId(), item.getPackageName(), sms);
+    }
+
+    private java.util.List<String> mmsPackages() {
+        String stored = io.github.miam1ku.mibandoplusbridge.data.LocalPrefs.open(this, SETTINGS)
+                .getString("policyMmsOrder", "");
+        if (stored == null || stored.isBlank()) return java.util.List.of();
+        return java.util.List.of(stored.split("\n"));
+    }
+
+    private static java.util.Set<String> splitSet(String stored) {
+        java.util.Set<String> values = new java.util.HashSet<>();
+        if (stored == null || stored.isBlank()) return values;
+        for (String item : stored.split("\n")) if (!item.isBlank()) values.add(item);
+        return values;
     }
 
     private NotificationRelay.Event event(StatusBarNotification item, Notification n, Ranking ranking) {
@@ -269,16 +307,12 @@ public final class BandNotificationListener extends NotificationListenerService 
         if (getPackageName().equals(item.getPackageName())) return "self";
         if (PhoneAlarmNotice.CLOCK.equals(item.getPackageName())) return "clock";
         if (!NotifyAdmission.packageAllowed(settings.getStringSet("packages", Set.of()), item.getPackageName())) return "package";
-        if (!NotifyAdmission.healthAllows(settings.getBoolean("mainSwitchKnown", false),
-                settings.getBoolean("mainSwitch", true), settings.getStringSet("deniedPackages", Set.of()),
-                item.getPackageName())) return "health";
+        String health = healthBlock(item, notification);
+        if (health != null) return health;
         if (notification == null) return "empty";
-        if ((notification.flags & Notification.FLAG_GROUP_SUMMARY) != 0) return "summary";
-        if ((notification.flags & Notification.FLAG_FOREGROUND_SERVICE) != 0) return "foreground";
         if (notification.visibility == Notification.VISIBILITY_SECRET) return "secret";
         if (rankings == null || !rankings.getRanking(item.getKey(), ranking)) return "ranking";
         if (ranking.getImportance() <= NotificationManager.IMPORTANCE_LOW) return "importance";
-        if (screenBlocks()) return "screen";
         return "filtered";
     }
 

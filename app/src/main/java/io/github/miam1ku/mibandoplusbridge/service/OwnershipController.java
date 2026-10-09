@@ -240,6 +240,21 @@ public final class OwnershipController {
         return "cmd notification allow_dnd io.github.miam1ku.mibandoplusbridge";
     }
 
+    static String allowHealthListenerCommand() {
+        return "cmd notification allow_listener com.heytap.health/"
+                + "com.heytap.health.watch.commonnotification.HeytapNotificationListenerService";
+    }
+
+    /** One fixed component. Shell uid may run this; the app cannot grant its own listener. */
+    public static boolean allowHealthListener() {
+        try {
+            execute(allowHealthListenerCommand(), 8);
+            return true;
+        } catch (Failure failure) {
+            return false;
+        }
+    }
+
     static boolean setZenMode(boolean on) {
         try {
             execute(allowDndCommand(), 8);

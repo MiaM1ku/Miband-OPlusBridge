@@ -15,13 +15,6 @@ public final class NotifyAdmissionTest {
         assertFalse(NotifyAdmission.packageAllowed(Set.of(), " "));
     }
 
-    @Test public void healthDenyIsRememberedAndAnUnknownPackageStaysOpen() {
-        assertTrue(NotifyAdmission.healthAllows(false, false, Set.of(), "com.tencent.mm"));
-        assertFalse(NotifyAdmission.healthAllows(true, false, Set.of(), "com.tencent.mm"));
-        assertFalse(NotifyAdmission.healthAllows(true, true, Set.of("com.android.mms"), "com.android.mms"));
-        assertTrue(NotifyAdmission.healthAllows(true, true, Set.of("com.android.mms"), "com.tencent.mm"));
-    }
-
     @Test public void screenOnPushBlocksOnlyAnUnlockedLitScreen() {
         assertFalse(NotifyAdmission.screenBlocks(true, true, false));
         assertTrue(NotifyAdmission.screenBlocks(false, true, false));

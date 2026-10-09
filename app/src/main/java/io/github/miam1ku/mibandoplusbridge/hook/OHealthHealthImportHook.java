@@ -52,6 +52,8 @@ public final class OHealthHealthImportHook {
     private final AtomicReference<String> observedAccount = new AtomicReference<>();
     private final AtomicReference<Object> observedApi = new AtomicReference<>();
     private final AtomicLong accountEpoch = new AtomicLong();
+    private final AtomicBoolean tokenRefreshTried = new AtomicBoolean();
+    private final AtomicBoolean tokenFallbackLogged = new AtomicBoolean();
     private long retryAfter;
     private boolean stressZerosCleared;
     private String lastFailure;
@@ -99,6 +101,8 @@ public final class OHealthHealthImportHook {
         OHealthHealthImportHook hook = new OHealthHealthImportHook(context, contract, sleepWriter, stepWriter);
         hook.observe();
         hook.keepStoredAccount();
+        hook.installAccountSdk();
+        hook.installTokenFallback();
         installed = hook;
         hook.request();
     }
@@ -175,6 +179,14 @@ public final class OHealthHealthImportHook {
             // isSystemLogin is false until the account SDK initializes, even when the last
             // session was signed in. Without the health agreement, set(false) is forced back
             // to true and rewrites user_ssoid to the package name.
+            // An empty token makes HeadInterceptor answer 10101. The H5 page shows that as 403,
+            // and the device tab shows it as "no network" once our band is in the local list.
+            if (agreed && (system || storedLogin) && tokenMissing(loader)
+                    && manager != null && tokenRefreshTried.compareAndSet(false, true)) {
+                manager.getClass().getMethod("cacheAccountInfo", boolean.class).invoke(manager, true);
+                Log.i("OplusBandBridge", "OHEALTH_ACCOUNT_TOKEN_REFRESH");
+                OHealthDeviceHook.traceLine(context, "OHEALTH_ACCOUNT_TOKEN_REFRESH");
+            }
             if (!agreed || !(system || storedLogin) || (!guest && !placeholder)) return;
             tourist.getMethod("setIsInTouristMode", boolean.class).invoke(null, false);
             if (manager != null) {
@@ -212,6 +224,192 @@ public final class OHealthHealthImportHook {
         } catch (Throwable failure) {
             Log.i("OplusBandBridge", "OHEALTH_ACCOUNT_GUARD_FAILED "
                     + failure.getClass().getSimpleName());
+        }
+    }
+
+    /** Same order as AcApkUtils.getAccountPkgName. The first installed package wins. */
+    private static final String[] ACCOUNT_PACKAGES = {
+            "com.oplus.sysaccount", "com.oneplus.sysaccount",
+            "com.oplus.account", "com.oplus.vip",
+            "com.oppo.usercenter", "com.heytap.usercenter",
+            "com.heytap.vip", "com.oneplus.account"
+    };
+
+    /**
+     * Account init during Application.attach sees a null application context.
+     * The SDK then caches "no account app" and the open-account path NPEs,
+     * leaving {@code initializing} true for the rest of the process.
+     */
+    private void installAccountSdk() {
+        try {
+            Class<?> packages = Class.forName(
+                    "com.oplus.accountsdk.service.common.util.AcApkUtils", false, host.loader);
+            Class<?> sdk = Class.forName("com.heytap.health.account.sdk.AccountSdk", false, host.loader);
+            java.lang.reflect.Field cachedPackage = packages.getDeclaredField("acPkg");
+            cachedPackage.setAccessible(true);
+            accountInitializing = flag(sdk, "initializing");
+            accountInitialized = flag(sdk, "initialized");
+            java.util.concurrent.atomic.AtomicBoolean initializing = accountInitializing;
+            java.util.concurrent.atomic.AtomicBoolean initialized = accountInitialized;
+            if ("".equals(cachedPackage.get(null))) cachedPackage.set(null, null);
+            if (initializing != null && initialized != null
+                    && initializing.get() && !initialized.get()) {
+                initializing.set(false);
+                Log.i("OplusBandBridge", "OHEALTH_ACCOUNT_INIT_RESET");
+                OHealthDeviceHook.traceLine(context, "OHEALTH_ACCOUNT_INIT_RESET");
+            }
+            XposedBridge.hookAllMethods(packages, "getAccountPkgName", new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam param) {
+                    if (!(param.args[0] instanceof Context base) || applicationContext(base) != null) return;
+                    String found = accountPackage(base);
+                    if (found == null) return;
+                    try {
+                        cachedPackage.set(null, found);
+                    } catch (IllegalAccessException ignored) { }
+                    param.setResult(found);
+                    Log.i("OplusBandBridge", "OHEALTH_ACCOUNT_PKG " + found);
+                }
+            });
+            XposedBridge.hookAllMethods(sdk, "init", new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam param) {
+                    if (param.args.length == 0 || !(param.args[0] instanceof Context passed)) return;
+                    if (applicationContext(passed) != null) return;
+                    Context ready = application();
+                    if (ready == null) return;
+                    param.args[0] = ready;
+                    Log.i("OplusBandBridge", "OHEALTH_ACCOUNT_INIT_CONTEXT");
+                }
+            });
+            Handler main = new Handler(android.os.Looper.getMainLooper());
+            for (long delay : new long[] {1_000L, 3_000L, 8_000L}) {
+                main.postDelayed(this::retryAccountInit, delay);
+            }
+        } catch (Throwable failure) {
+            Log.i("OplusBandBridge", "OHEALTH_ACCOUNT_SDK_HOOK_FAILED "
+                    + failure.getClass().getSimpleName());
+        }
+    }
+
+    private java.util.concurrent.atomic.AtomicBoolean accountInitializing;
+    private java.util.concurrent.atomic.AtomicBoolean accountInitialized;
+
+    /** A ContextWrapper whose base is not attached yet throws here instead of returning null. */
+    private static Context applicationContext(Context base) {
+        if (base == null) return null;
+        try {
+            return base.getApplicationContext();
+        } catch (RuntimeException ignored) {
+            return null;
+        }
+    }
+
+    private Context application() {
+        Context app = applicationContext(context);
+        if (app != null) return app;
+        try {
+            Class<?> thread = Class.forName("android.app.ActivityThread");
+            Object current = thread.getMethod("currentApplication").invoke(null);
+            if (current instanceof Context ready) {
+                Context application = applicationContext(ready);
+                if (application != null) return application;
+            }
+        } catch (ReflectiveOperationException ignored) { }
+        return null;
+    }
+
+    private void retryAccountInit() {
+        try {
+            Context app = application();
+            if (app == null) return;
+            Class<?> sdk = Class.forName("com.heytap.health.account.sdk.AccountSdk", false, host.loader);
+            if (Boolean.TRUE.equals(sdk.getMethod("isInitialized").invoke(null))) return;
+            if (accountInitializing != null && accountInitialized != null
+                    && accountInitializing.get() && !accountInitialized.get()) {
+                accountInitializing.set(false);
+            } else if (Boolean.TRUE.equals(sdk.getMethod("isInitializing").invoke(null))) {
+                return;
+            }
+            sdk.getMethod("init", Context.class).invoke(null, app);
+            Log.i("OplusBandBridge", "OHEALTH_ACCOUNT_INIT_RETRY");
+            OHealthDeviceHook.traceLine(context, "OHEALTH_ACCOUNT_INIT_RETRY");
+        } catch (Throwable failure) {
+            Log.i("OplusBandBridge", "OHEALTH_ACCOUNT_INIT_RETRY_FAILED "
+                    + failure.getClass().getSimpleName());
+        }
+    }
+
+    private static String accountPackage(Context context) {
+        android.content.pm.PackageManager manager;
+        try {
+            manager = context.getPackageManager();
+        } catch (RuntimeException ignored) {
+            return null;
+        }
+        for (String name : ACCOUNT_PACKAGES) {
+            try {
+                if (manager.getPackageInfo(name, 0) != null) return name;
+            } catch (android.content.pm.PackageManager.NameNotFoundException ignored) { }
+        }
+        return null;
+    }
+
+    private static java.util.concurrent.atomic.AtomicBoolean flag(Class<?> type, String name) {
+        try {
+            java.lang.reflect.Field field = type.getDeclaredField(name);
+            field.setAccessible(true);
+            Object value = field.get(null);
+            return value instanceof java.util.concurrent.atomic.AtomicBoolean flag ? flag : null;
+        } catch (ReflectiveOperationException ignored) {
+            return null;
+        }
+    }
+
+    /**
+     * The main process returns an empty token until the account SDK finishes init.
+     * HeadInterceptor turns that into 10101, which the device tab calls "no network"
+     * and the message page calls 403. Other processes already fall back to the stored token.
+     */
+    private void installTokenFallback() {
+        try {
+            Class<?> helper = Class.forName("com.heytap.health.base.account.TokenHelper", false, host.loader);
+            Class<?> prefsType = Class.forName("com.heytap.health.base.sp.SPUtils", false, host.loader);
+            de.robv.android.xposed.XposedBridge.hookAllMethods(helper, "getToken", new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam param) {
+                    Object current = param.getResult();
+                    if (current != null && !String.valueOf(current).isBlank()) return;
+                    try {
+                        Object prefs = prefsType.getMethod("getInstance").invoke(null);
+                        Object stored = prefs.getClass().getMethod("getString", String.class)
+                                .invoke(prefs, "account_token");
+                        if (stored == null || String.valueOf(stored).isBlank()) {
+                            if (tokenFallbackLogged.compareAndSet(false, true)) {
+                                Log.i("OplusBandBridge", "OHEALTH_ACCOUNT_TOKEN_ABSENT");
+                                OHealthDeviceHook.traceLine(context, "OHEALTH_ACCOUNT_TOKEN_ABSENT");
+                            }
+                            return;
+                        }
+                        param.setResult(String.valueOf(stored));
+                        if (tokenFallbackLogged.compareAndSet(false, true)) {
+                            Log.i("OplusBandBridge", "OHEALTH_ACCOUNT_TOKEN_STORED");
+                            OHealthDeviceHook.traceLine(context, "OHEALTH_ACCOUNT_TOKEN_STORED");
+                        }
+                    } catch (Throwable ignored) { }
+                }
+            });
+        } catch (Throwable failure) {
+            Log.i("OplusBandBridge", "OHEALTH_ACCOUNT_TOKEN_HOOK_FAILED "
+                    + failure.getClass().getSimpleName());
+        }
+    }
+
+    /** True when the request interceptor would refuse the call with 10101. */
+    private static boolean tokenMissing(ClassLoader loader) {
+        try {
+            Class<?> helper = Class.forName("com.heytap.health.base.account.TokenHelper", false, loader);
+            Object token = helper.getMethod("getToken").invoke(helper.getMethod("getInstance").invoke(null));
+            return token == null || String.valueOf(token).isBlank();
+        } catch (Throwable failure) {
+            return false;
         }
     }
 

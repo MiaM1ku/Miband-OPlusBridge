@@ -6,6 +6,8 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.pm.PackageManager;
 import android.service.notification.NotificationListenerService;
+import android.os.Handler;
+import android.os.Looper;
 import android.util.Log;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
@@ -25,7 +27,10 @@ public final class OHealthNotificationAccessHook {
     private static final String COMPONENT = "com.heytap.health/" + LISTENER;
     private static final AtomicBoolean rebound = new AtomicBoolean();
     private static final AtomicBoolean stopLogged = new AtomicBoolean();
-    private static final AtomicBoolean boundLogged = new AtomicBoolean();
+    private static final AtomicBoolean serviceConnected = new AtomicBoolean();
+    private static volatile boolean rawGranted;
+    private static volatile boolean rawKnown;
+    private static String lastAccess = "";
     private static String lastRebindFailure = "";
 
     private OHealthNotificationAccessHook() {}
@@ -49,28 +54,17 @@ public final class OHealthNotificationAccessHook {
         XposedHelpers.findAndHookMethod(NotificationManager.class, "isNotificationListenerAccessGranted",
                 ComponentName.class, new XC_MethodHook() {
                     @Override protected void afterHookedMethod(MethodHookParam param) {
-                        if (Boolean.TRUE.equals(param.getResult())) return;
                         if (!(param.args[0] instanceof ComponentName name)) return;
                         if (!LISTENER.equals(name.getClassName())) return;
+                        boolean raw = Boolean.TRUE.equals(param.getResult());
                         Context host = contextArg(param);
-                        if (host != null && granted(host)) param.setResult(true);
+                        if (host == null) return;
+                        noteAccess(host, raw);
+                        if (!raw && granted(host)) param.setResult(true);
                     }
                 });
-        try {
-            XposedHelpers.findAndHookMethod(NotificationListenerService.class, "onListenerConnected",
-                    new XC_MethodHook() {
-                        @Override protected void afterHookedMethod(MethodHookParam param) {
-                            if (param.thisObject == null
-                                    || !LISTENER.equals(param.thisObject.getClass().getName())) return;
-                            if (!boundLogged.compareAndSet(false, true)) return;
-                            Context host = param.thisObject instanceof Context service ? service : contextArg(param);
-                            note(host, "OHEALTH_NOTIFICATION_LISTENER bound");
-                        }
-                    });
-        } catch (Throwable failure) {
-            Log.i("OplusBandBridge", "OHEALTH_NOTIFICATION_LISTENER bound-hook "
-                    + failure.getClass().getSimpleName());
-        }
+        hookServiceLifecycle(loader);
+        noteExistingService(context, loader);
         Class<?> item = Class.forName(
                 "com.heytap.health.device.tab.itemview.wearable.MenuNotificationItem", false, loader);
         XposedBridge.hookAllMethods(item, "initData", new XC_MethodHook() {
@@ -83,14 +77,56 @@ public final class OHealthNotificationAccessHook {
             }
         });
         rebind(context);
+        scheduleRetry(context);
     }
 
-    /** {@code stop} skips the original call. Run rebinds, then skips the disable/enable toggle. */
+    /** The service may already be bound before this hook is installed. */
+    private static void noteExistingService(Context context, ClassLoader loader) {
+        try {
+            Class<?> center = Class.forName(
+                    "com.heytap.health.watch.notification.HealthNotificationRegisterCenter", false, loader);
+            if (XposedHelpers.getStaticObjectField(center, "mListenerService") == null) return;
+            serviceConnected.set(true);
+            note(context, "OHEALTH_LISTENER state=already-connected process="
+                    + android.app.Application.getProcessName());
+            report(context, true);
+        } catch (Throwable ignored) { }
+    }
+
+    /** The framework method is empty and may be inlined. Hook the service's own overrides. */
+    private static void hookServiceLifecycle(ClassLoader loader) {
+        try {
+            Class<?> service = Class.forName(LISTENER, false, loader);
+            XposedBridge.hookAllMethods(service, "onCreate", lifecycle("created", false));
+            XposedBridge.hookAllMethods(service, "onListenerConnected", lifecycle("connected", true));
+            XposedBridge.hookAllMethods(service, "onListenerDisconnected", lifecycle("disconnected", false));
+            XposedBridge.hookAllMethods(service, "onDestroy", lifecycle("destroyed", false));
+        } catch (Throwable failure) {
+            Log.i("OplusBandBridge", "OHEALTH_NOTIFICATION_LISTENER lifecycle-hook "
+                    + failure.getClass().getSimpleName());
+        }
+    }
+
+    private static XC_MethodHook lifecycle(String state, boolean connected) {
+        return new XC_MethodHook() {
+            @Override protected void afterHookedMethod(MethodHookParam param) {
+                if (connected) serviceConnected.set(true);
+                else if ("disconnected".equals(state) || "destroyed".equals(state)) serviceConnected.set(false);
+                Context host = param.thisObject instanceof Context service ? service : contextArg(param);
+                note(host, "OHEALTH_LISTENER state=" + state + " process=" + android.app.Application.getProcessName());
+                report(host, true);
+            }
+        };
+    }
+
+    /** Stop is skipped once the band is registered or Health is already listed. Run never toggles the component. */
     private static XC_MethodHook keep(boolean stop) {
         return new XC_MethodHook() {
             @Override protected void beforeHookedMethod(MethodHookParam param) {
                 Context context = contextArg(param);
-                if (context == null || !granted(context)) return;
+                if (context == null) return;
+                boolean hold = granted(context) || OHealthDeviceHook.registeredBand();
+                if (stop && !hold) return;
                 if (stop) {
                     if (stopLogged.compareAndSet(false, true)) {
                         note(context, "OHEALTH_NOTIFICATION_LISTENER stop-blocked");
@@ -101,6 +137,58 @@ public final class OHealthNotificationAccessHook {
                 param.setResult(null);
             }
         };
+    }
+
+    private static void scheduleRetry(Context context) {
+        if (context == null || !"com.heytap.health:transport".equals(android.app.Application.getProcessName())) return;
+        Handler handler = new Handler(Looper.getMainLooper());
+        long[] waits = {15_000L, 30_000L, 60_000L};
+        handler.postDelayed(() -> retry(context, handler, waits, 0), waits[0]);
+    }
+
+    private static void retry(Context context, Handler handler, long[] waits, int done) {
+        if (done >= waits.length || serviceConnected.get()) return;
+        rebind(context);
+        note(context, "OHEALTH_LISTENER rebind-retry n=" + (done + 1));
+        int next = done + 1;
+        if (next < waits.length) handler.postDelayed(() -> retry(context, handler, waits, next), waits[next]);
+    }
+
+    private static void noteAccess(Context context, boolean raw) {
+        int state = componentState(context);
+        String line = "OHEALTH_LISTENER_ACCESS raw=" + raw + " secure=" + granted(context) + " state=" + state;
+        if (line.equals(lastAccess) && rawKnown) return;
+        lastAccess = line;
+        rawKnown = true;
+        rawGranted = raw;
+        note(context, line);
+        report(context, false);
+    }
+
+    private static void report(Context context, boolean includeConnection) {
+        if (context == null) return;
+        try {
+            android.os.Bundle extras = new android.os.Bundle();
+            if (includeConnection) extras.putBoolean("connected", serviceConnected.get());
+            if (rawKnown) {
+                extras.putBoolean("approved", rawGranted);
+                extras.putBoolean("secure", granted(context));
+            }
+            extras.putInt("componentState", componentState(context));
+            extras.putString("process", android.app.Application.getProcessName());
+            context.getContentResolver().call(
+                    io.github.miam1ku.mibandoplusbridge.integration.HostNotifyProvider.URI,
+                    "healthListener", null, extras);
+        } catch (RuntimeException ignored) { }
+    }
+
+    private static int componentState(Context context) {
+        try {
+            return context.getPackageManager().getComponentEnabledSetting(
+                    new ComponentName("com.heytap.health", LISTENER));
+        } catch (RuntimeException failure) {
+            return -1;
+        }
     }
 
     private static void rebind(Context context) {
