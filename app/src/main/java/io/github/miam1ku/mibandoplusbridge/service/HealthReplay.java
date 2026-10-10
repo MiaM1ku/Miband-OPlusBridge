@@ -95,6 +95,10 @@ final class HealthReplay implements AutoCloseable {
         if (reparsed > 0) {
             io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(context, "history sleep reparsed " + reparsed);
         }
+        int breathReparsed = raw.refreshSleepBreathMetrics();
+        if (breathReparsed > 0) {
+            io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(context, "history sleep breath enqueued " + breathReparsed);
+        }
         var binding = new BindingStore(context).readIdentity();
         String identity = binding.did();
         if (identity.isBlank()) identity = binding.address().replace(":", "");

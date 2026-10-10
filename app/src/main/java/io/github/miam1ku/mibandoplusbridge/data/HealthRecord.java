@@ -49,11 +49,12 @@ public final class HealthRecord {
         }
         boolean sleepStage = "sleep_stage".equals(kind);
         boolean sleepInterval = "sleep_interval".equals(kind);
+        boolean sleepBreath = "sleep_breath".equals(kind);
         boolean steps = "steps_interval".equals(kind) || "steps_day".equals(kind);
         boolean heart = "heart_rate".equals(kind);
         boolean oxygen = "spo2".equals(kind);
         boolean stress = "stress".equals(kind);
-        if (!(sleepStage || sleepInterval || steps || heart || oxygen || stress)) {
+        if (!(sleepStage || sleepInterval || sleepBreath || steps || heart || oxygen || stress)) {
             throw new IllegalArgumentException("UNSUPPORTED_HEALTH_KIND");
         }
         // Database v2 migrates every old source, including sleep_stage, to continuous.
@@ -62,6 +63,7 @@ public final class HealthRecord {
                 || steps && !"continuous".equals(measurementMode)
                 || sleepInterval && !"sleep".equals(measurementMode)
                 || sleepStage && "manual".equals(measurementMode)
+                || sleepBreath && !"sleep".equals(measurementMode)
                 || complete && !sleepInterval
                 || (calories != null || distance != null || moveAbout != null) && !steps
                 || calories != null && (calories < 0 || calories > 100_000)
@@ -82,12 +84,16 @@ public final class HealthRecord {
                     || heart && (measured < 1 || measured > 250)
                     || oxygen && (measured < 1 || measured > 100)
                     || stress && measured > 100 || steps && measured > 0xffff_ffffL
-                    || sleepInterval && measured > endMs - startMs) {
+                    || sleepInterval && measured > endMs - startMs
+                    || sleepBreath && (measured < 60 || measured > 500)) {
                 throw new IllegalArgumentException("INVALID_HEALTH_MEASUREMENT");
             }
         }
         if ((heart || oxygen || stress) && endMs - startMs
                 != ("continuous".equals(measurementMode) ? 60_000L : 1L)) {
+            throw new IllegalArgumentException("INVALID_MEASUREMENT_INTERVAL");
+        }
+        if (sleepBreath && endMs - startMs != 60_000L) {
             throw new IllegalArgumentException("INVALID_MEASUREMENT_INTERVAL");
         }
         if (timezone != null) {

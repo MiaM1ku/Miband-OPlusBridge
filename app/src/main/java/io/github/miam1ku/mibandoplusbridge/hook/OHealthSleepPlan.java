@@ -7,7 +7,9 @@ import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Every band session on a sleep-day is kept. Rows use sleep protocol version 11:
@@ -24,9 +26,20 @@ public final class OHealthSleepPlan {
 
     public record Segment(long startMs, long endMs, int sleepState) {}
 
-    public record Night(int date, long fallAsleepMs, long wakeMs, long sleepMinutes, long deepMinutes,
-            long lightMinutes, long remMinutes, long wakeMinutes, List<Segment> segments,
-            long dayStartMs, long dayEndMs) {}
+    public record Night(int date, ZoneId zone, long fallAsleepMs, long wakeMs, long sleepMinutes,
+            long deepMinutes, long lightMinutes, long remMinutes, long wakeMinutes,
+            List<Segment> segments, long dayStartMs, long dayEndMs) {
+        public Night(int date, long fallAsleepMs, long wakeMs, long sleepMinutes, long deepMinutes,
+                long lightMinutes, long remMinutes, long wakeMinutes, List<Segment> segments,
+                long dayStartMs, long dayEndMs) {
+            this(date, ZoneId.systemDefault(), fallAsleepMs, wakeMs, sleepMinutes, deepMinutes,
+                    lightMinutes, remMinutes, wakeMinutes, segments, dayStartMs, dayEndMs);
+        }
+    }
+
+    public record Day(int date, ZoneId zone, long fallAsleepMs, long wakeMs, long sleepMinutes,
+            long deepMinutes, long lightMinutes, long remMinutes, long wakeMinutes,
+            List<Night> nights, Night mainSession, long dayStartMs, long dayEndMs) {}
 
     private OHealthSleepPlan() {}
 
@@ -35,6 +48,18 @@ public final class OHealthSleepPlan {
         var local = Instant.ofEpochMilli(endMs).atZone(zone).toLocalDateTime();
         LocalDate day = local.getHour() >= 20 ? local.toLocalDate().plusDays(1) : local.toLocalDate();
         return day.getYear() * 10000 + day.getMonthValue() * 100 + day.getDayOfMonth();
+    }
+
+    /**
+     * OHealth keeps the sleep summary clock as minutes of the sleep day, the same conversion the
+     * host applies in StoreUtil.changeMillisToCurrentDayMinutes: 20:00 stays 1200 and 01:39 becomes
+     * 1539. The public insert path stores the value verbatim, so the bridge has to convert it.
+     */
+    public static long sleepDayMinutes(long epochMs, ZoneId zone) {
+        var local = Instant.ofEpochMilli(epochMs).atZone(zone).toLocalDateTime();
+        int hour = local.getHour();
+        if (hour < 20) hour += 24;
+        return hour * 60L + local.getMinute();
     }
 
     /** Xiaomi SleepState: 2 deep, 3 light, 4 REM, 5 awake. There is no separate 熟睡. */
@@ -79,10 +104,28 @@ public final class OHealthSleepPlan {
             }
             segments = flatten(segments);
             ZoneId zone = interval.timezone == null ? ZoneId.systemDefault() : ZoneId.of(interval.timezone);
-            int date = sleepDate(interval.endMs, zone);
-            Count counted = count(segments);
-            sessions.add(new Session(date, zone, interval.startMs, interval.endMs,
-                    counted.sleep, counted.deep, counted.light, counted.rem, counted.awake, segments));
+            List<List<Segment>> clusters = new ArrayList<>();
+            List<Segment> currentCluster = new ArrayList<>();
+            currentCluster.add(segments.get(0));
+            for (int i = 1; i < segments.size(); i++) {
+                Segment seg = segments.get(i);
+                Segment prev = segments.get(i - 1);
+                if (seg.startMs() - prev.endMs() > 1_200_000L) {
+                    clusters.add(currentCluster);
+                    currentCluster = new ArrayList<>();
+                }
+                currentCluster.add(seg);
+            }
+            clusters.add(currentCluster);
+
+            for (List<Segment> cluster : clusters) {
+                long fall = cluster.get(0).startMs();
+                long wake = cluster.get(cluster.size() - 1).endMs();
+                int date = sleepDate(wake, zone);
+                Count counted = count(cluster);
+                sessions.add(new Session(date, zone, fall, wake,
+                        counted.sleep, counted.deep, counted.light, counted.rem, counted.awake, cluster));
+            }
         }
         List<Night> nights = new ArrayList<>();
         for (int i = 0; i < sessions.size(); i++) {
@@ -91,12 +134,65 @@ public final class OHealthSleepPlan {
             long purgeStart = Math.min(window[0], session.fall);
             List<Segment> flat = flatten(session.segments);
             Count counted = count(flat);
-            nights.add(new Night(session.date, session.fall, session.wake, counted.sleep, counted.deep,
+            nights.add(new Night(session.date, session.zone, session.fall, session.wake, counted.sleep, counted.deep,
                     counted.light, counted.rem, counted.awake, List.copyOf(flat),
                     purgeStart, window[1]));
         }
         nights.sort(Comparator.comparingInt(Night::date).thenComparingLong(Night::fallAsleepMs));
         return nights;
+    }
+
+    /**
+     * Aggregates sessions into unified sleep-days.
+     * A date's summary is the sum across all its sessions, with fragments for each session
+     * and the longest session of at least 120 minutes chosen as the main session.
+     */
+    public static List<Day> days(List<Night> nights) {
+        if (nights == null || nights.isEmpty()) return List.of();
+        Map<Integer, List<Night>> byDate = new LinkedHashMap<>();
+        for (Night night : nights) {
+            byDate.computeIfAbsent(night.date(), k -> new ArrayList<>()).add(night);
+        }
+        List<Day> days = new ArrayList<>();
+        for (Map.Entry<Integer, List<Night>> entry : byDate.entrySet()) {
+            int date = entry.getKey();
+            List<Night> dateNights = entry.getValue();
+            dateNights.sort(Comparator.comparingLong(Night::fallAsleepMs));
+
+            long minFall = Long.MAX_VALUE;
+            long maxWake = Long.MIN_VALUE;
+            long totalSleep = 0;
+            long totalDeep = 0;
+            long totalLight = 0;
+            long totalRem = 0;
+            long totalWake = 0;
+            long dayStart = Long.MAX_VALUE;
+            long dayEnd = Long.MIN_VALUE;
+            ZoneId zone = null;
+            Night mainSession = null;
+
+            for (Night night : dateNights) {
+                minFall = Math.min(minFall, night.fallAsleepMs());
+                maxWake = Math.max(maxWake, night.wakeMs());
+                totalSleep += night.sleepMinutes();
+                totalDeep += night.deepMinutes();
+                totalLight += night.lightMinutes();
+                totalRem += night.remMinutes();
+                totalWake += night.wakeMinutes();
+                dayStart = Math.min(dayStart, night.dayStartMs());
+                dayEnd = Math.max(dayEnd, night.dayEndMs());
+                if (zone == null) zone = night.zone();
+                if (summary(nights, night)) {
+                    mainSession = night;
+                }
+            }
+            if (zone == null) zone = ZoneId.systemDefault();
+
+            days.add(new Day(date, zone, minFall, maxWake, totalSleep, totalDeep, totalLight,
+                    totalRem, totalWake, List.copyOf(dateNights), mainSession, dayStart, dayEnd));
+        }
+        days.sort(Comparator.comparingInt(Day::date));
+        return days;
     }
 
     /**

@@ -8,6 +8,7 @@ import java.util.List;
 import org.junit.Test;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
@@ -163,6 +164,134 @@ public final class OHealthSleepPlanTest {
         assertEquals(OHealthSleepPlan.AWAKE, segments.get(2).sleepState());
         assertEquals(segments.get(2).endMs(), segments.get(3).startMs());
         assertFalse(OHealthSleepPlan.summary(nights, nights.get(0)));
+    }
+
+    @Test public void summaryClockUsesSleepDayMinutes() {
+        // Matches the host's StoreUtil.changeMillisToCurrentDayMinutes: 20:00-23:59 keep their
+        // clock value, 00:00-19:59 count into the next day.
+        assertEquals(1200, OHealthSleepPlan.sleepDayMinutes(at(2026, 10, 4, 20, 0), ZONE));
+        assertEquals(1395, OHealthSleepPlan.sleepDayMinutes(at(2026, 10, 4, 23, 15), ZONE));
+        assertEquals(1539, OHealthSleepPlan.sleepDayMinutes(at(2026, 10, 5, 1, 39), ZONE));
+        assertEquals(2065, OHealthSleepPlan.sleepDayMinutes(at(2026, 10, 5, 10, 25), ZONE));
+        assertEquals(2639, OHealthSleepPlan.sleepDayMinutes(at(2026, 10, 5, 19, 59), ZONE));
+    }
+
+
+    @Test public void daysCombinesMultipleSessionsIntoUnifiedDay() {
+        long mainStart = at(2026, 10, 8, 2, 0);
+        long mainEnd = at(2026, 10, 8, 7, 0); // 300 min
+        long napStart = at(2026, 10, 8, 14, 0);
+        long napEnd = at(2026, 10, 8, 15, 30); // 90 min
+
+        HealthRecord mainInterval = interval("main", mainStart, mainEnd);
+        HealthRecord napInterval = interval("nap", napStart, napEnd);
+        List<OHealthSleepPlan.Night> nights = OHealthSleepPlan.nights(List.of(
+                mainInterval,
+                stage("deep", mainStart, mainStart + 120 * 60_000L, 2),
+                stage("light", mainStart + 120 * 60_000L, mainEnd, 3),
+                napInterval,
+                stage("nap-light", napStart, napEnd, 3)));
+        assertEquals(2, nights.size());
+
+        List<OHealthSleepPlan.Day> days = OHealthSleepPlan.days(nights);
+        assertEquals(1, days.size());
+        OHealthSleepPlan.Day day = days.get(0);
+        assertEquals(20261008, day.date());
+        assertEquals(2, day.nights().size());
+        assertEquals(390, day.sleepMinutes());
+        assertEquals(120, day.deepMinutes());
+        assertEquals(270, day.lightMinutes());
+        assertEquals(mainStart, day.fallAsleepMs());
+        assertEquals(napEnd, day.wakeMs());
+        assertEquals(nights.get(0), day.mainSession());
+        assertEquals(ZONE, day.zone());
+    }
+
+    @Test public void daysWithNapsOnlyHasNullMainSession() {
+        long nap1Start = at(2026, 10, 8, 13, 0);
+        long nap1End = at(2026, 10, 8, 14, 0); // 60 min
+        long nap2Start = at(2026, 10, 8, 16, 0);
+        long nap2End = at(2026, 10, 8, 16, 45); // 45 min
+
+        List<OHealthSleepPlan.Night> nights = OHealthSleepPlan.nights(List.of(
+                interval("nap1", nap1Start, nap1End),
+                stage("nap1-light", nap1Start, nap1End, 3),
+                interval("nap2", nap2Start, nap2End),
+                stage("nap2-light", nap2Start, nap2End, 3)));
+        assertEquals(2, nights.size());
+
+        List<OHealthSleepPlan.Day> days = OHealthSleepPlan.days(nights);
+        assertEquals(1, days.size());
+        OHealthSleepPlan.Day day = days.get(0);
+        assertEquals(20261008, day.date());
+        assertEquals(105, day.sleepMinutes());
+        assertNull(day.mainSession());
+        assertEquals(nap1Start, day.fallAsleepMs());
+        assertEquals(nap2End, day.wakeMs());
+    }
+
+    @Test public void daysSeparatesDifferentDates() {
+        long d1Start = at(2026, 10, 7, 1, 0);
+        long d1End = at(2026, 10, 7, 7, 0); // 360 min
+        long d2Start = at(2026, 10, 8, 2, 0);
+        long d2End = at(2026, 10, 8, 6, 0); // 240 min
+
+        List<OHealthSleepPlan.Night> nights = OHealthSleepPlan.nights(List.of(
+                interval("d1", d1Start, d1End),
+                stage("d1-light", d1Start, d1End, 3),
+                interval("d2", d2Start, d2End),
+                stage("d2-light", d2Start, d2End, 3)));
+        assertEquals(2, nights.size());
+
+        List<OHealthSleepPlan.Day> days = OHealthSleepPlan.days(nights);
+        assertEquals(2, days.size());
+        assertEquals(20261007, days.get(0).date());
+        assertEquals(360, days.get(0).sleepMinutes());
+        assertEquals(20261008, days.get(1).date());
+        assertEquals(240, days.get(1).sleepMinutes());
+    }
+
+    @Test public void daysHandlesEmptyOrNull() {
+        assertTrue(OHealthSleepPlan.days(null).isEmpty());
+        assertTrue(OHealthSleepPlan.days(List.of()).isEmpty());
+    }
+
+    @Test public void intervalWithLargeGapSplitsIntoSeparateSessions() {
+        long start = at(2026, 10, 10, 1, 54);
+        long nightWake = at(2026, 10, 10, 5, 47);
+        long napStart = at(2026, 10, 10, 7, 13);
+        long napWake = at(2026, 10, 10, 9, 35);
+        HealthRecord interval = interval("night_and_nap", start, napWake);
+        // Stages for night: deep 73m, rem 58m, light 98m, awake 4m = 233m
+        HealthRecord deep = stage("deep", start, start + 73 * 60_000L, 2);
+        HealthRecord rem = stage("rem", start + 73 * 60_000L, start + (73 + 58) * 60_000L, 4);
+        HealthRecord light = stage("light", start + (73 + 58) * 60_000L, start + (73 + 58 + 98) * 60_000L, 3);
+        HealthRecord awake = stage("awake", start + (73 + 58 + 98) * 60_000L, nightWake, 5);
+        // Stage for nap: light from 07:13 to 09:35 = 142m
+        HealthRecord napLight = stage("nap_light", napStart, napWake, 3);
+
+        List<OHealthSleepPlan.Night> nights = OHealthSleepPlan.nights(
+                List.of(interval, deep, rem, light, awake, napLight));
+        assertEquals(2, nights.size());
+        OHealthSleepPlan.Night main = nights.get(0);
+        assertEquals(start, main.fallAsleepMs());
+        assertEquals(nightWake, main.wakeMs());
+        assertEquals(229, main.sleepMinutes());
+        assertEquals(73, main.deepMinutes());
+        assertEquals(58, main.remMinutes());
+        assertEquals(98, main.lightMinutes());
+        assertEquals(4, main.wakeMinutes());
+
+        OHealthSleepPlan.Night morning = nights.get(1);
+        assertEquals(napStart, morning.fallAsleepMs());
+        assertEquals(napWake, morning.wakeMs());
+        assertEquals(142, morning.sleepMinutes());
+
+        List<OHealthSleepPlan.Day> days = OHealthSleepPlan.days(nights);
+        assertEquals(1, days.size());
+        OHealthSleepPlan.Day day = days.get(0);
+        assertEquals(371, day.sleepMinutes());
+        assertEquals(main, day.mainSession());
     }
 
     private static HealthRecord interval(String id, long start, long end) {

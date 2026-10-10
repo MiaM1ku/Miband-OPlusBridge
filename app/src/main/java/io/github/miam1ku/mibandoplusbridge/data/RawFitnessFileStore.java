@@ -23,6 +23,7 @@ public final class RawFitnessFileStore {
     private static final Object FILE_LOCK = new Object();
     private static volatile boolean stepMetricsCurrent;
     private static volatile boolean sleepSummaryCurrent;
+    private static volatile boolean sleepBreathMetricsCurrent;
     private final Context context;
     private final File directory;
 
@@ -250,6 +251,36 @@ public final class RawFitnessFileStore {
         }
     }
 
+    /** One pass so sleep breath rows parsed from existing files are enqueued. */
+    public int refreshSleepBreathMetrics() {
+        if (sleepBreathMetricsCurrent) return 0;
+        synchronized (FILE_LOCK) {
+            if (sleepBreathMetricsCurrent) return 0;
+            SharedPreferences prefs = context.getSharedPreferences("oplusband-history", Context.MODE_PRIVATE);
+            if (prefs.getBoolean("sleep-breath-v1", false)) {
+                sleepBreathMetricsCurrent = true;
+                return 0;
+            }
+            try {
+                int enqueued = rewriteSleepBreathMetrics();
+                if (!prefs.edit().putBoolean("sleep-breath-v1", true).commit()) {
+                    throw new IllegalStateException("SLEEP_BREATH_MEMORY_FAILED");
+                }
+                sleepBreathMetricsCurrent = true;
+                if (enqueued > 0) {
+                    context.getContentResolver().notifyChange(
+                            io.github.miam1ku.mibandoplusbridge.integration.HealthQueueProvider.URI, null);
+                    context.getContentResolver().notifyChange(
+                            io.github.miam1ku.mibandoplusbridge.integration.HealthQueueProvider.RECORDS_URI, null);
+                }
+                return enqueued;
+            } catch (Exception ignored) {
+                // Identity or a file can be unready. The next sleep read tries again.
+                return 0;
+            }
+        }
+    }
+
     /** One pass over files rejected before sleep summary version 4 could be parsed. */
     public int promoteRejectedSleep() {
         if (sleepSummaryCurrent) return 0;
@@ -353,6 +384,49 @@ public final class RawFitnessFileStore {
                 }
             }
         }
+    }
+
+    private int rewriteSleepBreathMetrics() throws Exception {
+        var state = LocalPrefs.open(context, "band-state");
+        String deviceId = state.getString("deviceId", "");
+        String identity = requireMatchingIdentity(context, deviceId);
+        String firmware = state.getString("verifiedFirmware", "");
+        if (firmware.isBlank()) throw new IllegalStateException("HISTORY_FIRMWARE_UNCONFIRMED");
+        BandHistoryParser parser = new BandHistoryParser(firmware, deviceId, identity);
+        File[] existing = directory.listFiles((parent, name) -> name.matches("[0-9a-f]{64}\\.dat"));
+        if (existing == null) return 0;
+        int enqueued = 0;
+        try (HealthRecordStore store = new HealthRecordStore(context)) {
+            for (File file : existing) {
+                String hash = file.getName().substring(0, 64);
+                if (!store.isFileIndexed(hash)) continue;
+                byte[] bytes;
+                try {
+                    bytes = readFile(hash);
+                } catch (IllegalArgumentException invalid) {
+                    continue;
+                }
+                try {
+                    int descriptor = bytes.length > 6 ? bytes[6] & 0xff : 0;
+                    if (((descriptor & 0x7f) >>> 2) != 8 || (descriptor & 3) != 1) continue;
+                    BandHistoryParser.FileResult result = parser.parseFile(bytes);
+                    if (!"PARSED".equals(result.parseStatus)) continue;
+                    for (BandHistoryParser.Measurement measurement : result.measurements) {
+                        if (!"sleep_breath".equals(measurement.kind)) {
+                            continue;
+                        }
+                        if (store.enqueueMeasurement(measurement).added()) {
+                            enqueued++;
+                        }
+                    }
+                } catch (IllegalArgumentException invalid) {
+                    continue;
+                } finally {
+                    Arrays.fill(bytes, (byte) 0);
+                }
+            }
+        }
+        return enqueued;
     }
 
     /** A persistent identity check, deliberately independent of registration, connection and ownership mode. */
