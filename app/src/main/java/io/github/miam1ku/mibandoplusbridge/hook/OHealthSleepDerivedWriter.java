@@ -27,8 +27,9 @@ final class OHealthSleepDerivedWriter {
     private final Constructor<?> indexNew;
     private final Constructor<?> hrStatNew;
     private final Method idxAccount, idxDevice, idxTime, idxSpo2, idxAvgHeart, idxRangeLow, idxRangeHigh,
-            idxWarning;
-    private final Method hrAccount, hrDate, hrMin, hrMax, hrLow, hrHigh, hrAvg, hrWarning;
+            idxWarning, idxBasalBreath, idxBreathLow, idxBreathHigh, idxBreathReasonableLow,
+            idxBreathReasonableHigh, idxGetBreathHigh;
+    private final Method hrAccount, hrDate, hrMin, hrMax, hrLow, hrHigh, hrAvg, hrWarning, hrGetDate;
     private final Class<?> dayClass;
     private final Class<?> mainClass;
     private final Class<?> frgClass;
@@ -39,6 +40,8 @@ final class OHealthSleepDerivedWriter {
     private final Method dayAccount, dayDevice, dayDate, dayIn, dayOut, daySleep, dayDeep, dayLight,
             dayRem, dayWake, dayCount, dayCalibrated, dayScore, dayMain, dayFrg, dayVersion, daySource,
             dayStandard, dayRestIn, dayRestOut;
+    private final Method dayGetDate, dayGetDevice, dayGetIn, dayGetOut, dayGetSleep, dayGetDeep,
+            dayGetLight, dayGetRem, dayGetWake, dayGetMain, dayGetFrgList;
     private final Method mainAccount, mainDevice, mainDate, mainBefore, mainIn, mainOut, mainSleep,
             mainDeep, mainLight, mainRem, mainWake, mainCount, mainPieces, mainSource;
     private final Method frgAccount, frgDevice, frgDate, frgIn, frgOut, frgSleep, frgDeep, frgLight,
@@ -59,6 +62,12 @@ final class OHealthSleepDerivedWriter {
         idxRangeLow = indexClass.getMethod("setSleepHeartRateRangeLow", Integer.class);
         idxRangeHigh = indexClass.getMethod("setSleepHeartRateRangeHigh", Integer.class);
         idxWarning = indexClass.getMethod("setHasHeartRateWarning", int.class);
+        idxBasalBreath = optional(indexClass, "setBasalBreathe", Integer.class);
+        idxBreathLow = optional(indexClass, "setAvgSleepBreathRangeLow", Integer.class);
+        idxBreathHigh = optional(indexClass, "setAvgSleepBreathRangeHigh", Integer.class);
+        idxBreathReasonableLow = optional(indexClass, "setBreatheReasonableRangeLow", Integer.class);
+        idxBreathReasonableHigh = optional(indexClass, "setBreatheReasonableRangeHigh", Integer.class);
+        idxGetBreathHigh = optional(indexClass, "getAvgSleepBreathRangeHigh");
         hrAccount = hrStatClass.getMethod("setSsoid", String.class);
         hrDate = hrStatClass.getMethod("setDate", int.class);
         hrMin = hrStatClass.getMethod("setMinHeartRate", int.class);
@@ -67,6 +76,7 @@ final class OHealthSleepDerivedWriter {
         hrHigh = hrStatClass.getMethod("setReasonableRangeHigh", int.class);
         hrAvg = hrStatClass.getMethod("setAvgSleepHeartRate", int.class);
         hrWarning = hrStatClass.getMethod("setWarningNumber", int.class);
+        hrGetDate = getter(hrStatClass, "getDate", int.class);
 
         dayClass = Class.forName(DAY_PKG + "SleepDayStat", false, loader);
         mainClass = Class.forName(DAY_PKG + "SleepMainData", false, loader);
@@ -101,6 +111,17 @@ final class OHealthSleepDerivedWriter {
         dayStandard = dayClass.getMethod("setStandardTime", int.class);
         dayRestIn = dayClass.getMethod("setRestInTime", long.class);
         dayRestOut = dayClass.getMethod("setRestOutTime", long.class);
+        dayGetDate = getter(dayClass, "getDate", int.class);
+        dayGetDevice = getter(dayClass, "getDeviceUniqueId", String.class);
+        dayGetIn = getter(dayClass, "getSleepInTime", long.class);
+        dayGetOut = getter(dayClass, "getSleepOutTime", long.class);
+        dayGetSleep = getter(dayClass, "getTotalSleepTime", int.class);
+        dayGetDeep = getter(dayClass, "getTotalDeepSleepTime", int.class);
+        dayGetLight = getter(dayClass, "getTotalLightlySleepTime", int.class);
+        dayGetRem = getter(dayClass, "getTotalREMSleepTime", int.class);
+        dayGetWake = getter(dayClass, "getTotalWakeTime", int.class);
+        dayGetMain = getter(dayClass, "getSleepMainData", mainClass);
+        dayGetFrgList = getter(dayClass, "getSleepDayFrgDataList", List.class);
         mainAccount = mainClass.getMethod("setSsoid", String.class);
         mainDevice = mainClass.getMethod("setDeviceUniqueId", String.class);
         mainDate = mainClass.getMethod("setDate", int.class);
@@ -146,7 +167,17 @@ final class OHealthSleepDerivedWriter {
     /** Writes the 1049 and 1071 rows. Values outside the band's own accept ranges are dropped. */
     void write(Object api, String account, String device, OHealthSleepPlan.Night night,
             Summary heart, Summary spo2) throws Exception {
-        if (heart == null && spo2 == null) return;
+        write(api, account, device, night, heart, spo2, null, true);
+    }
+
+    void write(Object api, String account, String device, OHealthSleepPlan.Night night,
+            Summary heart, Summary spo2, Summary breath) throws Exception {
+        write(api, account, device, night, heart, spo2, breath, true);
+    }
+
+    void write(Object api, String account, String device, OHealthSleepPlan.Night night,
+            Summary heart, Summary spo2, Summary breath, boolean writeHrStat) throws Exception {
+        if (heart == null && spo2 == null && breath == null) return;
         Object index = indexNew.newInstance();
         idxAccount.invoke(index, account);
         idxDevice.invoke(index, device);
@@ -157,10 +188,17 @@ final class OHealthSleepDerivedWriter {
             idxRangeLow.invoke(index, Integer.valueOf(heart.min()));
             idxRangeHigh.invoke(index, Integer.valueOf(heart.max()));
         }
+        if (breath != null && breath.min() >= 60 && breath.max() <= 500) {
+            if (idxBasalBreath != null) idxBasalBreath.invoke(index, Integer.valueOf(breath.mean()));
+            if (idxBreathLow != null) idxBreathLow.invoke(index, Integer.valueOf(breath.min()));
+            if (idxBreathHigh != null) idxBreathHigh.invoke(index, Integer.valueOf(breath.max()));
+            if (idxBreathReasonableLow != null) idxBreathReasonableLow.invoke(index, Integer.valueOf(120));
+            if (idxBreathReasonableHigh != null) idxBreathReasonableHigh.invoke(index, Integer.valueOf(200));
+        }
         idxWarning.invoke(index, 0);
         host.insertRows(api, TABLE_INDEX, List.of(index));
 
-        if (heart != null && heart.min() >= 40 && heart.max() <= 220) {
+        if (writeHrStat && heart != null && heart.min() >= 40 && heart.max() <= 220) {
             Object stat = hrStatNew.newInstance();
             hrAccount.invoke(stat, account);
             hrDate.invoke(stat, night.date());
@@ -174,34 +212,111 @@ final class OHealthSleepDerivedWriter {
         }
     }
 
-    /** Writes the 1052 sleep day stat with a piece per stage. */
+    /** Writes the 1052 sleep day stat with child fragments for all sessions and main session data. */
+    void writeDayStat(Object api, String account, String device, OHealthSleepPlan.Day day)
+            throws Exception {
+        List<Object> frgList = new ArrayList<>();
+        for (OHealthSleepPlan.Night night : day.nights()) {
+            List<Object> sessionPieces = pieces(account, device, night);
+            int sessionSleep = (int) night.sleepMinutes();
+            Object frg = frgNew.newInstance(account, device, night.date(), night.fallAsleepMs(),
+                    night.wakeMs(), sessionSleep, (int) night.deepMinutes(), (int) night.lightMinutes(),
+                    (int) night.remMinutes(), (int) night.wakeMinutes(), 0, null, sessionPieces, 1);
+            frgList.add(frg);
+        }
+
+        Object main = null;
+        OHealthSleepPlan.Night mainSession = day.mainSession();
+        if (mainSession != null) {
+            List<Object> mainPieceList = pieces(account, device, mainSession);
+            int mainSleepMin = (int) mainSession.sleepMinutes();
+            main = mainNew.newInstance();
+            mainAccount.invoke(main, account);
+            mainDevice.invoke(main, device);
+            mainDate.invoke(main, mainSession.date());
+            mainBefore.invoke(main, mainSession.fallAsleepMs() - 10_800_000L);
+            mainIn.invoke(main, mainSession.fallAsleepMs());
+            mainOut.invoke(main, mainSession.wakeMs());
+            mainSleep.invoke(main, mainSleepMin);
+            mainDeep.invoke(main, (int) mainSession.deepMinutes());
+            mainLight.invoke(main, (int) mainSession.lightMinutes());
+            mainRem.invoke(main, (int) mainSession.remMinutes());
+            mainWake.invoke(main, (int) mainSession.wakeMinutes());
+            mainCount.invoke(main, 0);
+            mainPieces.invoke(main, mainPieceList);
+            mainSource.invoke(main, 1);
+        }
+
+        int totalSleep = (int) day.sleepMinutes();
+        Object row = dayNew.newInstance(account, device, day.date(), day.fallAsleepMs(),
+                day.wakeMs(), totalSleep, (int) day.deepMinutes(), (int) day.lightMinutes(),
+                (int) day.remMinutes(), (int) day.wakeMinutes(), 0, false, 0, main,
+                frgList, 0, 1, 0, day.fallAsleepMs(), day.wakeMs());
+        host.insertRows(api, TABLE_DAY_STAT, List.of(row));
+    }
+
     void writeDayStat(Object api, String account, String device, OHealthSleepPlan.Night night)
             throws Exception {
-        List<Object> pieces = pieces(account, device, night);
-        int sleep = (int) night.sleepMinutes();
-        Object main = mainNew.newInstance();
-        mainAccount.invoke(main, account);
-        mainDevice.invoke(main, device);
-        mainDate.invoke(main, night.date());
-        mainBefore.invoke(main, night.fallAsleepMs() - 10_800_000L);
-        mainIn.invoke(main, night.fallAsleepMs());
-        mainOut.invoke(main, night.wakeMs());
-        mainSleep.invoke(main, sleep);
-        mainDeep.invoke(main, (int) night.deepMinutes());
-        mainLight.invoke(main, (int) night.lightMinutes());
-        mainRem.invoke(main, (int) night.remMinutes());
-        mainWake.invoke(main, (int) night.wakeMinutes());
-        mainCount.invoke(main, 0);
-        mainPieces.invoke(main, pieces);
-        mainSource.invoke(main, 1);
-        Object frg = frgNew.newInstance(account, device, night.date(), night.fallAsleepMs(),
-                night.wakeMs(), sleep, (int) night.deepMinutes(), (int) night.lightMinutes(),
-                (int) night.remMinutes(), (int) night.wakeMinutes(), 0, null, pieces, 1);
-        Object row = dayNew.newInstance(account, device, night.date(), night.fallAsleepMs(),
-                night.wakeMs(), sleep, (int) night.deepMinutes(), (int) night.lightMinutes(),
-                (int) night.remMinutes(), (int) night.wakeMinutes(), 0, false, 0, main,
-                List.of(frg), 0, 1, 0, night.fallAsleepMs(), night.wakeMs());
-        host.insertRows(api, TABLE_DAY_STAT, List.of(row));
+        writeDayStat(api, account, device, OHealthSleepPlan.days(List.of(night)).get(0));
+    }
+
+    boolean dayStatMatches(List<?> rows, String device, String previous, OHealthSleepPlan.Day day)
+            throws ReflectiveOperationException {
+        if (rows == null) return false;
+        for (Object row : rows) {
+            if (!dayClass.isInstance(row) || day.date() != (Integer) dayGetDate.invoke(row)) continue;
+            String owner = (String) dayGetDevice.invoke(row);
+            if (owner != null && !owner.isBlank() && !device.equals(owner) && !owner.equals(previous)) continue;
+            if ((int) day.sleepMinutes() != (Integer) dayGetSleep.invoke(row)
+                    || (int) day.deepMinutes() != (Integer) dayGetDeep.invoke(row)
+                    || (int) day.lightMinutes() != (Integer) dayGetLight.invoke(row)
+                    || (int) day.remMinutes() != (Integer) dayGetRem.invoke(row)
+                    || (int) day.wakeMinutes() != (Integer) dayGetWake.invoke(row)
+                    || day.fallAsleepMs() != (Long) dayGetIn.invoke(row)
+                    || day.wakeMs() != (Long) dayGetOut.invoke(row)) {
+                return false;
+            }
+            List<?> frgs = (List<?>) dayGetFrgList.invoke(row);
+            if (frgs == null || frgs.size() != day.nights().size()) return false;
+            Object main = dayGetMain.invoke(row);
+            if ((day.mainSession() == null) != (main == null)) return false;
+            return true;
+        }
+        return false;
+    }
+
+    boolean dayOwnedByOther(List<?> rows, int date, String device, String previous)
+            throws ReflectiveOperationException {
+        if (rows == null) return false;
+        for (Object row : rows) {
+            if (!dayClass.isInstance(row) || date != (Integer) dayGetDate.invoke(row)) continue;
+            String owner = (String) dayGetDevice.invoke(row);
+            if (owner == null || owner.isBlank() || device.equals(owner) || owner.equals(previous)) continue;
+            return true;
+        }
+        return false;
+    }
+
+    boolean hrStatMatches(List<?> rows, int date) throws ReflectiveOperationException {
+        if (rows == null) return false;
+        for (Object row : rows) {
+            if (!hrStatClass.isInstance(row)) continue;
+            if (date == (Integer) hrGetDate.invoke(row)) return true;
+        }
+        return false;
+    }
+
+    boolean indexHasBreath(List<?> rows) {
+        if (rows == null || idxGetBreathHigh == null) return false;
+        for (Object row : rows) {
+            if (!indexClass.isInstance(row)) continue;
+            try {
+                Integer high = (Integer) idxGetBreathHigh.invoke(row);
+                if (high != null && high >= 60 && high <= 500) return true;
+            } catch (Exception ignored) {
+            }
+        }
+        return false;
     }
 
     private List<Object> pieces(String account, String device, OHealthSleepPlan.Night night)
@@ -212,5 +327,18 @@ final class OHealthSleepDerivedWriter {
                     segment.sleepState(), false));
         }
         return pieces;
+    }
+
+    private static Method optional(Class<?> type, String name, Class<?>... parameters) {
+        try { return type.getMethod(name, parameters); }
+        catch (NoSuchMethodException missing) { return null; }
+    }
+
+    private static Method getter(Class<?> type, String name, Class<?> returnType) throws NoSuchMethodException {
+        Method method = type.getMethod(name);
+        if (!returnType.isAssignableFrom(method.getReturnType())) {
+            throw new NoSuchMethodException("DERIVED_MODEL_CONTRACT " + name);
+        }
+        return method;
     }
 }

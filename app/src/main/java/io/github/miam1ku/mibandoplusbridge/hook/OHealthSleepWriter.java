@@ -19,19 +19,24 @@ import org.json.JSONObject;
 final class OHealthSleepWriter {
     static final int TABLE_SLEEP = 1010;
     static final int TABLE_STAT = 1011;
+    static final int TABLE_BREATH_RATE = 1048;
+    private static final int INSERT_CHUNK = 200;
     private static final String[] COLUMNS = {"recordId", "revision", "record"};
     private final OHealthHealthImportHook.HostContract host;
     private final OHealthSleepDerivedWriter derived;
     private final Class<?> sleepClass;
     private final Class<?> statClass;
+    private final Class<?> breathClass;
     private final Constructor<?> sleepNew;
     private final Constructor<?> statNew;
+    private final Constructor<?> breathNew;
     private final Method sleepAccount, sleepDevice, sleepStart, sleepEnd, sleepState, sleepDisplay, sleepVersion;
     private final Method sleepGetDevice, sleepGetStart, sleepGetEnd, sleepGetState, sleepGetVersion;
     private final Method statAccount, statDevice, statDate, statFall, statWake, statSleep, statDeep, statLight,
             statRem, statAwake;
     private final Method statGetDevice, statGetDate, statGetFall, statGetWake, statGetSleep,
             statGetDeep, statGetLight, statGetRem, statGetAwake;
+    private final Method breathAccount, breathDevice, breathDeviceType, breathTime, breathValue, breathConfig;
 
     OHealthSleepWriter(OHealthHealthImportHook.HostContract host) throws ReflectiveOperationException {
         this.host = host;
@@ -79,6 +84,37 @@ final class OHealthSleepWriter {
         statGetLight = getter(statClass, "getTotalLightlySleepTime", long.class);
         statGetRem = getter(statClass, "getTotalRemTime", long.class);
         statGetAwake = getter(statClass, "getTotalWakeUpTime", long.class);
+        Class<?> bClass = null;
+        Constructor<?> bNew = null;
+        Method bAccount = null, bDevice = null, bDeviceType = null, bTime = null, bValue = null, bConfig = null;
+        try {
+            bClass = Class.forName("com.heytap.databaseengine.model.BreathRate", false, loader);
+            bNew = bClass.getConstructor();
+            bAccount = bClass.getMethod("setSsoid", String.class);
+            bDevice = bClass.getMethod("setDeviceUniqueId", String.class);
+            bDeviceType = optional(bClass, "setDeviceType", String.class);
+            bTime = bClass.getMethod("setDataCreatedTimestamp", long.class);
+            bValue = bClass.getMethod("setValue", Integer.class);
+            bConfig = bClass.getMethod("setConfig", Integer.class);
+        } catch (ReflectiveOperationException unavailable) {
+            Log.i("OplusBandBridge", "OHEALTH_BREATH_RATE_CONTRACT " + unavailable);
+            bClass = null;
+            bNew = null;
+            bAccount = null;
+            bDevice = null;
+            bDeviceType = null;
+            bTime = null;
+            bValue = null;
+            bConfig = null;
+        }
+        breathClass = bClass;
+        breathNew = bNew;
+        breathAccount = bAccount;
+        breathDevice = bDevice;
+        breathDeviceType = bDeviceType;
+        breathTime = bTime;
+        breathValue = bValue;
+        breathConfig = bConfig;
     }
 
     void write(Context context) throws Exception {
@@ -95,111 +131,182 @@ final class OHealthSleepWriter {
         List<HealthRecord> records = history(context, account, queued);
         List<OHealthSleepPlan.Night> nights = OHealthSleepPlan.nights(records);
         if (nights.isEmpty()) return;
-        nights.sort(Comparator.comparingInt(OHealthSleepPlan.Night::date)
-                .thenComparing(Comparator.comparingLong(OHealthSleepPlan.Night::sleepMinutes).reversed())
-                .thenComparingLong(OHealthSleepPlan.Night::fallAsleepMs));
-        Log.i("OplusBandBridge", "OHEALTH_SLEEP_BEGIN nights=" + nights.size());
+        List<OHealthSleepPlan.Day> days = OHealthSleepPlan.days(nights);
+        if (days.isEmpty()) return;
+        Log.i("OplusBandBridge", "OHEALTH_SLEEP_BEGIN days=" + days.size() + " nights=" + nights.size());
         int inserted = 0;
         int skipped = 0;
         int held = 0;
-        for (OHealthSleepPlan.Night night : nights) {
+        int failed = 0;
+        for (OHealthSleepPlan.Day day : days) {
             if (!account.equals(host.account())) throw new SecurityException("IMPORT_ACCOUNT_CHANGED");
-            if (!queued.equals(device)) {
-                try {
-                    host.deleteRows(api, TABLE_SLEEP, account, queued, night.fallAsleepMs(), night.wakeMs());
-                } catch (Exception ignored) {
-                    Log.i("OplusBandBridge", "OHEALTH_SLEEP_PREVIOUS_DEVICE_KEPT date=" + night.date());
-                }
-            }
             try {
-                String skip = writeNight(api, account, device, night,
-                        OHealthSleepPlan.summary(nights, night));
+                String skip = writeDay(context, api, account, device, queued, day);
                 if (skip == null) inserted++;
                 else {
                     skipped++;
-                    String line = "OHEALTH_SLEEP_NIGHT_SKIPPED date=" + night.date() + " reason=" + skip;
+                    String line = "OHEALTH_SLEEP_DAY_SKIPPED date=" + day.date() + " reason=" + skip;
                     Log.i("OplusBandBridge", line);
                     OHealthDeviceHook.traceLine(context, line);
                 }
-                if (derived != null && !"other-device".equals(skip)) {
-                    try {
-                        if (skip == null || !indexPresent(api, account, device, night)) {
-                            writeDerived(api, account, device, night, context, queued);
-                        }
-                        if (skip == null || !dayStatPresent(api, account, device, night)) {
-                            derived.writeDayStat(api, account, device, night);
-                        }
-                    } catch (Exception derivedFailure) {
-                        Log.i("OplusBandBridge", "OHEALTH_SLEEP_DERIVED_FAILED date=" + night.date()
-                                + " " + derivedFailure);
-                    }
-                }
             } catch (SecurityException paused) {
                 throw paused;
-            } catch (IllegalStateException heldNight) {
-                String reason = heldNight.getMessage();
-                if (reason == null || !reason.startsWith("SLEEP_SEGMENT_UNCONFIRMED")) throw heldNight;
-                held++;
-                Log.i("OplusBandBridge", "OHEALTH_SLEEP_NIGHT_HELD date=" + night.date() + " " + reason);
+            } catch (IllegalStateException heldDay) {
+                String reason = heldDay.getMessage();
+                if (reason != null && reason.startsWith("SLEEP_SEGMENT_UNCONFIRMED")) {
+                    held++;
+                    Log.i("OplusBandBridge", "OHEALTH_SLEEP_DAY_HELD date=" + day.date() + " " + reason);
+                } else {
+                    failed++;
+                    String line = "OHEALTH_SLEEP_DAY_FAILED date=" + day.date() + " reason=" + reason;
+                    Log.i("OplusBandBridge", line);
+                    OHealthDeviceHook.traceLine(context, line);
+                }
+            } catch (Exception | LinkageError failedDay) {
+                failed++;
+                String line = "OHEALTH_SLEEP_DAY_FAILED date=" + day.date() + " "
+                        + failedDay.getClass().getSimpleName()
+                        + (failedDay.getMessage() == null ? "" : " " + failedDay.getMessage());
+                Log.i("OplusBandBridge", line);
+                OHealthDeviceHook.traceLine(context, line);
             }
         }
-        Log.i("OplusBandBridge", "OHEALTH_SLEEP_IMPORT nights=" + nights.size()
-                + " inserted=" + inserted + " skipped=" + skipped + " held=" + held);
+        Log.i("OplusBandBridge", "OHEALTH_SLEEP_IMPORT days=" + days.size()
+                + " inserted=" + inserted + " skipped=" + skipped + " held=" + held + " failed=" + failed);
     }
 
-    /** @return null when the night was written; otherwise {@code other-device} or {@code already-ours}. */
-    private String writeNight(Object api, String account, String device, OHealthSleepPlan.Night night,
-            boolean summary) throws Exception {
-        long statStart = night.dayStartMs();
-        long statEnd = night.dayEndMs() + 1;
+    /** @return null when the day was written; otherwise {@code other-device} or {@code already-ours}. */
+    private String writeDay(Context context, Object api, String account, String device,
+            String queued, OHealthSleepPlan.Day day) throws Exception {
+        long statStart = day.dayStartMs();
+        long statEnd = day.dayEndMs() + 1;
+        String previous = previousDevice();
         List<?> stats = host.readRows(api, account, TABLE_STAT, null, statStart, statEnd, 4, false);
-        if (ownedByOther(stats, night.date(), device, previousDevice())) return "other-device";
+        if (ownedByOther(stats, day.date(), device, previous)) return "other-device";
+        List<?> dayStats = null;
+        if (derived != null) {
+            dayStats = host.readRows(api, account, OHealthSleepDerivedWriter.TABLE_DAY_STAT, null,
+                    statStart, statEnd, 0, false);
+            if (derived.dayOwnedByOther(dayStats, day.date(), device, previous)) return "other-device";
+        }
+
+        if (!queued.equals(device)) {
+            for (OHealthSleepPlan.Night night : day.nights()) {
+                try {
+                    host.deleteRows(api, TABLE_SLEEP, account, queued, night.fallAsleepMs(), night.wakeMs());
+                } catch (Exception ignored) {
+                    Log.i("OplusBandBridge", "OHEALTH_SLEEP_PREVIOUS_DEVICE_KEPT date=" + day.date());
+                }
+                if (breathClass != null) {
+                    try {
+                        host.deleteRows(api, TABLE_BREATH_RATE, account, queued, night.fallAsleepMs(), night.wakeMs());
+                    } catch (Exception ignored) {
+                    }
+                }
+            }
+        }
+
+        OHealthSleepPlan.Night hrSession = day.mainSession() != null ? day.mainSession()
+                : day.nights().stream().max(Comparator.comparingLong(OHealthSleepPlan.Night::sleepMinutes)).orElse(null);
+
+        boolean anyUpdated = false;
+        for (OHealthSleepPlan.Night night : day.nights()) {
+            boolean segmentsUpdated = writeSessionSegments(api, account, device, night);
+            if (segmentsUpdated) anyUpdated = true;
+
+            if (derived != null || breathClass != null) {
+                try {
+                    boolean hasBreath = breathClass != null && hasBreathRecords(context, account, queued, night);
+                    boolean needBreath = hasBreath && !breathRatePresent(api, account, device, night);
+                    boolean needIndex = derived != null && !indexPresent(api, account, device, night, hasBreath);
+                    boolean writeHrStat = (night == hrSession);
+                    boolean needHr = writeHrStat && derived != null && !hrStatPresent(api, account, day.date(), statStart, statEnd);
+                    if (segmentsUpdated || needBreath || needIndex || needHr) {
+                        writeDerived(api, account, device, night, context, queued, writeHrStat);
+                        anyUpdated = true;
+                    }
+                } catch (Exception derivedFailure) {
+                    Log.i("OplusBandBridge", "OHEALTH_SLEEP_DERIVED_FAILED date=" + day.date()
+                            + " " + derivedFailure);
+                }
+            }
+        }
+
+        boolean sameStat = statMatches(stats, device, previous, day);
+        if (!sameStat) {
+            host.insertRows(api, TABLE_STAT, List.of(statRow(account, device, day)));
+            List<?> written = host.readRows(api, account, TABLE_STAT, null, statStart, statEnd, 4, false);
+            if (!statMatches(written, device, previous, day)) {
+                throw new IllegalStateException("SLEEP_STAT_UNCONFIRMED_" + written.size());
+            }
+            anyUpdated = true;
+        }
+
+        if (derived != null) {
+            try {
+                boolean sameDayStat = derived.dayStatMatches(dayStats, device, previous, day);
+                if (!sameDayStat) {
+                    derived.writeDayStat(api, account, device, day);
+                    List<?> writtenDay = host.readRows(api, account, OHealthSleepDerivedWriter.TABLE_DAY_STAT,
+                            null, statStart, statEnd, 0, false);
+                    if (!derived.dayStatMatches(writtenDay, device, previous, day)) {
+                        Log.w("OplusBandBridge", "OHEALTH_SLEEP_DAY_STAT_UNCONFIRMED date=" + day.date()
+                                + " rows=" + (writtenDay == null ? 0 : writtenDay.size()));
+                    }
+                    anyUpdated = true;
+                }
+            } catch (Exception derivedFailure) {
+                Log.i("OplusBandBridge", "OHEALTH_SLEEP_DERIVED_FAILED date=" + day.date()
+                        + " " + derivedFailure);
+            }
+        }
+
+        if (!anyUpdated) return "already-ours";
+        return null;
+    }
+
+    private boolean writeSessionSegments(Object api, String account, String device,
+            OHealthSleepPlan.Night night) throws Exception {
         List<?> existing = host.readRows(api, account, TABLE_SLEEP, device, night.dayStartMs(),
                 night.dayEndMs(), 0, true);
         List<OHealthSleepPlan.Segment> segments = minuteRows(night.segments());
-        boolean sameSegments = segmentsMatch(existing, device, segments, night);
-        boolean sameStat = !summary || statMatches(stats, device, night);
-        if (sameSegments && sameStat) return "already-ours";
-        if (!sameSegments) {
-            // Delete only this session. A nap later the same day stays in the table.
-            host.deleteRows(api, TABLE_SLEEP, account, device, night.fallAsleepMs(), night.wakeMs());
-            insertSegments(api, account, device, segments);
+        if (segmentsMatch(existing, device, segments, night)) return false;
+        // Delete only this session. A nap later the same day stays in the table.
+        host.deleteRows(api, TABLE_SLEEP, account, device, night.fallAsleepMs(), night.wakeMs());
+        if (breathClass != null) {
+            try {
+                host.deleteRows(api, TABLE_BREATH_RATE, account, device, night.fallAsleepMs(), night.wakeMs());
+            } catch (Exception ignored) {
+            }
+        }
+        insertSegments(api, account, device, segments);
+        existing = host.readRows(api, account, TABLE_SLEEP, device, night.dayStartMs(),
+                night.dayEndMs(), 0, true);
+        if (!segmentsMatch(existing, device, segments, night)) {
+            boolean[] kept = new boolean[segments.size()];
+            for (Object row : existing) {
+                if (!overlapsSession(row, device, night)) continue;
+                int match = unusedSegment(row, device, segments, kept);
+                if (match >= 0) {
+                    kept[match] = true;
+                    continue;
+                }
+                long rowStart = (Long) sleepGetStart.invoke(row);
+                host.deleteRows(api, TABLE_SLEEP, account, device, rowStart, rowStart + 1);
+            }
+            List<OHealthSleepPlan.Segment> missing = new ArrayList<>();
+            for (int i = 0; i < segments.size(); i++) {
+                if (!kept[i]) missing.add(segments.get(i));
+            }
+            insertSegments(api, account, device, missing);
             existing = host.readRows(api, account, TABLE_SLEEP, device, night.dayStartMs(),
                     night.dayEndMs(), 0, true);
             if (!segmentsMatch(existing, device, segments, night)) {
-                boolean[] kept = new boolean[segments.size()];
-                for (Object row : existing) {
-                    if (!overlapsSession(row, device, night)) continue;
-                    int match = unusedSegment(row, device, segments, kept);
-                    if (match >= 0) {
-                        kept[match] = true;
-                        continue;
-                    }
-                    long rowStart = (Long) sleepGetStart.invoke(row);
-                    host.deleteRows(api, TABLE_SLEEP, account, device, rowStart, rowStart + 1);
-                }
-                List<OHealthSleepPlan.Segment> missing = new ArrayList<>();
-                for (int i = 0; i < segments.size(); i++) {
-                    if (!kept[i]) missing.add(segments.get(i));
-                }
-                insertSegments(api, account, device, missing);
-                existing = host.readRows(api, account, TABLE_SLEEP, device, night.dayStartMs(),
-                        night.dayEndMs(), 0, true);
-                if (!segmentsMatch(existing, device, segments, night)) {
-                    throw new IllegalStateException("SLEEP_SEGMENT_UNCONFIRMED rows=" + existing.size()
-                            + " want=" + segments.size());
-                }
+                throw new IllegalStateException("SLEEP_SEGMENT_UNCONFIRMED rows=" + existing.size()
+                        + " want=" + segments.size());
             }
         }
-        if (summary && !statMatches(stats, device, night)) {
-            // SleepDataStat is keyed by account and date, so a later insert replaces the frozen summary.
-            host.insertRows(api, TABLE_STAT, List.of(statRow(account, device, night)));
-            List<?> written = host.readRows(api, account, TABLE_STAT, device, statStart, statEnd, 4, false);
-            if (!statMatches(written, device, night)) {
-                throw new IllegalStateException("SLEEP_STAT_UNCONFIRMED_" + written.size());
-            }
-        }
-        return null;
+        return true;
     }
 
     private List<HealthRecord> history(Context context, String account, String device) throws Exception {
@@ -251,31 +358,96 @@ final class OHealthSleepWriter {
     }
 
     private void writeDerived(Object api, String account, String device, OHealthSleepPlan.Night night,
-            Context context, String queued) throws Exception {
+            Context context, String queued, boolean writeHrStat) throws Exception {
         long start = night.fallAsleepMs();
         long end = night.wakeMs();
         OHealthSleepDerivedWriter.Summary heart = summarize(context, account, queued, "heart_rate",
                 start, end, 40, 220);
         OHealthSleepDerivedWriter.Summary spo2 = summarize(context, account, queued, "spo2",
                 start, end, 60, 100);
-        derived.write(api, account, device, night, heart, spo2);
+        List<HealthRecord> breathRecords = window(context, account, queued, "sleep_breath", start, end);
+        OHealthSleepDerivedWriter.Summary breath = summarizeRecords(breathRecords, 60, 500);
+        if (!breathRatePresent(api, account, device, night)) {
+            writeBreathRate(api, account, device, breathRecords);
+        }
+        if (derived != null) {
+            derived.write(api, account, device, night, heart, spo2, breath, writeHrStat);
+        }
+    }
+
+    private void writeBreathRate(Object api, String account, String device,
+            List<HealthRecord> records) throws Exception {
+        if (breathClass == null || records.isEmpty()) return;
+        List<Object> rows = new ArrayList<>();
+        for (HealthRecord record : records) {
+            if (record.value == null) continue;
+            int val = record.value.intValue();
+            if (val < 60 || val > 500) continue;
+            Object row = breathNew.newInstance();
+            breathAccount.invoke(row, account);
+            if (breathDeviceType != null) {
+                breathDeviceType.invoke(row, "Band");
+            }
+            breathDevice.invoke(row, device);
+            breathTime.invoke(row, record.startMs);
+            breathValue.invoke(row, Integer.valueOf(val));
+            breathConfig.invoke(row, Integer.valueOf(0));
+            rows.add(row);
+        }
+        for (int from = 0; from < rows.size(); from += INSERT_CHUNK) {
+            host.insertRows(api, TABLE_BREATH_RATE, rows.subList(from, Math.min(rows.size(), from + INSERT_CHUNK)));
+        }
+    }
+
+    private boolean breathRatePresent(Object api, String account, String device,
+            OHealthSleepPlan.Night night) {
+        if (breathClass == null) return true;
+        try {
+            return !host.readRows(api, account, TABLE_BREATH_RATE, device,
+                    night.fallAsleepMs(), night.wakeMs(), 0, false, 1).isEmpty();
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private boolean hasBreathRecords(Context context, String account, String device,
+            OHealthSleepPlan.Night night) {
+        try (Cursor rows = context.getContentResolver().query(HealthQueueProvider.RECORDS_URI, COLUMNS,
+                "account=? AND deviceId=? AND kind=? AND startMs<? AND endMs>?",
+                new String[] {account, device, "sleep_breath",
+                        Long.toString(night.wakeMs()), Long.toString(night.fallAsleepMs())}, null)) {
+            return rows != null && rows.moveToFirst();
+        } catch (Exception ignored) {
+            return false;
+        }
     }
 
     private boolean indexPresent(Object api, String account, String device,
-            OHealthSleepPlan.Night night) throws Exception {
-        return !host.readRows(api, account, OHealthSleepDerivedWriter.TABLE_INDEX, device,
-                night.fallAsleepMs(), night.wakeMs(), 0, false).isEmpty();
+            OHealthSleepPlan.Night night, boolean expectBreath) throws Exception {
+        if (derived == null) return true;
+        List<?> rows = host.readRows(api, account, OHealthSleepDerivedWriter.TABLE_INDEX, device,
+                night.fallAsleepMs(), night.wakeMs(), 0, false);
+        if (rows.isEmpty()) return false;
+        if (expectBreath && !derived.indexHasBreath(rows)) return false;
+        return true;
     }
 
-    private boolean dayStatPresent(Object api, String account, String device,
-            OHealthSleepPlan.Night night) throws Exception {
-        return !host.readRows(api, account, OHealthSleepDerivedWriter.TABLE_DAY_STAT, device,
-                night.fallAsleepMs(), night.wakeMs(), 0, false).isEmpty();
+    private boolean hrStatPresent(Object api, String account, int date, long start, long end)
+            throws Exception {
+        if (derived == null) return true;
+        List<?> rows = host.readRows(api, account, OHealthSleepDerivedWriter.TABLE_HR_STAT, null,
+                start, end, 0, false);
+        return derived.hrStatMatches(rows, date);
     }
 
     private OHealthSleepDerivedWriter.Summary summarize(Context context, String account, String device,
             String kind, long start, long end, int low, int high) throws Exception {
         List<HealthRecord> records = window(context, account, device, kind, start, end);
+        return summarizeRecords(records, low, high);
+    }
+
+    private OHealthSleepDerivedWriter.Summary summarizeRecords(List<HealthRecord> records,
+            int low, int high) {
         int[] values = new int[records.size()];
         int used = 0;
         for (HealthRecord record : records) {
@@ -319,20 +491,20 @@ final class OHealthSleepWriter {
     }
 
 
-    private Object statRow(String account, String device, OHealthSleepPlan.Night night)
+    private Object statRow(String account, String device, OHealthSleepPlan.Day day)
             throws ReflectiveOperationException {
         Object row = statNew.newInstance();
         statAccount.invoke(row, account);
         statDevice.invoke(row, device);
-        statDate.invoke(row, night.date());
+        statDate.invoke(row, day.date());
         // The host stores the summary clock as sleep-day minutes, not the raw timestamps.
-        statFall.invoke(row, OHealthSleepPlan.sleepDayMinutes(night.fallAsleepMs(), java.time.ZoneId.systemDefault()));
-        statWake.invoke(row, OHealthSleepPlan.sleepDayMinutes(night.wakeMs(), java.time.ZoneId.systemDefault()));
-        statSleep.invoke(row, night.sleepMinutes());
-        statDeep.invoke(row, night.deepMinutes());
-        statLight.invoke(row, night.lightMinutes());
-        statRem.invoke(row, night.remMinutes());
-        statAwake.invoke(row, night.wakeMinutes());
+        statFall.invoke(row, OHealthSleepPlan.sleepDayMinutes(day.fallAsleepMs(), day.zone()));
+        statWake.invoke(row, OHealthSleepPlan.sleepDayMinutes(day.wakeMs(), day.zone()));
+        statSleep.invoke(row, day.sleepMinutes());
+        statDeep.invoke(row, day.deepMinutes());
+        statLight.invoke(row, day.lightMinutes());
+        statRem.invoke(row, day.remMinutes());
+        statAwake.invoke(row, day.wakeMinutes());
         return row;
     }
 
@@ -397,21 +569,22 @@ final class OHealthSleepWriter {
         return start < night.wakeMs() && end > night.fallAsleepMs();
     }
 
-    private boolean statMatches(List<?> rows, String device, OHealthSleepPlan.Night night)
+    private boolean statMatches(List<?> rows, String device, String previous, OHealthSleepPlan.Day day)
             throws ReflectiveOperationException {
         for (Object row : rows) {
-            if (!statClass.isInstance(row) || night.date() != (Integer) statGetDate.invoke(row)) continue;
+            if (!statClass.isInstance(row) || day.date() != (Integer) statGetDate.invoke(row)) continue;
             String owner = (String) statGetDevice.invoke(row);
-            if (owner != null && !owner.isBlank() && !device.equals(owner)) continue;
-            return OHealthSleepPlan.sleepDayMinutes(night.fallAsleepMs(), java.time.ZoneId.systemDefault())
+            // Rows written under the old queue id still belong to this band.
+            if (owner != null && !owner.isBlank() && !device.equals(owner) && !owner.equals(previous)) continue;
+            return OHealthSleepPlan.sleepDayMinutes(day.fallAsleepMs(), day.zone())
                             == (Long) statGetFall.invoke(row)
-                    && OHealthSleepPlan.sleepDayMinutes(night.wakeMs(), java.time.ZoneId.systemDefault())
+                    && OHealthSleepPlan.sleepDayMinutes(day.wakeMs(), day.zone())
                             == (Long) statGetWake.invoke(row)
-                    && night.sleepMinutes() == (Long) statGetSleep.invoke(row)
-                    && night.deepMinutes() == (Long) statGetDeep.invoke(row)
-                    && night.lightMinutes() == (Long) statGetLight.invoke(row)
-                    && night.remMinutes() == (Long) statGetRem.invoke(row)
-                    && night.wakeMinutes() == (Long) statGetAwake.invoke(row);
+                    && day.sleepMinutes() == (Long) statGetSleep.invoke(row)
+                    && day.deepMinutes() == (Long) statGetDeep.invoke(row)
+                    && day.lightMinutes() == (Long) statGetLight.invoke(row)
+                    && day.remMinutes() == (Long) statGetRem.invoke(row)
+                    && day.wakeMinutes() == (Long) statGetAwake.invoke(row);
         }
         return false;
     }

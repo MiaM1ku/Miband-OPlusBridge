@@ -384,7 +384,7 @@ public final class HealthRecordStore extends SQLiteOpenHelper {
 
     /** Sleep stays on the device and is not imported, so a later account confirmation can still read it. */
     private static boolean isDeviceSleep(String kind) {
-        return "sleep_interval".equals(kind) || "sleep_stage".equals(kind);
+        return "sleep_interval".equals(kind) || "sleep_stage".equals(kind) || "sleep_breath".equals(kind);
     }
 
     private Cursor deviceSleep(String deviceId, String kind, long startMs, long endMs, String after) {

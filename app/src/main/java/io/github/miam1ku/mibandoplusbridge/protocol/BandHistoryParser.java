@@ -8,6 +8,8 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
+import java.util.TreeMap;
 import java.util.zip.CRC32;
 import java.nio.charset.StandardCharsets;
 import java.util.Iterator;
@@ -29,6 +31,7 @@ public final class BandHistoryParser {
     private static final byte[] STRESS = "stress".getBytes(StandardCharsets.US_ASCII);
     private static final byte[] SLEEP_INTERVAL = "sleep_interval".getBytes(StandardCharsets.US_ASCII);
     private static final byte[] SLEEP_STAGE = "sleep_stage".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] SLEEP_BREATH = "sleep_breath".getBytes(StandardCharsets.US_ASCII);
     private static final long DAY_MS = 86_400_000L;
     private static final int[] PRESENT_FIELDS = {47, 43, 39, 35, 31, 27, 23, 19, 15, 11, 7};
     private static final int[] FIELD_WIDTHS = {2, 1, 1, 2, 1, 1, 2, 1, 1, 2, 2};
@@ -322,6 +325,7 @@ public final class BandHistoryParser {
         // covers this interval is the band's current analysis; earlier copies are history.
         List<int[]> chosen = null;
         long spanMinutes = (sleepEnd - sleepStart) / 60_000L;
+        Map<Long, List<Double>> breathSamples = new TreeMap<>();
         while (pos + 17 <= limit) {
             if (u32(bytes, pos) != 0xfffcfafbL) {
                 pos++;
@@ -352,20 +356,74 @@ public final class BandHistoryParser {
                 if (!runs.isEmpty() && spanMinutes > 0 && Math.abs(totalMinutes - spanMinutes) <= 2) {
                     chosen = runs;
                 }
+            } else if (type == 10) {
+                decodeSleepBreathPacket(bytes, pos, payload, breathSamples);
             }
             pos += 17 + payload;
         }
         cursor.position = limit;
-        if (chosen == null) return;
-        long current = sleepStart;
-        for (int[] run : chosen) {
-            long next = current + run[1] * 60_000L;
-            if (run[0] >= 2 && run[0] <= 5 && next > current) {
-                long a = Math.max(current, sleepStart);
-                long b = Math.min(next, sleepEnd);
-                if (b > a) records.add(sleepStage(a, b, run[0], timezone));
+        if (chosen != null) {
+            long current = sleepStart;
+            for (int[] run : chosen) {
+                long next = current + run[1] * 60_000L;
+                if (run[0] >= 2 && run[0] <= 5 && next > current) {
+                    long a = Math.max(current, sleepStart);
+                    long b = Math.min(next, sleepEnd);
+                    if (b > a) records.add(sleepStage(a, b, run[0], timezone));
+                }
+                current = next;
             }
-            current = next;
+        }
+        emitSleepBreathRecords(records, breathSamples, timezone);
+    }
+
+    @SuppressWarnings("unchecked")
+    private void decodeSleepBreathPacket(byte[] bytes, int pos, int payload,
+            Map<Long, List<Double>> breathSamples) {
+        long ts = u32(bytes, pos + 5) | (u32(bytes, pos + 9) << 32);
+        if (ts <= 0) return;
+        long recTsSec = ts > 3_000_000_000L ? ts / 1_000_000_000L : ts;
+        long windowStartSec = recTsSec - 600L;
+        if (windowStartSec < 0) return;
+        int off = pos + 17;
+        List<Double>[] phases = (List<Double>[]) new List<?>[3];
+        phases[0] = new ArrayList<>();
+        phases[1] = new ArrayList<>();
+        phases[2] = new ArrayList<>();
+        for (int i = 0; i + 4 <= payload; i += 4) {
+            int w0 = (bytes[off + i] & 0xff) | ((bytes[off + i + 1] & 0xff) << 8);
+            int w1 = (bytes[off + i + 2] & 0xff) | ((bytes[off + i + 3] & 0xff) << 8);
+            int phase = w1 >>> 12;
+            double breath = w0 / 256.0;
+            if (phase >= 0 && phase <= 2 && breath >= 6.0 && breath <= 50.0) {
+                phases[phase].add(breath);
+            }
+        }
+        for (int p = 0; p <= 2; p++) {
+            List<Double> pList = phases[p];
+            int count = pList.size();
+            if (count == 0) continue;
+            long phaseStartSec = windowStartSec + p * 200L;
+            for (int idx = 0; idx < count; idx++) {
+                long sampleSec = phaseStartSec + (long) idx * 200L / count;
+                long minuteSec = (sampleSec / 60L) * 60L;
+                breathSamples.computeIfAbsent(minuteSec, k -> new ArrayList<>()).add(pList.get(idx));
+            }
+        }
+    }
+
+    private void emitSleepBreathRecords(List<Measurement> records,
+            Map<Long, List<Double>> breathSamples, String timezone) {
+        for (Map.Entry<Long, List<Double>> entry : breathSamples.entrySet()) {
+            List<Double> samples = entry.getValue();
+            if (samples.isEmpty()) continue;
+            double sum = 0.0;
+            for (double s : samples) sum += s;
+            int avg = (int) Math.round((sum / samples.size()) * 10.0);
+            if (avg >= 60 && avg <= 500) {
+                long startMs = entry.getKey() * 1000L;
+                records.add(measurement("sleep_breath", startMs, startMs + MINUTE_MS, avg, timezone, "sleep", false));
+            }
         }
     }
 
@@ -512,6 +570,7 @@ public final class BandHistoryParser {
             case "stress" -> STRESS;
             case "sleep_interval" -> SLEEP_INTERVAL;
             case "sleep_stage" -> SLEEP_STAGE;
+            case "sleep_breath" -> SLEEP_BREATH;
             default -> throw new IllegalArgumentException("UNSUPPORTED_HEALTH_KIND");
         };
     }

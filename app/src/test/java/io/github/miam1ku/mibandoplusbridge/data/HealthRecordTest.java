@@ -76,6 +76,52 @@ public final class HealthRecordTest {
         assertThrows(IllegalArgumentException.class, () -> HealthRecord.fromJson(falseComplete));
     }
 
+    @Test public void sleepBreathValidatesRangeAndIntervalAndBypassesHostOutbox() throws Exception {
+        HealthRecord record = new HealthRecord("rec-breath", "stable", "sleep_breath", 0, 60_000,
+                142, null, 1, "+08:00", "sleep", false);
+        assertEquals(142, record.value.intValue());
+        assertEquals("sleep_breath", record.kind);
+        assertEquals("sleep", record.measurementMode);
+        assertFalse(record.complete);
+        assertNull(record.stage);
+        assertFalse(record.hostAccepts());
+
+        // Range 60..500
+        assertEquals(60, new HealthRecord("r1", "stable", "sleep_breath", 0, 60_000,
+                60, null, 1, null, "sleep", false).value.intValue());
+        assertEquals(500, new HealthRecord("r2", "stable", "sleep_breath", 0, 60_000,
+                500, null, 1, null, "sleep", false).value.intValue());
+
+        for (Number invalid : new Number[] {null, 59, 501, -1, 14.5, Double.NaN}) {
+            assertThrows(IllegalArgumentException.class,
+                    () -> new HealthRecord("rx", "stable", "sleep_breath", 0, 60_000,
+                            invalid, null, 1, null, "sleep", false));
+        }
+
+        // Must be exactly 60_000 interval
+        assertThrows(IllegalArgumentException.class,
+                () -> new HealthRecord("rx", "stable", "sleep_breath", 0, 59_999,
+                        150, null, 1, null, "sleep", false));
+        assertThrows(IllegalArgumentException.class,
+                () -> new HealthRecord("rx", "stable", "sleep_breath", 0, 60_001,
+                        150, null, 1, null, "sleep", false));
+
+        // Must be mode "sleep"
+        assertThrows(IllegalArgumentException.class,
+                () -> new HealthRecord("rx", "stable", "sleep_breath", 0, 60_000,
+                        150, null, 1, null, "continuous", false));
+        assertThrows(IllegalArgumentException.class,
+                () -> new HealthRecord("rx", "stable", "sleep_breath", 0, 60_000,
+                        150, null, 1, null, "manual", false));
+
+        // Serialization round trip
+        HealthRecord decoded = HealthRecord.fromJson(record.toJson());
+        assertEquals("sleep_breath", decoded.kind);
+        assertEquals(142, decoded.value.intValue());
+        assertEquals(60_000, decoded.endMs - decoded.startMs);
+        assertFalse(decoded.hostAccepts());
+    }
+
     private static HealthRecord metric(String kind, Number value, String mode, long duration) {
         return new HealthRecord("metric", "stable", kind, 60_000, 60_000 + duration,
                 value, null, 1, "+05:30", mode, false);

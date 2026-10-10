@@ -495,6 +495,39 @@ public final class BandHistoryParserTest {
         return packet;
     }
 
+    private static byte[] breathPacket(long endTsSec, List<int[]> entries) {
+        int payloadLen = entries.size() * 4;
+        byte[] packet = new byte[17 + payloadLen];
+        packet[0] = (byte) 0xfb; packet[1] = (byte) 0xfa;
+        packet[2] = (byte) 0xfc; packet[3] = (byte) 0xff;
+        packet[4] = 17;
+        long tsNano = endTsSec * 1_000_000_000L;
+        put32(packet, 5, (int) (tsNano & 0xffffffffL));
+        put32(packet, 9, (int) (tsNano >>> 32));
+        packet[14] = 10;
+        packet[15] = (byte) (payloadLen >>> 8);
+        packet[16] = (byte) payloadLen;
+        for (int i = 0; i < entries.size(); i++) {
+            int[] entry = entries.get(i);
+            int phase = entry[0];
+            int bpmFp8 = entry[1];
+            int w0 = bpmFp8 & 0xffff;
+            int w1 = (phase << 12) | 0x40;
+            packet[17 + i * 4] = (byte) w0;
+            packet[18 + i * 4] = (byte) (w0 >>> 8);
+            packet[19 + i * 4] = (byte) w1;
+            packet[20 + i * 4] = (byte) (w1 >>> 8);
+        }
+        return packet;
+    }
+
+    private static byte[] concat(byte[] a, byte[] b) {
+        byte[] res = new byte[a.length + b.length];
+        System.arraycopy(a, 0, res, 0, a.length);
+        System.arraycopy(b, 0, res, a.length, b.length);
+        return res;
+    }
+
     @Test public void sleepSummaryVersion4ParsesIntervalSeriesAndStages() throws Exception {
         int sleepStart = START_SECONDS + 18 * 3600;
         var records = parser().parseFile(file(4, (8 << 2) | 1, sleepV4(0, true))).measurements;
@@ -527,6 +560,81 @@ public final class BandHistoryParserTest {
         put32(inverted, 7, sleepStart - 1);
         assertEquals("INVALID_SLEEP_INTERVAL",
                 parser().parseFile(file(4, (8 << 2) | 1, inverted)).parseStatus);
+    }
+
+    @Test public void sleepTlvType10DecodesAndAggregatesMinuteSleepBreath() throws Exception {
+        int sleepStart = START_SECONDS + 18 * 3600;
+        byte[] base = sleepV4(0, true);
+        long windowEndSec = sleepStart + 600;
+        List<int[]> entries = List.of(
+                // Phase 0: 6 entries
+                new int[] {0, Math.round(14.0f * 256)}, // offset 0 -> min 0
+                new int[] {0, Math.round(15.0f * 256)}, // offset 33 -> min 0 (avg: 14.5 -> 145)
+                new int[] {0, Math.round(16.0f * 256)}, // offset 66 -> min 1
+                new int[] {0, Math.round(16.0f * 256)}, // offset 100 -> min 1 (avg: 16.0 -> 160)
+                new int[] {0, Math.round(17.0f * 256)}, // offset 133 -> min 2
+                new int[] {0, Math.round(17.0f * 256)}, // offset 166 -> min 2 (avg: 17.0 -> 170)
+                // Phase 1: 1 entry
+                new int[] {1, Math.round(18.0f * 256)}, // offset 200 -> min 3 (avg: 18.0 -> 180)
+                // Phase 2: 1 invalid (> 50.0 bpm) dropped, 1 valid
+                new int[] {2, Math.round(55.0f * 256)}, // invalid bpm (> 50) dropped
+                new int[] {2, Math.round(12.0f * 256)}  // offset 400 -> min 6 (avg: 12.0 -> 120)
+        );
+        byte[] packet = breathPacket(windowEndSec, entries);
+        byte[] combined = concat(base, packet);
+        var measurements = parser().parseFile(file(4, (8 << 2) | 1, combined)).measurements;
+        assertEquals(11, measurements.size());
+
+        var breath = measurements.stream()
+                .filter(m -> "sleep_breath".equals(m.kind))
+                .toList();
+        assertEquals(5, breath.size());
+
+        long alignedStart = (sleepStart / 60L) * 60L;
+        assertEquals(alignedStart * 1000L, breath.get(0).startMs);
+        assertEquals((alignedStart + 60) * 1000L, breath.get(0).endMs);
+        assertEquals(145, breath.get(0).value.intValue());
+        assertEquals("sleep", breath.get(0).measurementMode);
+        assertFalse(breath.get(0).complete);
+
+        assertEquals((alignedStart + 60) * 1000L, breath.get(1).startMs);
+        assertEquals((alignedStart + 120) * 1000L, breath.get(1).endMs);
+        assertEquals(160, breath.get(1).value.intValue());
+
+        assertEquals((alignedStart + 120) * 1000L, breath.get(2).startMs);
+        assertEquals((alignedStart + 180) * 1000L, breath.get(2).endMs);
+        assertEquals(165, breath.get(2).value.intValue());
+
+        assertEquals((alignedStart + 180) * 1000L, breath.get(3).startMs);
+        assertEquals((alignedStart + 240) * 1000L, breath.get(3).endMs);
+        assertEquals(175, breath.get(3).value.intValue());
+
+        assertEquals((alignedStart + 420) * 1000L, breath.get(4).startMs);
+        assertEquals((alignedStart + 480) * 1000L, breath.get(4).endMs);
+        assertEquals(120, breath.get(4).value.intValue());
+    }
+
+    @Test public void realRawFitnessFilesDecodeSleepBreathRecords() throws Exception {
+        java.io.File file = new java.io.File("/tmp/opencode/allraw/90ae55ce8aec19b3b38dc16637dc4251deca9f20da4587bbe0c0207a5712e0fc.dat");
+        if (!file.exists()) return;
+        byte[] bytes = java.nio.file.Files.readAllBytes(file.toPath());
+        var result = parser().parseFile(bytes);
+        assertEquals("PARSED", result.parseStatus);
+        var breath = result.measurements.stream()
+                .filter(m -> "sleep_breath".equals(m.kind))
+                .toList();
+        assertEquals(239, breath.size());
+        for (var m : breath) {
+            assertEquals("sleep", m.measurementMode);
+            assertFalse(m.complete);
+            assertNull(m.stage);
+            assertEquals(60_000L, m.endMs - m.startMs);
+            assertTrue(m.value.intValue() >= 60 && m.value.intValue() <= 500);
+        }
+        int min = breath.stream().mapToInt(m -> m.value.intValue()).min().orElse(0);
+        int max = breath.stream().mapToInt(m -> m.value.intValue()).max().orElse(0);
+        assertEquals(61, min);
+        assertEquals(245, max);
     }
 
 

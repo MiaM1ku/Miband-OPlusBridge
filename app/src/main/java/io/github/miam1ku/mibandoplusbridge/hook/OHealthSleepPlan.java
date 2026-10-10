@@ -7,7 +7,9 @@ import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Every band session on a sleep-day is kept. Rows use sleep protocol version 11:
@@ -24,9 +26,20 @@ public final class OHealthSleepPlan {
 
     public record Segment(long startMs, long endMs, int sleepState) {}
 
-    public record Night(int date, long fallAsleepMs, long wakeMs, long sleepMinutes, long deepMinutes,
-            long lightMinutes, long remMinutes, long wakeMinutes, List<Segment> segments,
-            long dayStartMs, long dayEndMs) {}
+    public record Night(int date, ZoneId zone, long fallAsleepMs, long wakeMs, long sleepMinutes,
+            long deepMinutes, long lightMinutes, long remMinutes, long wakeMinutes,
+            List<Segment> segments, long dayStartMs, long dayEndMs) {
+        public Night(int date, long fallAsleepMs, long wakeMs, long sleepMinutes, long deepMinutes,
+                long lightMinutes, long remMinutes, long wakeMinutes, List<Segment> segments,
+                long dayStartMs, long dayEndMs) {
+            this(date, ZoneId.systemDefault(), fallAsleepMs, wakeMs, sleepMinutes, deepMinutes,
+                    lightMinutes, remMinutes, wakeMinutes, segments, dayStartMs, dayEndMs);
+        }
+    }
+
+    public record Day(int date, ZoneId zone, long fallAsleepMs, long wakeMs, long sleepMinutes,
+            long deepMinutes, long lightMinutes, long remMinutes, long wakeMinutes,
+            List<Night> nights, Night mainSession, long dayStartMs, long dayEndMs) {}
 
     private OHealthSleepPlan() {}
 
@@ -103,12 +116,65 @@ public final class OHealthSleepPlan {
             long purgeStart = Math.min(window[0], session.fall);
             List<Segment> flat = flatten(session.segments);
             Count counted = count(flat);
-            nights.add(new Night(session.date, session.fall, session.wake, counted.sleep, counted.deep,
+            nights.add(new Night(session.date, session.zone, session.fall, session.wake, counted.sleep, counted.deep,
                     counted.light, counted.rem, counted.awake, List.copyOf(flat),
                     purgeStart, window[1]));
         }
         nights.sort(Comparator.comparingInt(Night::date).thenComparingLong(Night::fallAsleepMs));
         return nights;
+    }
+
+    /**
+     * Aggregates sessions into unified sleep-days.
+     * A date's summary is the sum across all its sessions, with fragments for each session
+     * and the longest session of at least 120 minutes chosen as the main session.
+     */
+    public static List<Day> days(List<Night> nights) {
+        if (nights == null || nights.isEmpty()) return List.of();
+        Map<Integer, List<Night>> byDate = new LinkedHashMap<>();
+        for (Night night : nights) {
+            byDate.computeIfAbsent(night.date(), k -> new ArrayList<>()).add(night);
+        }
+        List<Day> days = new ArrayList<>();
+        for (Map.Entry<Integer, List<Night>> entry : byDate.entrySet()) {
+            int date = entry.getKey();
+            List<Night> dateNights = entry.getValue();
+            dateNights.sort(Comparator.comparingLong(Night::fallAsleepMs));
+
+            long minFall = Long.MAX_VALUE;
+            long maxWake = Long.MIN_VALUE;
+            long totalSleep = 0;
+            long totalDeep = 0;
+            long totalLight = 0;
+            long totalRem = 0;
+            long totalWake = 0;
+            long dayStart = Long.MAX_VALUE;
+            long dayEnd = Long.MIN_VALUE;
+            ZoneId zone = null;
+            Night mainSession = null;
+
+            for (Night night : dateNights) {
+                minFall = Math.min(minFall, night.fallAsleepMs());
+                maxWake = Math.max(maxWake, night.wakeMs());
+                totalSleep += night.sleepMinutes();
+                totalDeep += night.deepMinutes();
+                totalLight += night.lightMinutes();
+                totalRem += night.remMinutes();
+                totalWake += night.wakeMinutes();
+                dayStart = Math.min(dayStart, night.dayStartMs());
+                dayEnd = Math.max(dayEnd, night.dayEndMs());
+                if (zone == null) zone = night.zone();
+                if (summary(nights, night)) {
+                    mainSession = night;
+                }
+            }
+            if (zone == null) zone = ZoneId.systemDefault();
+
+            days.add(new Day(date, zone, minFall, maxWake, totalSleep, totalDeep, totalLight,
+                    totalRem, totalWake, List.copyOf(dateNights), mainSession, dayStart, dayEnd));
+        }
+        days.sort(Comparator.comparingInt(Day::date));
+        return days;
     }
 
     /**
