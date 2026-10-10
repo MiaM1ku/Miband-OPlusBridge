@@ -400,8 +400,24 @@ public final class SppDiagnosticClient implements AutoCloseable {
                 return decodeAndAck(frame);
             }
         }
-        if (framing == 2) return decodeBle(ble.take(liveHold ? 30_000L : 15_000L));
+        if (framing == 2) return readBle();
         return decodeV1(readV1Packet());
+    }
+
+    /**
+     * m66nfc 1.8.124 does not drop a live BLE session for silence. The firmware logs
+     * an explicit "miwear app disconnect" packet, or a link supervision loss, which
+     * surfaces here as BLE_DISCONNECTED. ios_keep_alive_adv only restarts advertising
+     * while disconnected. A 30s read limit was tearing down every idle session.
+     */
+    private XiaomiProto.Command readBle() throws Exception {
+        while (true) {
+            try {
+                return decodeBle(ble.take(liveHold ? 30_000L : 15_000L));
+            } catch (Failure failure) {
+                if (!liveHold || closed || !"BLE_READ_TIMEOUT".equals(failure.code)) throw failure;
+            }
+        }
     }
 
     private SppV1Codec.Packet readV1Packet() throws Exception {

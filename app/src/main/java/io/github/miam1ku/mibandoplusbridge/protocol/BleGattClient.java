@@ -442,7 +442,9 @@ final class BleGattClient implements AutoCloseable {
         }
     }
     private void fail(String code) {
-        failure.compareAndSet(null, code);
+        if (!failure.compareAndSet(null, code)) return;
         ready.countDown();
+        // Wake a live read. Otherwise it sits out the rest of its poll after the link is already dead.
+        incoming.offer(new Rx(new byte[0], false));
     }
 }

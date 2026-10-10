@@ -1004,7 +1004,8 @@ public final class BandLiveService extends Service {
         return switch (code) {
             case "BLUETOOTH_DISABLED", "DIAGNOSTIC_TIMEOUT", "CANCELLED", "CONNECTION_ALREADY_ACTIVE",
                     "USER_LOCKED", "EMPTY_SOCKET_READ", "CLOSED" -> true;
-            default -> code.startsWith("CLOSED");
+            // Link loss is not a bad binding. Quiet backoff left the band down for two minutes.
+            default -> code.startsWith("CLOSED") || code.startsWith("BLE_");
         };
     }
 
