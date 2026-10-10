@@ -292,6 +292,8 @@ public final class CredentialProvider extends ContentProvider {
             record.put("token", pendingToken);
             pendingToken = "";
         }
+        String token = AuthToken.normalize(record.optString("token", ""));
+        if (AuthToken.hex32(token)) record.put("token", token);
         for (String key : new String[]{"type", "accessType"}) {
             if (input.containsKey(key)) record.put(key, input.getInt(key));
         }
@@ -310,6 +312,8 @@ public final class CredentialProvider extends ContentProvider {
         JSONObject observation = TransportObservation.read(getContext());
         TransportObservation.applyToBinding(record, observation);
         record.put("missing", TransportObservation.missingForLive(record, observation));
+        io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(getContext(),
+                "bridge IMPORT_FIELDS " + io.github.miam1ku.mibandoplusbridge.data.BindingShape.describe(record));
         store.save(record);
         closeCapture();
         window.close();

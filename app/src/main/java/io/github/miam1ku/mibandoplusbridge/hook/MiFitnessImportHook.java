@@ -54,6 +54,7 @@ public final class MiFitnessImportHook {
                     for (String[] field : strings) binding.putString(field[0],
                             (String) XposedHelpers.callMethod(info, field[1]));
                     fillTokenFromSource(binding, param.args[0], info);
+                    fillAccount(binding, loader);
                     binding.putInt("type", (Integer) XposedHelpers.callMethod(info, "getType"));
                     binding.putInt("accessType", (Integer) XposedHelpers.callMethod(info, "getAccessType"));
                     Object privateUUID = XposedHelpers.callMethod(info, "getPrivateUUID");
@@ -92,7 +93,7 @@ public final class MiFitnessImportHook {
         Object device = call(source, "getDevice");
         if (device == null) device = field(source, "device");
         Object detail = call(device, "getDetail");
-        String token = AuthToken.firstHex32(
+        String token = AuthToken.firstKey(
                 binding.getString("token"),
                 (String) call(converted, "getToken"),
                 (String) call(detail, "getEncryptKey"),
@@ -100,6 +101,37 @@ public final class MiFitnessImportHook {
                 (String) call(detail, "getAuthKey"),
                 (String) call(detail, "getAppToken"));
         if (AuthToken.hex32(token)) binding.putString("token", token);
+    }
+
+    /** convert() copies these from the account. Read them again when DeviceInfo left them blank. */
+    private static void fillAccount(Bundle binding, ClassLoader loader) {
+        if (binding.getString("userId") == null || binding.getString("userId").isBlank()) {
+            String userId = accountValue(loader,
+                    "com.xiaomi.fitness.account.user.UserInfoManager",
+                    "com.xiaomi.fitness.account.extensions.AccountManagerExtKt",
+                    "getUserId");
+            if (userId != null && !userId.isBlank()) binding.putString("userId", userId);
+        }
+        if (binding.getString("region") == null || binding.getString("region").isBlank()) {
+            String region = accountValue(loader,
+                    "com.xiaomi.fitness.login.export.RegionManager",
+                    "com.xiaomi.fitness.login.export.RegionExtKt",
+                    "getLocalCountry");
+            if (region != null && !region.isBlank()) binding.putString("region", region);
+        }
+    }
+
+    private static String accountValue(ClassLoader loader, String typeName, String extensionName, String getter) {
+        try {
+            Class<?> type = Class.forName(typeName, false, loader);
+            Object companion = type.getField("Companion").get(null);
+            Object manager = Class.forName(extensionName, false, loader)
+                    .getMethod("getInstance", companion.getClass()).invoke(null, companion);
+            Object value = manager.getClass().getMethod(getter).invoke(manager);
+            return value instanceof String text ? text : null;
+        } catch (Throwable ignored) {
+            return null;
+        }
     }
 
     private static Object call(Object target, String getter) {

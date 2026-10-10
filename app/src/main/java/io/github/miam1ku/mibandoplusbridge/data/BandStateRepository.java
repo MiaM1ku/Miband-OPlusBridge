@@ -40,15 +40,12 @@ public final class BandStateRepository {
                     || !TransportObservation.supportsLive(TransportObservation.read(context), model)) {
                 throw new IllegalStateException("OBSERVED_PROFILE_REQUIRED");
             }
+            normalizeStoredSecrets(binding);
+            String problem = BindingShape.reject(binding);
+            SessionLog.line(context, "bridge BINDING_CHECK " + BindingShape.describe(binding)
+                    + " reject=" + (problem == null ? "none" : problem));
+            if (problem != null) throw new IllegalStateException(problem);
             String mac = binding.optString("address", "");
-            if (!mac.matches("[0-9A-F]{2}(:[0-9A-F]{2}){5}")
-                    || binding.optString("userId", "").isBlank()
-                    || binding.optString("region", "").isBlank()) {
-                throw new IllegalStateException("BINDING_INCOMPLETE");
-            }
-            if (!binding.optString("token", "").matches("[0-9A-Fa-f]{32}")) {
-                throw new IllegalStateException("TOKEN_ENCODING_UNSUPPORTED");
-            }
             String deviceId = deviceId(binding);
             String existing = state.getString("deviceId", "");
             // A retained snapshot owns its existing history, even after removal.
@@ -120,6 +117,22 @@ public final class BandStateRepository {
             }
             context.getContentResolver().notifyChange(DeviceCardProvider.URI, null);
         }
+    }
+
+    /** Rewrite a spaced or Base64 key, and an uppercased MAC, before the gate runs. */
+    private void normalizeStoredSecrets(JSONObject binding) throws Exception {
+        boolean changed = false;
+        String token = AuthToken.normalize(binding.optString("token", ""));
+        if (AuthToken.hex32(token) && !token.equals(binding.optString("token", ""))) {
+            binding.put("token", token);
+            changed = true;
+        }
+        String address = binding.optString("address", "").trim().toUpperCase(java.util.Locale.ROOT);
+        if (BindingShape.mac(address) && !address.equals(binding.optString("address", ""))) {
+            binding.put("address", address);
+            changed = true;
+        }
+        if (changed) new BindingStore(context).save(binding);
     }
 
     private boolean isUnlocked() {

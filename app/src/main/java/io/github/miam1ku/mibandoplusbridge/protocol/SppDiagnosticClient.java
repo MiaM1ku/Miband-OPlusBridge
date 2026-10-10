@@ -11,7 +11,6 @@ import android.content.pm.PackageManager;
 import android.os.Build;
 import android.text.format.DateFormat;
 import com.google.protobuf.ByteString;
-import io.github.miam1ku.mibandoplusbridge.data.AuthToken;
 import io.github.miam1ku.mibandoplusbridge.data.SessionLog;
 import io.github.miam1ku.mibandoplusbridge.data.BindingStore;
 import io.github.miam1ku.mibandoplusbridge.data.TransportObservation;
@@ -342,12 +341,11 @@ public final class SppDiagnosticClient implements AutoCloseable {
         }
         if (observation.optBoolean("authOobPresent") || observation.optBoolean("authAppDeviceIdPresent")
                 || !binding.optString("oob", "").isEmpty()) throw new Failure("OOB_BRANCH_UNSUPPORTED");
+        String problem = io.github.miam1ku.mibandoplusbridge.data.BindingShape.reject(binding);
+        if (problem != null) throw new Failure(problem);
         String address = binding.getString("address");
         String region = binding.getString("region");
-        if (!address.matches("[0-9A-F]{2}(:[0-9A-F]{2}){5}") || region.isBlank()
-                || binding.getString("userId").isBlank()) throw new Failure("BINDING_INCOMPLETE");
         String token = binding.getString("token");
-        if (!AuthToken.hex32(token)) throw new Failure("TOKEN_ENCODING_UNSUPPORTED");
         byte[] key = new byte[16];
         for (int i = 0; i < token.length(); i += 2) {
             key[i / 2] = (byte) Integer.parseInt(token.substring(i, i + 2), 16);

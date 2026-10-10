@@ -700,7 +700,8 @@ public final class MainActivity extends AppCompatActivity {
         return switch (status) {
             case "OBSERVED_PROFILE_REQUIRED" -> "离线 · 连接参数丢失";
             case "NATIVE_OWNERSHIP_REQUIRED" -> "离线 · 需要重新接管";
-            case "UNPROVISIONED", "BINDING_INCOMPLETE" -> "离线 · 绑定不完整";
+            case "UNPROVISIONED", "BINDING_INCOMPLETE", "BINDING_ADDRESS", "BINDING_REGION",
+                    "TOKEN_ENCODING_UNSUPPORTED" -> "离线 · 绑定不完整";
             case "CREDENTIAL_REFRESH_REQUIRED" -> "离线 · 需要重新导入绑定";
             case "BLUETOOTH_DISABLED" -> "离线 · 蓝牙已关闭";
             default -> "离线";
@@ -756,7 +757,10 @@ public final class MainActivity extends AppCompatActivity {
         if (code == null) return "操作未完成，请重试；必要时先恢复官方管理。";
         return switch (code) {
             case "USER_LOCKED" -> "请先解锁手机。";
-            case "UNPROVISIONED", "BINDING_INCOMPLETE", "TOKEN_ENCODING_UNSUPPORTED" -> "绑定信息不完整或不可用，请在高级设置中重新导入。";
+            case "UNPROVISIONED", "BINDING_INCOMPLETE" -> "绑定信息不完整或不可用，请在高级设置中重新导入。";
+            case "BINDING_ADDRESS" -> "绑定里的蓝牙地址不是大写 MAC。请重新选择这只手环再导入。";
+            case "BINDING_REGION" -> "绑定里没有地区。请打开小米运动健康里的这只手环，等它连上后再导入一次。";
+            case "TOKEN_ENCODING_UNSUPPORTED" -> "绑定里的密钥不是 16 字节。请让手环在小米运动健康里连上一次后再导入。";
             case "OBSERVED_PROFILE_REQUIRED" -> "连接参数丢失。请点「采集连接参数」，在小米运动健康中重连一次手环。";
             case "FIRMWARE_OR_MODEL_UNSUPPORTED" -> "手环未返回可用的型号或固件。";
             case "OOB_BRANCH_UNSUPPORTED" -> "这只设备使用了不受支持的配对认证。";

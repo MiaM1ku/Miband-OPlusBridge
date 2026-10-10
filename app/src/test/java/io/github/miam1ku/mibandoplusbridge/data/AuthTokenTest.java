@@ -29,6 +29,17 @@ public final class AuthTokenTest {
         assertEquals("", AuthToken.fromKeyBytes(new byte[15]));
     }
 
+    @Test public void normalizeAcceptsSpacedHexAndBase64Key() {
+        assertEquals(TOKEN, AuthToken.normalize("0123456789ABCDEF 0123456789ABCDEF"));
+        assertEquals(TOKEN, AuthToken.normalize("0x" + TOKEN));
+        byte[] key = new byte[16];
+        for (int i = 0; i < key.length; i++) key[i] = (byte) i;
+        String base64 = java.util.Base64.getEncoder().encodeToString(key);
+        assertEquals(AuthToken.fromKeyBytes(key), AuthToken.normalize(base64));
+        assertEquals("", AuthToken.normalize("not-a-key"));
+        assertEquals(AuthToken.fromKeyBytes(key), AuthToken.firstKey("not-a-key", base64));
+    }
+
     @Test public void hex32RejectsWrongLengthAndNonHex() {
         assertTrue(AuthToken.hex32(TOKEN));
         assertFalse(AuthToken.hex32(TOKEN.substring(1)));
