@@ -256,6 +256,44 @@ public final class OHealthSleepPlanTest {
         assertTrue(OHealthSleepPlan.days(List.of()).isEmpty());
     }
 
+    @Test public void intervalWithLargeGapSplitsIntoSeparateSessions() {
+        long start = at(2026, 10, 10, 1, 54);
+        long nightWake = at(2026, 10, 10, 5, 47);
+        long napStart = at(2026, 10, 10, 7, 13);
+        long napWake = at(2026, 10, 10, 9, 35);
+        HealthRecord interval = interval("night_and_nap", start, napWake);
+        // Stages for night: deep 73m, rem 58m, light 98m, awake 4m = 233m
+        HealthRecord deep = stage("deep", start, start + 73 * 60_000L, 2);
+        HealthRecord rem = stage("rem", start + 73 * 60_000L, start + (73 + 58) * 60_000L, 4);
+        HealthRecord light = stage("light", start + (73 + 58) * 60_000L, start + (73 + 58 + 98) * 60_000L, 3);
+        HealthRecord awake = stage("awake", start + (73 + 58 + 98) * 60_000L, nightWake, 5);
+        // Stage for nap: light from 07:13 to 09:35 = 142m
+        HealthRecord napLight = stage("nap_light", napStart, napWake, 3);
+
+        List<OHealthSleepPlan.Night> nights = OHealthSleepPlan.nights(
+                List.of(interval, deep, rem, light, awake, napLight));
+        assertEquals(2, nights.size());
+        OHealthSleepPlan.Night main = nights.get(0);
+        assertEquals(start, main.fallAsleepMs());
+        assertEquals(nightWake, main.wakeMs());
+        assertEquals(229, main.sleepMinutes());
+        assertEquals(73, main.deepMinutes());
+        assertEquals(58, main.remMinutes());
+        assertEquals(98, main.lightMinutes());
+        assertEquals(4, main.wakeMinutes());
+
+        OHealthSleepPlan.Night morning = nights.get(1);
+        assertEquals(napStart, morning.fallAsleepMs());
+        assertEquals(napWake, morning.wakeMs());
+        assertEquals(142, morning.sleepMinutes());
+
+        List<OHealthSleepPlan.Day> days = OHealthSleepPlan.days(nights);
+        assertEquals(1, days.size());
+        OHealthSleepPlan.Day day = days.get(0);
+        assertEquals(371, day.sleepMinutes());
+        assertEquals(main, day.mainSession());
+    }
+
     private static HealthRecord interval(String id, long start, long end) {
         return new HealthRecord(id, "band", "sleep_interval", start, end, null, null, 1, "+08:00", "sleep", true);
     }

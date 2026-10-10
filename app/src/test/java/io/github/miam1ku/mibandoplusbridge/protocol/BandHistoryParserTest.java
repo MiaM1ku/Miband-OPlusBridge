@@ -480,6 +480,84 @@ public final class BandHistoryParserTest {
         assertEquals(stages.get(0).endMs, stages.get(1).startMs);
     }
 
+    @Test public void partialSleepStagePacketAndT16NapSummaryBothDecode() throws Exception {
+        int sleepStart = START_SECONDS + 18 * 3600;
+        byte[] stage = stagePacket(sleepStart, new int[] {(2 << 12) | 73, (1 << 12) | 98, (3 << 12) | 58, (0 << 12) | 4});
+        int napStart = sleepStart + 319 * 60;
+        byte[] nap = summaryPacket(napStart, 35, 19, 88);
+        byte[] body = sleepBody(6, true);
+        byte[] withBoth = Arrays.copyOf(body, body.length + stage.length + nap.length);
+        System.arraycopy(stage, 0, withBoth, body.length, stage.length);
+        System.arraycopy(nap, 0, withBoth, body.length + stage.length, nap.length);
+
+        var stages = parser().parseFile(file(6, (8 << 2) | 1, withBoth)).measurements.stream()
+                .filter(item -> "sleep_stage".equals(item.kind)).toList();
+        assertEquals(7, stages.size());
+        assertEquals(2, stages.get(0).stage.intValue());
+        assertEquals(73 * 60_000L, stages.get(0).endMs - stages.get(0).startMs);
+        assertEquals(3, stages.get(1).stage.intValue());
+        assertEquals(98 * 60_000L, stages.get(1).endMs - stages.get(1).startMs);
+        assertEquals(4, stages.get(2).stage.intValue());
+        assertEquals(58 * 60_000L, stages.get(2).endMs - stages.get(2).startMs);
+        assertEquals(5, stages.get(3).stage.intValue());
+        assertEquals(4 * 60_000L, stages.get(3).endMs - stages.get(3).startMs);
+        assertEquals(3, stages.get(4).stage.intValue());
+        assertEquals(35 * 60_000L, stages.get(4).endMs - stages.get(4).startMs);
+        assertEquals(napStart * 1000L, stages.get(4).startMs);
+        assertEquals(5, stages.get(5).stage.intValue());
+        assertEquals(19 * 60_000L, stages.get(5).endMs - stages.get(5).startMs);
+        assertEquals(3, stages.get(6).stage.intValue());
+        assertEquals(88 * 60_000L, stages.get(6).endMs - stages.get(6).startMs);
+    }
+
+    @Test public void testForRealBandFile20261010() throws Exception {
+        java.io.File file = new java.io.File("/tmp/band_files/6d20bb5b4795d4a577c0d9ff9df03af62f5d4b9a46685dc87714bacee2907b4e.dat");
+        if (!file.exists()) return;
+        byte[] bytes = java.nio.file.Files.readAllBytes(file.toPath());
+        var res = parser().parseFile(bytes);
+        assertEquals("PARSED", res.parseStatus);
+        var stages = res.measurements.stream().filter(m -> "sleep_stage".equals(m.kind)).toList();
+        // 18 from T17 + 3 from T16 = 21 stages
+        assertEquals(21, stages.size());
+
+        long deepMins = 0, remMins = 0, lightMins = 0, awakeMins = 0;
+        for (var stage : stages) {
+            long mins = (stage.endMs - stage.startMs) / 60_000L;
+            switch (stage.stage) {
+                case 2 -> deepMins += mins;
+                case 3 -> lightMins += mins;
+                case 4 -> remMins += mins;
+                case 5 -> awakeMins += mins;
+            }
+        }
+        assertEquals(73, deepMins);
+        assertEquals(58, remMins);
+        assertEquals(221, lightMins);
+        assertEquals(23, awakeMins);
+        assertEquals(352, deepMins + remMins + lightMins); // Total sleep: 352 mins (5h 52m)
+    }
+
+    private static byte[] summaryPacket(int startSec, int seg0Mins, int gapMins, int seg1Mins) {
+        int payloadLen = (seg1Mins > 0 || gapMins > 0) ? 26 : 13;
+        byte[] packet = new byte[17 + payloadLen];
+        packet[0] = (byte) 0xfb; packet[1] = (byte) 0xfa;
+        packet[2] = (byte) 0xfc; packet[3] = (byte) 0xff;
+        packet[4] = 17;
+        put32(packet, 5, startSec);
+        packet[14] = 16;
+        packet[16] = (byte) payloadLen;
+        packet[17] = 0x10;
+        packet[19] = (byte) (seg0Mins & 0xff);
+        packet[20] = (byte) ((seg0Mins >>> 8) & 0xff);
+        if (payloadLen == 26) {
+            packet[30] = 0x20;
+            packet[32] = (byte) (seg1Mins & 0xff);
+            packet[33] = (byte) ((seg1Mins >>> 8) & 0xff);
+            packet[42] = (byte) (gapMins & 0xff);
+        }
+        return packet;
+    }
+
     private static byte[] stagePacket(int sleepStart, int[] runs) {
         byte[] packet = new byte[17 + runs.length * 2];
         packet[0] = (byte) 0xfb; packet[1] = (byte) 0xfa;

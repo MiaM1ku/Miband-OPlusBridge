@@ -323,7 +323,10 @@ public final class BandHistoryParser {
         int limit = cursor.end;
         // Each sync appends another type-17 summary. The last one that still
         // covers this interval is the band's current analysis; earlier copies are history.
-        List<int[]> chosen = null;
+        List<int[]> fullMatch = null;
+        List<int[]> bestPartial = null;
+        int bestPartialMinutes = 0;
+        List<long[]> t16Segments = new ArrayList<>();
         long spanMinutes = (sleepEnd - sleepStart) / 60_000L;
         Map<Long, List<Double>> breathSamples = new TreeMap<>();
         while (pos + 17 <= limit) {
@@ -353,15 +356,24 @@ public final class BandHistoryParser {
                     totalMinutes += minutes;
                     runs.add(new int[] {stage >= 2 && stage <= 5 ? stage : 0, minutes});
                 }
-                if (!runs.isEmpty() && spanMinutes > 0 && Math.abs(totalMinutes - spanMinutes) <= 2) {
-                    chosen = runs;
+                if (!runs.isEmpty() && spanMinutes > 0) {
+                    if (Math.abs(totalMinutes - spanMinutes) <= 2) {
+                        fullMatch = runs;
+                    } else if (totalMinutes <= spanMinutes + 2 && totalMinutes > bestPartialMinutes) {
+                        bestPartial = runs;
+                        bestPartialMinutes = totalMinutes;
+                    }
                 }
+            } else if (type == 16) {
+                decodeSleepSummaryPacket(bytes, pos, payload, t16Segments);
             } else if (type == 10) {
                 decodeSleepBreathPacket(bytes, pos, payload, breathSamples);
             }
             pos += 17 + payload;
         }
         cursor.position = limit;
+        List<int[]> chosen = fullMatch != null ? fullMatch : bestPartial;
+        long chosenEnd = sleepStart;
         if (chosen != null) {
             long current = sleepStart;
             for (int[] run : chosen) {
@@ -373,8 +385,57 @@ public final class BandHistoryParser {
                 }
                 current = next;
             }
+            chosenEnd = current;
+        }
+        for (long[] seg : t16Segments) {
+            long a = seg[1];
+            long b = seg[2];
+            if (a >= chosenEnd && b <= sleepEnd + 60_000L && b > a) {
+                long clampedA = Math.max(a, sleepStart);
+                long clampedB = Math.min(b, sleepEnd);
+                if (clampedB > clampedA) {
+                    records.add(sleepStage(clampedA, clampedB, (int) seg[0], timezone));
+                }
+            }
         }
         emitSleepBreathRecords(records, breathSamples, timezone);
+    }
+
+    private void decodeSleepSummaryPacket(byte[] bytes, int pos, int payload,
+            List<long[]> t16Segments) {
+        long ts = u32(bytes, pos + 5) | (u32(bytes, pos + 9) << 32);
+        if (ts <= 0) return;
+        long recTsSec = ts > 3_000_000_000L ? ts / 1_000_000_000L : ts;
+        long t16StartMs = recTsSec * 1000L;
+        int off = pos + 17;
+        if (payload >= 13 && (bytes[off] & 0xff) == 0x10) {
+            boolean unstaged = true;
+            for (int i = 4; i <= 10; i++) {
+                if (bytes[off + i] != 0) {
+                    unstaged = false;
+                    break;
+                }
+            }
+            if (unstaged) {
+                int seg0Mins = (bytes[off + 2] & 0xff) | ((bytes[off + 3] & 0xff) << 8);
+                if (seg0Mins > 0) {
+                    t16Segments.clear();
+                    t16Segments.add(new long[] {3, t16StartMs, t16StartMs + seg0Mins * 60_000L});
+                    if (payload >= 26 && (bytes[off + 13] & 0xff) == 0x20) {
+                        int seg1Mins = (bytes[off + 15] & 0xff) | ((bytes[off + 16] & 0xff) << 8);
+                        int gapMins = bytes[off + 25] & 0xff;
+                        long gapStart = t16StartMs + seg0Mins * 60_000L;
+                        if (gapMins > 0) {
+                            t16Segments.add(new long[] {5, gapStart, gapStart + gapMins * 60_000L});
+                        }
+                        if (seg1Mins > 0) {
+                            long seg1Start = gapStart + gapMins * 60_000L;
+                            t16Segments.add(new long[] {3, seg1Start, seg1Start + seg1Mins * 60_000L});
+                        }
+                    }
+                }
+            }
+        }
     }
 
     @SuppressWarnings("unchecked")

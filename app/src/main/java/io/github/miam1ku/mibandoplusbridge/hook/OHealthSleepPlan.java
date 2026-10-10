@@ -104,10 +104,28 @@ public final class OHealthSleepPlan {
             }
             segments = flatten(segments);
             ZoneId zone = interval.timezone == null ? ZoneId.systemDefault() : ZoneId.of(interval.timezone);
-            int date = sleepDate(interval.endMs, zone);
-            Count counted = count(segments);
-            sessions.add(new Session(date, zone, interval.startMs, interval.endMs,
-                    counted.sleep, counted.deep, counted.light, counted.rem, counted.awake, segments));
+            List<List<Segment>> clusters = new ArrayList<>();
+            List<Segment> currentCluster = new ArrayList<>();
+            currentCluster.add(segments.get(0));
+            for (int i = 1; i < segments.size(); i++) {
+                Segment seg = segments.get(i);
+                Segment prev = segments.get(i - 1);
+                if (seg.startMs() - prev.endMs() > 1_200_000L) {
+                    clusters.add(currentCluster);
+                    currentCluster = new ArrayList<>();
+                }
+                currentCluster.add(seg);
+            }
+            clusters.add(currentCluster);
+
+            for (List<Segment> cluster : clusters) {
+                long fall = cluster.get(0).startMs();
+                long wake = cluster.get(cluster.size() - 1).endMs();
+                int date = sleepDate(wake, zone);
+                Count counted = count(cluster);
+                sessions.add(new Session(date, zone, fall, wake,
+                        counted.sleep, counted.deep, counted.light, counted.rem, counted.awake, cluster));
+            }
         }
         List<Night> nights = new ArrayList<>();
         for (int i = 0; i < sessions.size(); i++) {
