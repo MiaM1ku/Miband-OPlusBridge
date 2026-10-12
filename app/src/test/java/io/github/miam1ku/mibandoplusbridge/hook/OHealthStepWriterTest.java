@@ -14,7 +14,7 @@ import static org.junit.Assert.assertTrue;
 public final class OHealthStepWriterTest {
     private static final ZoneId ZONE = ZoneId.of("Asia/Shanghai");
 
-    @Test public void minuteBarsKeepStepsWithoutInventingExercise() {
+    @Test public void minuteBarsKeepStepsAndMarkAWorkoutMinute() {
         long day = LocalDate.of(2026, 9, 30).atStartOfDay(ZONE).toInstant().toEpochMilli();
         OHealthStepWriter.MinuteBar[] bars = OHealthStepWriter.MinuteBar.day(List.of(
                 minute(day, 0, 4, 1, 12),
@@ -25,8 +25,11 @@ public final class OHealthStepWriterTest {
         assertEquals(4, bars[0].steps);
         assertEquals(1, bars[0].calories);
         assertEquals(12, bars[0].distance);
+        assertEquals(1, bars[0].workout);
         assertEquals(6, bars[1].steps);
+        assertEquals(1, bars[1].workout);
         assertEquals(9, bars[60].steps);
+        assertEquals(1, bars[60].workout);
         assertEquals(0, bars[60].calories);
         assertNull(bars[2]);
         int filled = 0;

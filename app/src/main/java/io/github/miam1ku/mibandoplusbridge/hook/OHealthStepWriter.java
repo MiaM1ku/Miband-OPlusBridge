@@ -50,7 +50,7 @@ final class OHealthStepWriter {
     private Class<?> detailClass;
     private Constructor<?> detailNew;
     private Method detailAccount, detailDevice, detailStart, detailEnd, detailSteps, detailCalories;
-    private Method detailDistance, detailMode, detailDisplay, detailType, detailZone;
+    private Method detailDistance, detailWorkout, detailMode, detailDisplay, detailType, detailZone;
     private Method detailGetStart, detailGetSteps, detailGetDevice;
 
     OHealthStepWriter(OHealthHealthImportHook.HostContract host) throws ReflectiveOperationException {
@@ -221,13 +221,18 @@ final class OHealthStepWriter {
         return text.toString();
     }
 
-    /** Inserts minute growth. The half-hour and hour charts group these rows. An hour blob is a different table. */
+    /**
+     * Inserts minute growth. Step and calorie charts sum these rows into half hours.
+     * The exercise chart sums {@code workout} the same way and caps a half hour at 30.
+     * The hour chart marks a band hour only when some minute in it has more than 30 steps,
+     * and a watch hour when some minute has any steps. An hour blob is a different table.
+     */
     private int writeChart(Object api, String account, String device, String category,
             BandHistoryParser.StepDay day, List<HealthRecord> records, SharedPreferences written)
             throws Exception {
         if (!prepareDetail()) return 0;
         MinuteBar[] minutes = MinuteBar.day(records, day.startMs, day.timezone);
-        String version = device + ":" + day.date + ":minute-v2";
+        String version = device + ":" + day.date + ":minute-v3";
         boolean rebuild = !"1".equals(written.getString(version, ""));
         if (rebuild) {
             try {
@@ -249,10 +254,13 @@ final class OHealthStepWriter {
             int deltaCalories = bar.calories - saved[1];
             int deltaDistance = bar.distance - saved[2];
             if (deltaSteps <= 0 && deltaCalories <= 0 && deltaDistance <= 0) continue;
+            // A later pass sends only the growth. Workout stays on the first row of that minute;
+            // the merge keeps a workout it already stored when the new row does not repeat it.
+            int workout = bar.workout > 0 && saved[0] <= 0 ? 1 : 0;
             rows.add(detail(account, device, category, day, minute,
                     Math.max(0, deltaSteps),
                     Math.max(0, deltaCalories) * (long) CALORIE_SCALE,
-                    Math.max(0, deltaDistance)));
+                    Math.max(0, deltaDistance), workout));
             indexes.add(minute);
         }
         if (rows.isEmpty()) {
@@ -291,7 +299,7 @@ final class OHealthStepWriter {
     }
 
     private Object detail(String account, String device, String category, BandHistoryParser.StepDay day,
-            int minute, int steps, long calories, int distance) throws ReflectiveOperationException {
+            int minute, int steps, long calories, int distance, int workout) throws ReflectiveOperationException {
         Object row = detailNew.newInstance();
         detailAccount.invoke(row, account);
         detailDevice.invoke(row, device);
@@ -301,7 +309,9 @@ final class OHealthStepWriter {
         detailSteps.invoke(row, steps);
         detailCalories.invoke(row, calories);
         detailDistance.invoke(row, distance);
-        // No minuteExercise bit in the Xiaomi activity file, so workout stays unset.
+        // The half-hour exercise chart is the sum of this flag. Xiaomi does not send
+        // minuteExercise, so a minute that has steps is the minute the chart can draw.
+        detailWorkout.invoke(row, workout);
         // A watch remaps walk (1) to -1, which keeps those minutes out of the phone walk bucket.
         detailMode.invoke(row, minuteSportMode(DEVICE_WATCH.equals(category)));
         detailDisplay.invoke(row, 1);
@@ -348,6 +358,7 @@ final class OHealthStepWriter {
             detailSteps = detailClass.getMethod("setSteps", int.class);
             detailCalories = detailClass.getMethod("setCalories", long.class);
             detailDistance = detailClass.getMethod("setDistance", int.class);
+            detailWorkout = detailClass.getMethod("setWorkout", int.class);
             detailMode = detailClass.getMethod("setSportMode", int.class);
             detailDisplay = detailClass.getMethod("setDisplay", int.class);
             detailType = detailClass.getMethod("setDeviceType", String.class);
@@ -448,16 +459,18 @@ final class OHealthStepWriter {
         return today == day.date;
     }
 
-    /** One local day of minute bars. Exercise and stand counts stay on the daily report. */
+    /** One local day of minute bars. A minute with steps is one workout minute on the chart. */
     static final class MinuteBar {
         final int steps;
         final int calories;
         final int distance;
+        final int workout;
 
-        MinuteBar(int steps, int calories, int distance) {
+        MinuteBar(int steps, int calories, int distance, int workout) {
             this.steps = steps;
             this.calories = calories;
             this.distance = distance;
+            this.workout = workout;
         }
 
         static MinuteBar[] day(List<HealthRecord> records, long dayStart, String timezone) {
@@ -482,7 +495,8 @@ final class OHealthStepWriter {
             MinuteBar[] bars = new MinuteBar[MINUTES_PER_DAY];
             for (int minute = 0; minute < MINUTES_PER_DAY; minute++) {
                 if (!seen[minute] || (steps[minute] <= 0 && calories[minute] <= 0 && distance[minute] <= 0)) continue;
-                bars[minute] = new MinuteBar(steps[minute], calories[minute], distance[minute]);
+                bars[minute] = new MinuteBar(steps[minute], calories[minute], distance[minute],
+                        steps[minute] > 0 ? 1 : 0);
             }
             return bars;
         }
