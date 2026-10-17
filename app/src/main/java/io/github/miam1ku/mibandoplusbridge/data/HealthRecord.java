@@ -114,7 +114,8 @@ public final class HealthRecord {
                 : stage != null || !sleepInterval && value == null) {
             throw new IllegalArgumentException("INVALID_HEALTH_MEASUREMENT");
         }
-        if (sleepStage && (stage < 2 || stage > 5)) {
+        // 6 is a sleep duration the band did not classify. It is not light sleep.
+        if (sleepStage && (stage < 2 || stage > 6)) {
             throw new IllegalArgumentException("INVALID_SLEEP_STAGE");
         }
         if (value != null) {

@@ -26,11 +26,11 @@ public final class OHealthSleepPlanTest {
         assertEquals(morning.startMs, day.fallAsleepMs());
         assertEquals(morning.endMs, day.wakeMs());
         assertEquals(484, day.sleepMinutes());
-        assertEquals(484, day.lightMinutes());
+        assertEquals(0, day.lightMinutes());
         assertEquals(0, day.deepMinutes());
         assertEquals(0, day.remMinutes());
         assertEquals(1, day.segments().size());
-        assertEquals(OHealthSleepPlan.LIGHT, day.segments().get(0).sleepState());
+        assertEquals(OHealthSleepPlan.UNSTAGED, day.segments().get(0).sleepState());
         assertEquals(at(2026, 9, 24, 20, 0), day.dayStartMs());
         assertEquals(at(2026, 9, 25, 20, 0), day.dayEndMs());
         assertTrue(OHealthSleepPlan.summary(nights, day));
@@ -66,7 +66,8 @@ public final class OHealthSleepPlanTest {
         assertEquals(nap.startMs, kept.fallAsleepMs());
         assertEquals(nap.endMs, kept.wakeMs());
         assertEquals(61, kept.sleepMinutes());
-        assertEquals(OHealthSleepPlan.LIGHT, kept.segments().get(0).sleepState());
+        assertEquals(0, kept.lightMinutes());
+        assertEquals(OHealthSleepPlan.UNSTAGED, kept.segments().get(0).sleepState());
         assertFalse(OHealthSleepPlan.summary(nights, kept));
     }
 

@@ -23,6 +23,12 @@ public final class OHealthSleepPlan {
     public static final int LIGHT = 4;
     /** Official short wake. The sleep-state value is 5. Chart type 4 is a different numbering. These minutes stay out of sleep time. */
     public static final int AWAKE = 5;
+    /**
+     * The band reported how long the person was asleep and did not send a stage list.
+     * These minutes count as sleep, and they are not deep, light, or REM.
+     * The host has no such state, so the chart row is written as light.
+     */
+    public static final int UNSTAGED = 6;
 
     public record Segment(long startMs, long endMs, int sleepState) {}
 
@@ -69,14 +75,15 @@ public final class OHealthSleepPlan {
             case 3 -> LIGHT;
             case 4 -> REM;
             case 5 -> AWAKE;
+            case 6 -> UNSTAGED;
             default -> throw new IllegalArgumentException("UNSUPPORTED_SLEEP_STAGE");
         };
     }
 
     /**
      * A session that starts before 20:00 pulls its own clear window back to that start.
-     * Another session on the same date stays put. An interval with no stages is one light bar,
-     * and that bar is not deep sleep or REM. Stages that share a minute are cut into one partition,
+     * Another session on the same date stays put. An interval with no stages keeps its duration
+     * and is not labeled light, deep, or REM. Stages that share a minute are cut into one partition,
      * so deep and light are not stacked.
      */
     public static List<Night> nights(List<HealthRecord> records) {
@@ -100,7 +107,7 @@ public final class OHealthSleepPlan {
                 segments.add(new Segment(stage.startMs, stage.endMs, hostState(stage.stage)));
             }
             if (segments.isEmpty()) {
-                segments.add(new Segment(interval.startMs, interval.endMs, LIGHT));
+                segments.add(new Segment(interval.startMs, interval.endMs, UNSTAGED));
             }
             segments = flatten(segments);
             ZoneId zone = interval.timezone == null ? ZoneId.systemDefault() : ZoneId.of(interval.timezone);
@@ -312,6 +319,7 @@ public final class OHealthSleepPlan {
                 case DEEP -> { deep += minutes; sleep += minutes; }
                 case LIGHT -> { light += minutes; sleep += minutes; }
                 case REM -> { rem += minutes; sleep += minutes; }
+                case UNSTAGED -> sleep += minutes;
                 case AWAKE -> awake += minutes;
                 default -> throw new IllegalStateException("SLEEP_STATE_UNMAPPED");
             }

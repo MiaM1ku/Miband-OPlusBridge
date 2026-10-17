@@ -228,6 +228,7 @@ public final class BandDetailsActivity extends AppCompatActivity {
             text.append("\n区间 ").append((record.endMs - record.startMs) / 60_000).append(" 分钟");
             if (record.stage != null) text.append(" · ").append(switch (record.stage) {
                 case 2 -> "深睡"; case 3 -> "浅睡"; case 4 -> "快速眼动（REM）"; case 5 -> "清醒";
+                case 6 -> "未分期";
                 default -> "阶段未知";
             });
             else {

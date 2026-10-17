@@ -121,6 +121,12 @@ public final class BandHistoryParserTest {
         assertEquals(20, daily.steps);
         assertEquals(day, daily.measuredAtMs);
         assertTrue(daily.authoritative);
+        var later = new java.util.ArrayList<>(withReport);
+        later.add(step("steps_interval", day + 120_000L, day + 180_000L, 25));
+        var raised = BandHistoryParser.todaySteps(later, day, day + 86_400_000L);
+        assertEquals(35, raised.steps);
+        assertEquals(day + 120_000L, raised.measuredAtMs);
+        assertTrue(raised.authoritative);
         assertNull(BandHistoryParser.todaySteps(List.of(step("steps_interval", day - 60_000L, day, 9)),
                 day, day + 86_400_000L));
     }
@@ -505,13 +511,56 @@ public final class BandHistoryParserTest {
         assertEquals(58 * 60_000L, stages.get(2).endMs - stages.get(2).startMs);
         assertEquals(5, stages.get(3).stage.intValue());
         assertEquals(4 * 60_000L, stages.get(3).endMs - stages.get(3).startMs);
-        assertEquals(3, stages.get(4).stage.intValue());
+        assertEquals(6, stages.get(4).stage.intValue());
         assertEquals(35 * 60_000L, stages.get(4).endMs - stages.get(4).startMs);
         assertEquals(napStart * 1000L, stages.get(4).startMs);
+        assertEquals(6, stages.get(4).stage.intValue());
         assertEquals(5, stages.get(5).stage.intValue());
         assertEquals(19 * 60_000L, stages.get(5).endMs - stages.get(5).startMs);
-        assertEquals(3, stages.get(6).stage.intValue());
+        assertEquals(6, stages.get(6).stage.intValue());
         assertEquals(88 * 60_000L, stages.get(6).endMs - stages.get(6).startMs);
+    }
+
+    @Test public void shortAwakeOnASyncMarkJoinsTheStageBeforeIt() throws Exception {
+        int sleepStart = START_SECONDS + 18 * 3600;
+        byte[] mark = summaryPacket(sleepStart, 120, 0, 0);
+        byte[] staged = stagePacket(sleepStart, new int[] {(2 << 12) | 120, (0 << 12) | 1, (1 << 12) | 359});
+        var stages = stagesOf(concat(concat(sleepV4(0, true), mark), staged));
+        assertEquals(2, stages.size());
+        assertEquals(2, stages.get(0).stage.intValue());
+        assertEquals(121 * 60_000L, stages.get(0).endMs - stages.get(0).startMs);
+        assertEquals(3, stages.get(1).stage.intValue());
+        assertEquals(359 * 60_000L, stages.get(1).endMs - stages.get(1).startMs);
+
+        byte[] early = summaryPacket(sleepStart, 30, 0, 0);
+        var kept = stagesOf(concat(concat(sleepV4(0, true), early), staged));
+        assertEquals(5, kept.get(1).stage.intValue());
+        assertEquals(1 * 60_000L, kept.get(1).endMs - kept.get(1).startMs);
+
+        byte[] longAwake = stagePacket(sleepStart, new int[] {(2 << 12) | 100, (0 << 12) | 54, (1 << 12) | 326});
+        byte[] longMark = summaryPacket(sleepStart, 100, 0, 0);
+        var stillAwake = stagesOf(concat(concat(sleepV4(0, true), longMark), longAwake));
+        assertEquals(5, stillAwake.get(1).stage.intValue());
+        assertEquals(54 * 60_000L, stillAwake.get(1).endMs - stillAwake.get(1).startMs);
+    }
+
+    @Test public void pulseFileBecomesMinuteHeartRates() throws Exception {
+        int start = START_SECONDS + 18 * 3600;
+        byte[] body = new byte[1 + 10];
+        put32(body, 1, start);
+        body[5] = 70;
+        put32(body, 6, start + 1);
+        body[10] = 80;
+        var hearts = parser().parseFile(file(2, (9 << 2), body)).measurements;
+        assertEquals(1, hearts.size());
+        assertEquals("heart_rate", hearts.get(0).kind);
+        assertEquals(75, hearts.get(0).value.intValue());
+        assertEquals("continuous", hearts.get(0).measurementMode);
+    }
+
+    private java.util.List<BandHistoryParser.Measurement> stagesOf(byte[] body) throws Exception {
+        return parser().parseFile(file(4, (8 << 2) | 1, body)).measurements.stream()
+                .filter(item -> "sleep_stage".equals(item.kind)).toList();
     }
 
     @Test public void testForRealBandFile20261010() throws Exception {

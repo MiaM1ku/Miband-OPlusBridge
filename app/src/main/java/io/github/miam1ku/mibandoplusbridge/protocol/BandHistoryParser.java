@@ -147,6 +147,8 @@ public final class BandHistoryParser {
                 measurements = decodeSleepV4(bytes, timezone);
             } else if (dailyType == 8 && fileType == 1 && (version == 5 || version == 6)) {
                 measurements = decodeSleep(bytes, version, timezone);
+            } else if (dailyType == 9 && fileType == 0 && version == 2) {
+                measurements = decodePulse(bytes, timezone);
             } else {
                 throw new SemanticException("UNSUPPORTED_HISTORY_DT" + dailyType
                         + "_FT" + fileType + "_V" + version);
@@ -329,6 +331,7 @@ public final class BandHistoryParser {
         List<int[]> bestPartial = null;
         int bestPartialMinutes = 0;
         List<long[]> t16Segments = new ArrayList<>();
+        List<Long> syncMarks = new ArrayList<>();
         long spanMinutes = (sleepEnd - sleepStart) / 60_000L;
         Map<Long, List<Double>> breathSamples = new TreeMap<>();
         while (pos + 17 <= limit) {
@@ -367,7 +370,7 @@ public final class BandHistoryParser {
                     }
                 }
             } else if (type == 16) {
-                decodeSleepSummaryPacket(bytes, pos, payload, t16Segments);
+                decodeSleepSummaryPacket(bytes, pos, payload, t16Segments, syncMarks);
             } else if (type == 10) {
                 decodeSleepBreathPacket(bytes, pos, payload, breathSamples);
             }
@@ -377,6 +380,7 @@ public final class BandHistoryParser {
         List<int[]> chosen = fullMatch != null ? fullMatch : bestPartial;
         long chosenEnd = sleepStart;
         if (chosen != null) {
+            chosen = absorbSyncAwake(chosen, sleepStart, syncMarks);
             long current = sleepStart;
             for (int[] run : chosen) {
                 long next = current + run[1] * 60_000L;
@@ -404,7 +408,7 @@ public final class BandHistoryParser {
     }
 
     private void decodeSleepSummaryPacket(byte[] bytes, int pos, int payload,
-            List<long[]> t16Segments) {
+            List<long[]> t16Segments, List<Long> syncMarks) {
         long ts = u32(bytes, pos + 5) | (u32(bytes, pos + 9) << 32);
         if (ts <= 0) return;
         long recTsSec = ts > 3_000_000_000L ? ts / 1_000_000_000L : ts;
@@ -421,8 +425,10 @@ public final class BandHistoryParser {
             if (unstaged) {
                 int seg0Mins = (bytes[off + 2] & 0xff) | ((bytes[off + 3] & 0xff) << 8);
                 if (seg0Mins > 0) {
+                    syncMarks.add(t16StartMs + seg0Mins * 60_000L);
+                    // Stage 6 is a duration with no hypnogram. It is not light sleep.
                     t16Segments.clear();
-                    t16Segments.add(new long[] {3, t16StartMs, t16StartMs + seg0Mins * 60_000L});
+                    t16Segments.add(new long[] {6, t16StartMs, t16StartMs + seg0Mins * 60_000L});
                     if (payload >= 26 && (bytes[off + 13] & 0xff) == 0x20) {
                         int seg1Mins = (bytes[off + 15] & 0xff) | ((bytes[off + 16] & 0xff) << 8);
                         int gapMins = bytes[off + 25] & 0xff;
@@ -432,12 +438,83 @@ public final class BandHistoryParser {
                         }
                         if (seg1Mins > 0) {
                             long seg1Start = gapStart + gapMins * 60_000L;
-                            t16Segments.add(new long[] {3, seg1Start, seg1Start + seg1Mins * 60_000L});
+                            syncMarks.add(seg1Start + seg1Mins * 60_000L);
+                            t16Segments.add(new long[] {6, seg1Start, seg1Start + seg1Mins * 60_000L});
                         }
                     }
                 }
             }
         }
+    }
+
+    /**
+     * Each sync closes the open sleep file, and the later hypnogram keeps a short awake run
+     * at that minute. Five minutes is the longest such run in captured nights. A longer awake
+     * that happens to start on a sync, and a short awake that does not, stay awake.
+     */
+    private static List<int[]> absorbSyncAwake(List<int[]> runs, long sleepStart, List<Long> syncMarks) {
+        if (syncMarks.isEmpty()) return runs;
+        List<int[]> folded = new ArrayList<>();
+        long cursor = sleepStart;
+        int prepend = 0;
+        for (int[] run : runs) {
+            int stage = run[0];
+            int minutes = run[1];
+            boolean syncAwake = stage == 5 && minutes >= 1 && minutes <= 5 && nearSync(cursor, syncMarks);
+            if (syncAwake) {
+                if (!folded.isEmpty()) folded.get(folded.size() - 1)[1] += minutes;
+                else prepend += minutes;
+            } else {
+                folded.add(new int[] {stage, minutes + prepend});
+                prepend = 0;
+            }
+            cursor += minutes * 60_000L;
+        }
+        return folded;
+    }
+
+    private static boolean nearSync(long startMs, List<Long> syncMarks) {
+        for (long mark : syncMarks) {
+            if (Math.abs(startMs - mark) <= 60_000L) return true;
+        }
+        return false;
+    }
+
+    /** Type 9 version 2 is one heart-rate sample every second or two. Stored as minute averages. */
+    private List<Measurement> decodePulse(byte[] bytes, String timezone) {
+        int end = bytes.length - 4;
+        int origin = -1;
+        for (int pos = 8; pos + 10 <= end && pos < 8 + 32; pos++) {
+            long first = u32(bytes, pos);
+            long second = u32(bytes, pos + 5);
+            int heart = bytes[pos + 4] & 0xff;
+            int nextHeart = bytes[pos + 9] & 0xff;
+            long gap = second - first;
+            if (first > 1_500_000_000L && gap >= 1 && gap <= 5
+                    && heart >= 30 && heart <= 220 && nextHeart >= 30 && nextHeart <= 220) {
+                origin = pos;
+                break;
+            }
+        }
+        if (origin < 0) return List.of();
+        Map<Long, long[]> minutes = new TreeMap<>();
+        for (int pos = origin; pos + 5 <= end; pos += 5) {
+            long ts = u32(bytes, pos);
+            int heart = bytes[pos + 4] & 0xff;
+            if (ts < 1_500_000_000L || ts > 2_100_000_000L) break;
+            if (heart < 30 || heart > 220) continue;
+            long minute = ts / 60 * 60_000L;
+            long[] bucket = minutes.computeIfAbsent(minute, key -> new long[2]);
+            bucket[0] += heart;
+            bucket[1]++;
+        }
+        List<Measurement> records = new ArrayList<>();
+        for (Map.Entry<Long, long[]> entry : minutes.entrySet()) {
+            long[] bucket = entry.getValue();
+            int average = (int) Math.round(bucket[0] / (double) bucket[1]);
+            addMetric(records, "heart_rate", entry.getKey(), average, timezone, "continuous");
+        }
+        return records;
     }
 
     @SuppressWarnings("unchecked")
@@ -733,7 +810,13 @@ public final class BandHistoryParser {
                 if (measurement.startMs > intervalAt) intervalAt = measurement.startMs;
             }
         }
-        if (dailyAt >= 0) return daily > 200_000L ? null : new DailySteps(daily, dailyAt, true);
+        if (dailyAt >= 0) {
+            if (daily > 200_000L) return null;
+            // A report is a snapshot. Minutes recorded after it are absent from that total,
+            // and a later partial report must not replace a larger minute sum.
+            if (intervals && interval > daily) return new DailySteps(interval, intervalAt, true);
+            return new DailySteps(daily, dailyAt, true);
+        }
         return intervals ? new DailySteps(interval, intervalAt, false) : null;
     }
 

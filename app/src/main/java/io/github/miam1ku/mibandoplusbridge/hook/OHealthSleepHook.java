@@ -446,6 +446,7 @@ public final class OHealthSleepHook {
             case 3 -> "浅睡";
             case 4 -> "快速眼动（REM）";
             case 5 -> "清醒";
+            case 6 -> "未分期";
             default -> "阶段未知";
         };
     }

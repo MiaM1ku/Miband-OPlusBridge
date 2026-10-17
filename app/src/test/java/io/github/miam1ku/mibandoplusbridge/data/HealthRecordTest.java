@@ -44,12 +44,12 @@ public final class HealthRecordTest {
         assertThrows(IllegalArgumentException.class,
                 () -> new HealthRecord("sleep", "stable", "sleep_interval", 0, 60_000,
                         60_001, null, 1, null, "sleep", true));
-        for (Integer stage : new Integer[] {null, -1, 0, 1, 6}) {
+        for (Integer stage : new Integer[] {null, -1, 0, 1, 7}) {
             assertThrows(IllegalArgumentException.class,
                     () -> new HealthRecord("sleep", "stable", "sleep_stage", 0, 60_000,
                             null, stage, 1, null, "sleep", false));
         }
-        for (int stage = 2; stage <= 5; stage++) {
+        for (int stage = 2; stage <= 6; stage++) {
             assertEquals(stage, new HealthRecord("sleep", "stable", "sleep_stage", 0, 60_000,
                     null, stage, 1, null, "continuous", false).stage.intValue());
         }

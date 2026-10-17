@@ -401,17 +401,21 @@ public final class RawFitnessFileStore {
                 }
                 try {
                     int descriptor = bytes.length > 6 ? bytes[6] & 0xff : 0;
-                    if (((descriptor & 0x7f) >>> 2) != 8 || (descriptor & 3) != 1) continue;
+                    int dailyType = (descriptor & 0x7f) >>> 2;
+                    int fileType = descriptor & 3;
+                    boolean sleepFile = dailyType == 8 && fileType == 1;
+                    boolean pulseFile = dailyType == 9 && fileType == 0;
+                    if (!sleepFile && !pulseFile) continue;
                     BandHistoryParser.FileResult result = parser.parseFile(bytes);
                     if (!"PARSED".equals(result.parseStatus)) continue;
-                    boolean sleep = false;
+                    boolean wanted = false;
                     for (BandHistoryParser.Measurement measurement : result.measurements) {
-                        if ("sleep_interval".equals(measurement.kind) || "sleep_stage".equals(measurement.kind)) {
-                            sleep = true;
-                            break;
-                        }
+                        if (sleepFile && ("sleep_interval".equals(measurement.kind)
+                                || "sleep_stage".equals(measurement.kind))) wanted = true;
+                        if (pulseFile && "heart_rate".equals(measurement.kind)) wanted = true;
+                        if (wanted) break;
                     }
-                    if (sleep && store.promoteRejectedFile(hash, result.measurements.size())) promoted++;
+                    if (wanted && store.promoteRejectedFile(hash, result.measurements.size())) promoted++;
                 } catch (IllegalArgumentException invalid) {
                     continue;
                 } finally {

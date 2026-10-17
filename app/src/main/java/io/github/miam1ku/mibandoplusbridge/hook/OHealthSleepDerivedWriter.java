@@ -324,7 +324,7 @@ final class OHealthSleepDerivedWriter {
         List<Object> pieces = new ArrayList<>();
         for (OHealthSleepPlan.Segment segment : night.segments()) {
             pieces.add(pieceNew.newInstance(account, device, segment.startMs(), segment.endMs(),
-                    segment.sleepState(), false));
+                    OHealthSleepWriter.hostChartState(segment.sleepState()), false));
         }
         return pieces;
     }

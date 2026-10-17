@@ -469,7 +469,7 @@ final class OHealthSleepWriter {
         sleepDevice.invoke(row, device);
         sleepStart.invoke(row, segment.startMs());
         sleepEnd.invoke(row, segment.endMs());
-        sleepState.invoke(row, segment.sleepState());
+        sleepState.invoke(row, hostChartState(segment.sleepState()));
         sleepDisplay.invoke(row, 1);
         // Version 11 is the watch rule: a gap over 20 minutes stays a separate nap.
         if (sleepVersion != null) sleepVersion.invoke(row, 11);
@@ -518,6 +518,11 @@ final class OHealthSleepWriter {
      * one-minute rows. Writing a whole stage bar as a single row leaves the neighbouring minutes at
      * the default wake state, the score pass sees almost no sleep, and the night scores zero.
      */
+    /** The host chart has no unclassified state, so an unstaged minute is stored as light. */
+    static int hostChartState(int state) {
+        return state == OHealthSleepPlan.UNSTAGED ? OHealthSleepPlan.LIGHT : state;
+    }
+
     static List<OHealthSleepPlan.Segment> minuteRows(List<OHealthSleepPlan.Segment> segments) {
         List<OHealthSleepPlan.Segment> rows = new ArrayList<>();
         for (OHealthSleepPlan.Segment segment : segments) {
@@ -558,7 +563,7 @@ final class OHealthSleepWriter {
         if (!sleepClass.isInstance(row) || !device.equals(sleepGetDevice.invoke(row))) return false;
         if (segment.startMs() != (Long) sleepGetStart.invoke(row)
                 || segment.endMs() != (Long) sleepGetEnd.invoke(row)
-                || segment.sleepState() != (Integer) sleepGetState.invoke(row)) return false;
+                || hostChartState(segment.sleepState()) != (Integer) sleepGetState.invoke(row)) return false;
         if (sleepGetVersion == null) return true;
         return Integer.valueOf(11).equals(sleepGetVersion.invoke(row));
     }
