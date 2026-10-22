@@ -59,7 +59,7 @@ final class BleGattClient implements AutoCloseable {
     private final Object writeLock = new Object();
     private final LinkedBlockingQueue<PendingWrite> pendingWrites = new LinkedBlockingQueue<>();
     private final AtomicReference<PendingWrite> currentWrite = new AtomicReference<>();
-    private final BluetoothGattCharacteristic[] subscribe = new BluetoothGattCharacteristic[3];
+    private final BluetoothGattCharacteristic[] subscribe = new BluetoothGattCharacteristic[4];
     private BleNotifyQueue notifies;
     private byte[] previousNotification;
     private long previousAt;
@@ -275,6 +275,14 @@ final class BleGattClient implements AutoCloseable {
         }
     }
 
+    private boolean alreadySubscribed(BluetoothGattCharacteristic candidate, int count) {
+        UUID uuid = candidate.getUuid();
+        for (int i = 0; i < count; i++) {
+            if (subscribe[i] != null && uuid.equals(subscribe[i].getUuid())) return true;
+        }
+        return false;
+    }
+
     private static boolean notifies(BluetoothGattCharacteristic characteristic) {
         if (characteristic == null) return false;
         int props = characteristic.getProperties();
@@ -317,6 +325,10 @@ final class BleGattClient implements AutoCloseable {
             if (writerNotifies) subscribe[count++] = writer;
             subscribe[count++] = reader;
             if (fitness != null && !fitness.getUuid().equals(reader.getUuid())) subscribe[count++] = fitness;
+            // Icon chunks are written here. The band ACKs that same characteristic, not protoTX.
+            if (upload != null && notifies(upload) && !alreadySubscribed(upload, count)) {
+                subscribe[count++] = upload;
+            }
             notifies = new BleNotifyQueue(count);
             servicesReady = true;
             if (mtuSeen || !gatt.requestMtu(512)) {
@@ -387,11 +399,12 @@ final class BleGattClient implements AutoCloseable {
         previousAt = now;
         UUID uuid = characteristic.getUuid();
         try {
-            if (writeUuid.equals(uuid)) {
+            if (writeUuid.equals(uuid) || uploadUuid.equals(uuid)) {
                 // Single-frame writes do not wait for the payload ACK (type 3). Those ACKs
                 // are identical and arrive once per command. Queueing them filled the 8-slot
                 // ack queue and aborted every Band 8 session after the handshake burst.
                 // Only a chunked write is waiting, and it only needs chunk ACKs (type 1).
+                // The icon path writes the upload characteristic, so its ACK is not on protoTX.
                 if (BleV1Codec.control(value, BleV1Codec.TYPE_CHUNK_ACK) && !transportAcks.offer(value)) {
                     SessionLog.line(context, "ble chunk ack dropped");
                 }

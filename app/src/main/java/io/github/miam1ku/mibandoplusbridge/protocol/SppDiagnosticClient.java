@@ -609,6 +609,9 @@ public final class SppDiagnosticClient implements AutoCloseable {
             // sentSequence is the handshake cursor and is not advanced by live writes.
             if (framing != 0 && liveCommands != null) liveCommands.onAck(sequence);
         } catch (Exception failure) {
+            // A missed icon chunk ACK must not drop the link. The radio is still delivering
+            // commands during that wait; closing here is the Band 8 notification disconnect.
+            if (failure instanceof Failure typed && "ICON_CHUNK_TIMEOUT".equals(typed.code)) throw failure;
             linkStop = failure instanceof Failure typed ? typed.code : failure.getClass().getSimpleName();
             if (!(failure instanceof Failure)) {
                 SessionLog.line(context, "link stop " + failureText(failure));
@@ -622,7 +625,12 @@ public final class SppDiagnosticClient implements AutoCloseable {
         byte[] chunk;
         synchronized (iconChunks) { chunk = iconChunks.remove(command); }
         if (chunk != null) {
-            writeIconChunk(sequence, chunk);
+            try {
+                writeIconChunk(sequence, chunk);
+            } catch (Failure failure) {
+                if ("BLE_CHUNK_ACK_TIMEOUT".equals(failure.code)) throw new Failure("ICON_CHUNK_TIMEOUT");
+                throw failure;
+            }
             return;
         }
         byte[] bytes = command.toByteArray();

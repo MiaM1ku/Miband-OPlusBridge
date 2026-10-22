@@ -170,6 +170,12 @@ public final class WeatherSync implements AutoCloseable {
         queryCities(sample);
     }
 
+    /** Band 8 answers the city-list query with status 1 and no locations. The current city is sent alone. */
+    static boolean unsupportedCityList(XiaomiProto.Command command) {
+        return command != null && command.getType() == 10 && command.getSubtype() == 5
+                && command.hasStatus() && command.getStatus() == 1;
+    }
+
     /** A watch request always transmits. An idle poll keeps the same forecast off the radio. */
     static boolean transmitForecast(boolean forced, BandWeatherEncoder.Sample lastSent,
                                     BandWeatherEncoder.Sample current) {
@@ -185,12 +191,22 @@ public final class WeatherSync implements AutoCloseable {
                     if (active != transaction) return;
                     awaitingCities = false;
                     if (failure != null) { finish("WEATHER_TRANSPORT_FAILED"); return; }
-                    if (response.hasStatus() && response.getStatus() != 0) { finish("WEATHER_BAND_REJECTED"); return; }
-                    if (!response.hasWeather() || !response.getWeather().hasLocations()) {
+                    if (response.hasStatus() && response.getStatus() != 0 && !unsupportedCityList(response)) {
+                        finish("WEATHER_BAND_REJECTED");
+                        return;
+                    }
+                    if (!unsupportedCityList(response)
+                            && (!response.hasWeather() || !response.getWeather().hasLocations())) {
                         finish("WEATHER_CITY_LIST_INVALID"); return;
                     }
                     try {
                         BandWeatherEncoder.Sample fresh = freshSnapshot(sample);
+                        if (unsupportedCityList(response)) {
+                            SessionLog.line(context, "WEATHER_CITIES unsupported");
+                            if (operation == Operation.INSPECT) { finish(null); return; }
+                            sendCurrentCity(transaction, fresh);
+                            return;
+                        }
                         XiaomiProto.WeatherLocations cities = response.getWeather().getLocations();
                         SessionLog.line(context, "WEATHER_CITIES raw=" + cities.getLocationCount()
                                 + " accepted=" + BandWeatherEncoder.acceptedCityCount(cities));
@@ -216,6 +232,23 @@ public final class WeatherSync implements AutoCloseable {
         if (!edit.putInt("bandCount", count).commit()) throw new Failure("WEATHER_CITY_STORAGE_FAILED");
 
     }
+    /** 10/5 status 1 has no list to edit. 10/7 writes this one city; 1 and 3 still allow the forecast. */
+    private void sendCurrentCity(CompletableFuture<Void> transaction, BandWeatherEncoder.Sample fresh) {
+        SessionLog.line(context, "WEATHER_SET_CURRENT_CITY");
+        transactionQueue.request(BandWeatherEncoder.addCurrentLocation(fresh), 10, 7)
+                .whenComplete((set, setFailure) -> dispatch(() -> {
+                    if (active != transaction) return;
+                    if (setFailure != null) { finish("WEATHER_TRANSPORT_FAILED"); return; }
+                    int status = set != null && set.hasStatus() ? set.getStatus() : 0;
+                    if (status != 0 && status != 1 && status != 3) {
+                        finish("WEATHER_BAND_REJECTED");
+                        return;
+                    }
+                    if (status != 0) SessionLog.line(context, "WEATHER_CURRENT_CITY status=" + status);
+                    sendFrame(transaction, fresh, BandWeatherEncoder.encode(fresh), 0);
+                }));
+    }
+
     private void publish(CompletableFuture<Void> transaction, BandWeatherEncoder.Sample fresh,
                          XiaomiProto.WeatherLocations cities) {
         var review = context.getSharedPreferences("weather-city-review", 0);
@@ -266,7 +299,9 @@ public final class WeatherSync implements AutoCloseable {
         dispatch(() -> {
             if (closed) return;
             if (command.hasStatus() && command.getStatus() != 0) {
+                // 10/5 status 1: this band has no city list. The request handler sends the current city.
                 // 10/7: 1 means this device has no single-city add; 3 means the city is already there.
+                if (unsupportedCityList(command) && awaitingCities) return;
                 if (command.getSubtype() == 7 && (command.getStatus() == 1 || command.getStatus() == 3)) return;
                 if (active != null) finish("WEATHER_BAND_REJECTED");
                 else record("WEATHER_BAND_REJECTED");

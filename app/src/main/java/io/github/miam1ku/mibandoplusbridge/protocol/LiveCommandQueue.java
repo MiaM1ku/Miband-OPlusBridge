@@ -268,6 +268,16 @@ public final class LiveCommandQueue implements AutoCloseable {
         try {
             sender.write(selected.sequence, selected.command);
         } catch (Exception failure) {
+            if (failure instanceof SppDiagnosticClient.Failure typed
+                    && "ICON_CHUNK_TIMEOUT".equals(typed.code)) {
+                synchronized (lock) {
+                    if (!closed && work.contains(selected)) {
+                        finishLocked(selected, null, failure);
+                        scheduleDrainLocked();
+                    }
+                }
+                return;
+            }
             closeWithCode("LIVE_TRANSPORT_WRITE_FAILED");
             return;
         }

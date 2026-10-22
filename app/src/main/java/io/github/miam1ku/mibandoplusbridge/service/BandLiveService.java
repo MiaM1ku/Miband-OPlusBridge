@@ -816,7 +816,7 @@ public final class BandLiveService extends Service {
                             if (command.getSubtype() == 109) adoptStoredBand();
                             applyBandManual(command);
                             noteSleep(command);
-                        } else if (command.getType() == 7 || command.getType() == 18) {
+                        } else if (command.getType() == 10 || command.getType() == 7 || command.getType() == 18) {
                             io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(BandLiveService.this,
                                     "rx type=" + command.getType() + " subtype=" + command.getSubtype()
                                             + " status=" + command.getStatus());

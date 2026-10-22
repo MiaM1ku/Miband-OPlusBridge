@@ -3,6 +3,7 @@ package io.github.miam1ku.mibandoplusbridge.service;
 
 import io.github.miam1ku.mibandoplusbridge.protocol.BandWeatherEncoder;
 import java.util.List;
+import nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto;
 import org.junit.Test;
 import static org.junit.Assert.*;
 
@@ -13,6 +14,13 @@ public final class WeatherSyncTest {
         assertTrue(WeatherSync.transmitForecast(true, forecast, forecast));
         assertTrue(WeatherSync.transmitForecast(false, null, forecast));
         assertTrue(WeatherSync.transmitForecast(false, forecast, sample(2_000)));
+    }
+
+    @Test public void band8CityListStatusStillAllowsTheForecast() {
+        var unsupported = XiaomiProto.Command.newBuilder().setType(10).setSubtype(5).setStatus(1).build();
+        assertTrue(WeatherSync.unsupportedCityList(unsupported));
+        assertFalse(WeatherSync.unsupportedCityList(unsupported.toBuilder().setStatus(0).build()));
+        assertFalse(WeatherSync.unsupportedCityList(unsupported.toBuilder().setSubtype(6).build()));
     }
 
     private static BandWeatherEncoder.Sample sample(long publishedAtMs) {
