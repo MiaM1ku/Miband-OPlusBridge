@@ -920,6 +920,11 @@ public final class OHealthHealthImportHook {
             if (device == null || device.isBlank() || end <= start) {
                 throw new IllegalArgumentException("HEALTH_DELETE_WINDOW");
             }
+            // SportDataDetailStore.delete drops the device id and clears every device's minutes in
+            // the window, the phone's own steps included. No caller may delete from table 1001.
+            if (table == OHealthStepWriter.TABLE_DETAIL) {
+                throw new IllegalArgumentException("HEALTH_DELETE_UNSCOPED_TABLE");
+            }
             Class<?> type = Class.forName("com.heytap.databaseengine.option.DataDeleteOption", false, loader);
             Object option = type.getConstructor().newInstance();
             type.getMethod("setSsoid", String.class).invoke(option, account);

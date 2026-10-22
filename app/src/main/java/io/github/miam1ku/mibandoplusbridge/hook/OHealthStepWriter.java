@@ -39,6 +39,12 @@ final class OHealthStepWriter {
     static final int MINUTES_PER_DAY = 1_440;
     private static final long MINUTE_MS = 60_000L;
     private static final int INSERT_CHUNK = 400;
+    /** Bumped when stored minute keys stop matching what the host holds. */
+    static final String CHART_VERSION = "minute-v4";
+    /** InsertOptionCheck rejects the whole batch when one minute is above these. */
+    static final int MAX_MINUTE_STEPS = 350;
+    static final long MAX_MINUTE_CALORIES = 65_536L;
+    static final int MAX_MINUTE_DISTANCE = 1_050;
     private static final String[] COLUMNS = {"recordId", "revision", "record"};
     private final OHealthHealthImportHook.HostContract host;
     private final Class<?> statClass;
@@ -112,17 +118,8 @@ final class OHealthStepWriter {
                 XposedBridge.log("OplusBandBridge OHEALTH_STEP_CHART_FAIL date=" + day.date + " " + failure);
             }
         }
-        if (!queued.equals(device)) {
-            for (BandHistoryParser.StepDay day : days) {
-                long end = day.startMs + 86_400_000L;
-                try {
-                    host.deleteRows(api, TABLE_STAT, account, queued, day.startMs, end);
-                    host.deleteRows(api, TABLE_DETAIL, account, queued, day.startMs, end);
-                } catch (Exception ignored) {
-                    HookRuntime.log("OHEALTH_STEP_PREVIOUS_DEVICE_KEPT date=" + day.date);
-                }
-            }
-        }
+        // Rows left under the queued id stay. A table 1001 delete cannot be scoped to one device:
+        // it cleared every minute of the day, this band's new rows and the phone's included.
         publishToday(context, days);
         publishSnapshot(context);
         String summary = "OHEALTH_STEP_IMPORT days=" + days.size()
@@ -222,49 +219,39 @@ final class OHealthStepWriter {
     }
 
     /**
-     * Inserts minute growth. Step and calorie charts sum these rows into half hours.
+     * Inserts whole minute values. Step and calorie charts sum these rows into half hours.
      * The exercise chart sums {@code workout} the same way and caps a half hour at 30.
      * The hour chart marks a band hour only when some minute in it has more than 30 steps,
      * and a watch hour when some minute has any steps. An hour blob is a different table.
+     *
+     * <p>Table 1001 delete and read ignore the device id: a delete clears every device's minutes
+     * in the window, including the phone's own. So this never deletes. The host merge keys a minute
+     * on (account, device, start) and replaces the stored minute only when the new calories are
+     * higher, so each pass sends the full minute value, never the growth since the last pass.
      */
     private int writeChart(Object api, String account, String device, String category,
             BandHistoryParser.StepDay day, List<HealthRecord> records, SharedPreferences written)
             throws Exception {
         if (!prepareDetail()) return 0;
         MinuteBar[] minutes = MinuteBar.day(records, day.startMs, day.timezone);
-        String version = device + ":" + day.date + ":minute-v3";
-        boolean rebuild = !"1".equals(written.getString(version, ""));
-        if (rebuild) {
-            try {
-                host.deleteRows(api, TABLE_DETAIL, account, device, day.startMs, day.startMs + 86_400_000L);
-            } catch (Exception deleteFailed) {
-                // A host delete that cannot be confirmed leaves the day in place. The bars below are
-                // upserts, so overlapping minutes are replaced; a stale minute can outlive one pass.
-                HookRuntime.log("OHEALTH_STEP_CHART_DELETE_KEPT date=" + day.date
-                        + " " + deleteFailed);
-            }
-        }
+        // v3 and earlier deleted the day after writing it, so every saved minute key is stale.
+        String version = device + ":" + day.date + ":" + CHART_VERSION;
+        boolean resend = !"1".equals(written.getString(version, ""));
         List<Object> rows = new ArrayList<>();
         List<Integer> indexes = new ArrayList<>();
         for (int minute = 0; minute < MINUTES_PER_DAY; minute++) {
             MinuteBar bar = minutes[minute];
             if (bar == null) continue;
-            int[] saved = rebuild ? new int[3] : savedMinute(written, device, day.date, minute);
-            int deltaSteps = bar.steps - saved[0];
-            int deltaCalories = bar.calories - saved[1];
-            int deltaDistance = bar.distance - saved[2];
-            if (deltaSteps <= 0 && deltaCalories <= 0 && deltaDistance <= 0) continue;
-            // A later pass sends only the growth. Workout stays on the first row of that minute;
-            // the merge keeps a workout it already stored when the new row does not repeat it.
-            int workout = bar.workout > 0 && saved[0] <= 0 ? 1 : 0;
+            int[] saved = resend ? new int[3] : savedMinute(written, device, day.date, minute);
+            if (bar.steps <= saved[0] && bar.calories <= saved[1] && bar.distance <= saved[2]) continue;
             rows.add(detail(account, device, category, day, minute,
-                    Math.max(0, deltaSteps),
-                    Math.max(0, deltaCalories) * (long) CALORIE_SCALE,
-                    Math.max(0, deltaDistance), workout));
+                    Math.min(bar.steps, MAX_MINUTE_STEPS),
+                    Math.min((long) bar.calories * CALORIE_SCALE, MAX_MINUTE_CALORIES),
+                    Math.min(bar.distance, MAX_MINUTE_DISTANCE), bar.workout > 0 ? 1 : 0));
             indexes.add(minute);
         }
         if (rows.isEmpty()) {
-            if (rebuild && !written.edit().putString(version, "1").commit()) {
+            if (resend && !written.edit().putString(version, "1").commit()) {
                 throw new IllegalStateException("STEP_IMPORT_MEMORY_FAILED");
             }
             return 0;
@@ -273,28 +260,43 @@ final class OHealthStepWriter {
             host.insertRows(api, TABLE_DETAIL, rows.subList(from, Math.min(rows.size(), from + INSERT_CHUNK)));
         }
         long dayEnd = day.startMs + 86_400_000L;
+        // The host returns every device's minutes here; keep this band's rows only.
         List<?> confirmed = host.readRows(api, account, TABLE_DETAIL, device, day.startMs, dayEnd, 0, false,
                 MINUTES_PER_DAY + 24);
         int[] got = new int[MINUTES_PER_DAY];
+        boolean[] present = new boolean[MINUTES_PER_DAY];
         for (Object row : confirmed) {
             if (!detailClass.isInstance(row)) continue;
             if (!device.equals(detailGetDevice.invoke(row))) continue;
             long start = (Long) detailGetStart.invoke(row);
             int minute = (int) ((start - day.startMs) / MINUTE_MS);
             if (minute < 0 || minute >= MINUTES_PER_DAY) continue;
-            int steps = (Integer) detailGetSteps.invoke(row);
-            if (steps > 0 && got[minute] <= Integer.MAX_VALUE - steps) got[minute] += steps;
+            present[minute] = true;
+            got[minute] = Math.max(got[minute], (Integer) detailGetSteps.invoke(row));
         }
         SharedPreferences.Editor editor = written.edit();
         int stored = 0;
+        int missing = 0;
+        int kept = 0;
         for (int minute : indexes) {
-            if (got[minute] < minutes[minute].steps) throw new IllegalStateException("STEP_CHART_UNCONFIRMED");
+            if (!present[minute]) {
+                missing++;
+                continue;
+            }
+            // A minute already stored with the same calories keeps its old steps; the host
+            // merge has no way to raise it. Remember it so the same rows are not resent forever.
+            if (got[minute] < Math.min(minutes[minute].steps, MAX_MINUTE_STEPS)) kept++;
             editor.putString(minuteKey(device, day.date, minute),
                     minutes[minute].steps + ":" + minutes[minute].calories + ":" + minutes[minute].distance);
             stored++;
         }
-        editor.putString(version, "1");
+        if (missing == 0) editor.putString(version, "1");
         if (!editor.commit()) throw new IllegalStateException("STEP_IMPORT_MEMORY_FAILED");
+        if (kept > 0 || missing > 0) {
+            HookRuntime.log("OHEALTH_STEP_CHART_SHORT date=" + day.date + " sent=" + rows.size()
+                    + " missing=" + missing + " kept=" + kept);
+        }
+        if (missing > 0) throw new IllegalStateException("STEP_CHART_UNCONFIRMED");
         return stored;
     }
 
