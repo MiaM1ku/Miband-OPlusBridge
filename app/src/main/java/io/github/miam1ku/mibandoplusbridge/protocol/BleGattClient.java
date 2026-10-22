@@ -39,7 +39,9 @@ final class BleGattClient implements AutoCloseable {
     private final UUID writeUuid;
     private final UUID activityUuid;
     private final UUID uploadUuid;
-    private final BlockingQueue<Rx> incoming = new ArrayBlockingQueue<>(32);
+    // The reader blocks inside a GATT write during the handshake while fitness
+    // notifications are already arriving. A short queue aborts that sync.
+    private final BlockingQueue<Rx> incoming = new ArrayBlockingQueue<>(128);
     private final BlockingQueue<byte[]> transportAcks = new ArrayBlockingQueue<>(8);
     private final AtomicReference<String> failure = new AtomicReference<>();
     private final CountDownLatch ready = new CountDownLatch(1);
@@ -386,7 +388,13 @@ final class BleGattClient implements AutoCloseable {
         UUID uuid = characteristic.getUuid();
         try {
             if (writeUuid.equals(uuid)) {
-                if (!transportAcks.offer(value)) overflow();
+                // Single-frame writes do not wait for the payload ACK (type 3). Those ACKs
+                // are identical and arrive once per command. Queueing them filled the 8-slot
+                // ack queue and aborted every Band 8 session after the handshake burst.
+                // Only a chunked write is waiting, and it only needs chunk ACKs (type 1).
+                if (BleV1Codec.control(value, BleV1Codec.TYPE_CHUNK_ACK) && !transportAcks.offer(value)) {
+                    SessionLog.line(context, "ble chunk ack dropped");
+                }
                 return;
             }
             boolean activityChar = activityUuid.equals(uuid);

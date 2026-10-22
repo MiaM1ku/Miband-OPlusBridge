@@ -64,6 +64,9 @@ public final class BleV1CodecTest {
         BleV1Codec.Reassembler reassembler = new BleV1Codec.Reassembler();
         assertNull(reassembler.accept(BleV1Codec.PAYLOAD_ACK));
         assertTrue(reassembler.awaitingAck(BleV1Codec.PAYLOAD_ACK));
+        assertFalse(BleV1Codec.control(BleV1Codec.PAYLOAD_ACK, BleV1Codec.TYPE_CHUNK_ACK));
+        assertTrue(BleV1Codec.control(BleV1Codec.CHUNK_END_ACK, BleV1Codec.TYPE_CHUNK_ACK));
+        assertTrue(BleV1Codec.control(BleV1Codec.CHUNK_START_ACK, BleV1Codec.TYPE_CHUNK_ACK));
     }
 
     @Test public void band8PlaintextSingleUsesEncryptionFlagTwo() {

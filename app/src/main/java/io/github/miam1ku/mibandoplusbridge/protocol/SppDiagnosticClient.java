@@ -75,6 +75,7 @@ public final class SppDiagnosticClient implements AutoCloseable {
     private volatile LiveCommandQueue liveCommands;
     private Result verifiedDevice;
     private boolean liveHold;
+    private final ArrayDeque<byte[]> heldActivity = new ArrayDeque<>();
     private BandHistoryParser history;
     private String historyDeviceId;
     private io.github.miam1ku.mibandoplusbridge.data.RawFitnessFileStore rawHistory;
@@ -328,6 +329,7 @@ public final class SppDiagnosticClient implements AutoCloseable {
                 liveHold = true;
                 long timeout = 10_000L;
                 liveCommands = new LiveCommandQueue(sentSequence, timeout, this::writeLiveCommand);
+                flushHeldActivity();
                 onLiveReady.accept(liveCommands);
                 progress.accept("LIVE_SESSION_OPEN");
                 deadline.cancel(false);
@@ -352,6 +354,8 @@ public final class SppDiagnosticClient implements AutoCloseable {
                 if (payload != null) Arrays.fill(payload, (byte) 0);
             }
             observedLocations = null;
+            byte[] held;
+            while ((held = heldActivity.poll()) != null) Arrays.fill(held, (byte) 0);
             ACTIVE.compareAndSet(this, null);
             finished.countDown();
         }
@@ -438,9 +442,14 @@ public final class SppDiagnosticClient implements AutoCloseable {
      */
     private XiaomiProto.Command readBle() throws Exception {
         while (true) {
+            if (timedOut) throw new Failure("DIAGNOSTIC_TIMEOUT");
+            // close() clears the field. The handshake watchdog does that from another thread.
+            BleGattClient link = ble;
+            if (link == null) throw new Failure(closed ? "CANCELLED" : "BLE_DISCONNECTED");
             try {
-                return decodeBle(ble.take(liveHold ? 30_000L : 15_000L));
+                return decodeBle(link.take(liveHold ? 30_000L : 15_000L));
             } catch (Failure failure) {
+                if (timedOut) throw new Failure("DIAGNOSTIC_TIMEOUT");
                 if (!liveHold || closed || !"BLE_READ_TIMEOUT".equals(failure.code)) throw failure;
             }
         }
@@ -544,9 +553,18 @@ public final class SppDiagnosticClient implements AutoCloseable {
     }
 
     private void acceptV1Activity(byte[] payload) {
-        if (history == null) {
-            SessionLog.line(context, "rx spp1 activity before history len="
-                    + (payload == null ? -1 : payload.length));
+        if (payload == null) return;
+        // The fitness characteristic is notified as soon as the link is up, which is before
+        // device info has created the parser and before file confirms can be sent. The BLE
+        // payload ACK is already out, so dropping the bytes here makes the band wait for a
+        // type-8 confirm that never comes and then push the file again on the next link.
+        if (history == null || liveCommands == null) {
+            if (heldActivity.size() >= 32) {
+                SessionLog.line(context, "rx activity held dropped len=" + payload.length);
+                return;
+            }
+            heldActivity.add(Arrays.copyOf(payload, payload.length));
+            SessionLog.line(context, "rx activity held len=" + payload.length);
             return;
         }
         BandHistoryParser.FileResult result;
@@ -563,6 +581,17 @@ public final class SppDiagnosticClient implements AutoCloseable {
         if (result != null) {
             byte[] fileId = archiveActivity(result);
             if (fileId != null) ackActivity(fileId);
+        }
+    }
+
+    private void flushHeldActivity() {
+        byte[] next;
+        while ((next = heldActivity.poll()) != null) {
+            try {
+                acceptV1Activity(next);
+            } finally {
+                Arrays.fill(next, (byte) 0);
+            }
         }
     }
 
