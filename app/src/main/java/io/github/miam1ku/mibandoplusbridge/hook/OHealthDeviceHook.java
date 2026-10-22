@@ -1013,16 +1013,40 @@ public final class OHealthDeviceHook {
     private static int pushedBattery = Integer.MIN_VALUE;
     private static boolean pushedConnected;
 
-    /** Hide the bridge card only while health's own device-space row is still there. */
+    /** A missing Health row must stay missing this long before the bridge card comes back. */
+    private static final long YIELD_SETTLE_MS = 30_000L;
+    private static long absentSinceMs;
+
+    /**
+     * Hide the bridge card only while health's own device-space row is still there.
+     * Only the main process decides. Health's other processes and a provider that is still
+     * starting see no row for a moment, and each of those used to bring the second card back.
+     */
     private static void dropDuplicateSpaceCard(ClassLoader loader) {
         Bundle shown = snapshot;
         if (shown == null || hostContext == null) return;
+        if (!"com.heytap.health".equals(android.app.Application.getProcessName())) return;
         boolean registered = shown.getBoolean("registered", false);
         String mac = shown.getString("mac", "");
-        boolean present = registered && !mac.isBlank() && healthCardPresent(mac);
-        if (present) refreshHealthCard(loader, mac, shown);
-        else {
+        Boolean found = registered && !mac.isBlank() ? healthCardPresent(mac) : Boolean.FALSE;
+        if (found == null) return;
+        boolean present = found;
+        if (present) {
+            absentSinceMs = 0;
+            refreshHealthCard(loader, mac, shown);
+        } else {
             pushedBattery = Integer.MIN_VALUE;
+            if (registered) {
+                long now = android.os.SystemClock.elapsedRealtime();
+                if (absentSinceMs == 0) absentSinceMs = now;
+                long waited = now - absentSinceMs;
+                if (waited < YIELD_SETTLE_MS) {
+                    Handler again = worker;
+                    if (again != null) again.postDelayed(() -> dropDuplicateSpaceCard(loader),
+                            YIELD_SETTLE_MS - waited + 500);
+                    return;
+                }
+            }
         }
         if (yielded != null && yielded == present) return;
         try {
@@ -1037,18 +1061,28 @@ public final class OHealthDeviceHook {
         }
     }
 
-    private static boolean healthCardPresent(String mac) {
+    /** True or false when Health's provider answered; null when it gave no cursor or failed. */
+    private static Boolean healthCardPresent(String mac) {
         String id = healthCardId(mac);
         if (id.isEmpty()) return false;
         android.net.Uri uri = android.net.Uri.parse(
                 "content://com.heytap.health.WatchProvider/device_info_table_new");
+        // DeviceAppProvider decrypts every row from device_id and device_data. With a projection the
+        // decrypt has no device_data and the row comes back with blank columns, so read the full row.
         try (android.database.Cursor cursor = hostContext.getContentResolver().query(
-                uri, new String[] {"device_id"}, "device_id=?", new String[] {id}, null)) {
-            return cursor != null && cursor.moveToFirst() && id.equals(cursor.getString(0));
+                uri, null, "device_id=?", new String[] {id}, null)) {
+            // DeviceAppProvider returns null when its database is not open or the query times out.
+            if (cursor == null) return null;
+            int column = cursor.getColumnIndex("device_id");
+            if (column < 0) return null;
+            while (cursor.moveToNext()) {
+                if (id.equals(cursor.getString(column))) return true;
+            }
+            return false;
         } catch (Throwable failure) {
             HookRuntime.log("DEVICE_SPACE_LOOKUP_UNAVAILABLE "
                     + failure.getClass().getSimpleName());
-            return false;
+            return null;
         }
     }
 
@@ -1498,13 +1532,18 @@ public final class OHealthDeviceHook {
     }
 
     private static boolean isIncomingCall(Object bean) {
+        if (io.github.miam1ku.mibandoplusbridge.notify.CallPresentation.alreadyBlocked(
+                text(bean, "getTitle"), text(bean, "getContent"))) return false;
         try {
             Object origin = XposedHelpers.callMethod(bean, "getOrigin");
             if (origin instanceof StatusBarNotification posted) {
                 android.app.Notification notification = posted.getNotification();
-                if (notification != null
-                        && android.app.Notification.CATEGORY_CALL.equals(notification.category)) {
-                    return true;
+                if (notification != null) {
+                    if (io.github.miam1ku.mibandoplusbridge.notify.CallPresentation.alreadyBlocked(notification)) {
+                        return false;
+                    }
+                    // A dialer notice without CATEGORY_CALL is the shade card, not a ringing call.
+                    return android.app.Notification.CATEGORY_CALL.equals(notification.category);
                 }
             }
         } catch (Throwable ignored) { }
@@ -1680,10 +1719,28 @@ public final class OHealthDeviceHook {
         return executor;
     }
 
+    /** True once {@code GlobalApplicationHolder} holds a context whose application context is set. */
+    private static boolean healthContextReady(ClassLoader loader) {
+        try {
+            Object context = XposedHelpers.callStaticMethod(loader.loadClass(
+                    "com.heytap.health.base.base.GlobalApplicationHolder"), "getAppContext");
+            return context instanceof Context app && app.getApplicationContext() != null;
+        } catch (Throwable unavailable) {
+            return false;
+        }
+    }
+
     private static void pushPolicy() {
         int generation = policyGeneration.get();
         if (hostContext == null) {
             if (generation == policyGeneration.get()) retryPolicy("context");
+            return;
+        }
+        // NotificationRoom builds its database in a static initializer from Health's application
+        // context. Touching it before Health sets that context fails the initializer for good,
+        // and Health's own notification module then crashes :transport with NoClassDefFoundError.
+        if (!healthContextReady(hostContext.getClassLoader())) {
+            if (generation == policyGeneration.get()) retryPolicy("app-context");
             return;
         }
         try {

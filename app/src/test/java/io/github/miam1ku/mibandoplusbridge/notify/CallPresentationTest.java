@@ -50,6 +50,16 @@ public final class CallPresentationTest {
         assertEquals("来电", CallPresentation.displayName("来电", INCOMING));
     }
 
+    @Test public void anInterceptedCallNoticeIsNotARingingCall() {
+        assertTrue(CallPresentation.alreadyBlocked("新拦截", "为您拦截了 1 个来电"));
+        assertTrue(CallPresentation.alreadyBlocked("已自动拦截来电",
+                "号码识别结果更新后命中拦截规则，已自动挂断 (13800138000)"));
+        assertTrue(CallPresentation.alreadyBlocked("新攔截", "為您封鎖了 2 個來電"));
+        assertEquals(INCOMING, CallPresentation.kind(false, false, 0, "为您拦截了 1 个来电", "新拦截"));
+        assertFalse(CallPresentation.alreadyBlocked("骚扰电话", "13800138000"));
+        assertFalse(CallPresentation.alreadyBlocked("张三", "来电"));
+    }
+
     @Test public void seedlingChronometerNodeMarksTheCallConnected() {
         assertTrue(CallPresentation.chronometerCard("{\"desc\":\"Chronometer\",\"started\":true}"));
         assertFalse(CallPresentation.chronometerCard("{\"desc\":\"正在呼叫\"}"));

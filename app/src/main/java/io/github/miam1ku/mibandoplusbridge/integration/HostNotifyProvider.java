@@ -57,6 +57,21 @@ public final class HostNotifyProvider extends ContentProvider {
             int id = extras.getInt("id", 0);
             if (id == 0) id = Math.max(1, key.hashCode() & 0x7fffffff);
             boolean call = extras.getBoolean("call", false);
+            if ("com.android.incallui".equals(pkg)
+                    && CallPresentation.alreadyBlocked(extras.getString("title", ""), extras.getString("body", ""))) {
+                call = false;
+                if (!removed) {
+                    int showing;
+                    synchronized (this) {
+                        showing = postedCallState;
+                        postedCallState = 0;
+                    }
+                    if (showing != 0) {
+                        io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(getContext(), "CALL_BLOCKED_NOTICE");
+                        BandLiveService.forwardHostNotification(getContext(), BandNotificationCommand.endCall());
+                    }
+                }
+            }
             int callState = call ? callState(extras) : 0;
             if (call && !removed && callState == 0) {
                 io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(getContext(), "CALL_HOST_UNRESOLVED");

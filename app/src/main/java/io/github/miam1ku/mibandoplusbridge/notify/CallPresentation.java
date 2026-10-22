@@ -85,6 +85,27 @@ public final class CallPresentation {
         };
     }
 
+    /**
+     * ColorOS has already rejected this call. The shade notice stays a normal notification,
+     * even when its copy contains 「来电」.
+     */
+    public static boolean alreadyBlocked(String... fields) {
+        if (fields == null) return false;
+        for (String field : fields) if (blockedCopy(field)) return true;
+        return false;
+    }
+
+    public static boolean alreadyBlocked(Notification notification) {
+        if (notification == null) return false;
+        Bundle extras = notification.extras;
+        return alreadyBlocked(
+                text(extras, Notification.EXTRA_TITLE),
+                text(extras, Notification.EXTRA_TEXT),
+                text(extras, Notification.EXTRA_BIG_TEXT),
+                text(extras, Notification.EXTRA_SUB_TEXT),
+                NotificationRelay.sanitize(notification.tickerText));
+    }
+
     /** A state label is not the person being called. */
     public static String displayName(String title, Kind kind) {
         String clean = title == null ? "" : title.trim();
@@ -139,5 +160,15 @@ public final class CallPresentation {
     private static boolean ringing(String text) {
         if (text.contains("来电") || text.contains("來電")) return true;
         return text.toLowerCase().contains("incoming");
+    }
+
+    /** Titles and bodies of the InCallUI notices posted after a call was rejected. */
+    private static boolean blockedCopy(String text) {
+        if (text == null || text.isBlank()) return false;
+        return text.contains("新拦截") || text.contains("新攔截") || text.contains("新封鎖")
+                || text.contains("已自动拦截") || text.contains("已自動攔截")
+                || text.contains("已自动挂断") || text.contains("已自動掛斷")
+                || text.contains("为您拦截了") || text.contains("為您攔截了") || text.contains("為您封鎖了")
+                || text.contains("命中拦截规则") || text.contains("命中攔截規則") || text.contains("符合攔截規則");
     }
 }
