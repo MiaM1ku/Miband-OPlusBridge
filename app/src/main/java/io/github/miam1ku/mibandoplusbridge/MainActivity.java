@@ -190,7 +190,7 @@ public final class MainActivity extends AppCompatActivity {
         LinearLayout.LayoutParams advancedParams = new LinearLayout.LayoutParams(-1, -2);
         screen.body.addView(advanced, advancedParams);
         screen.heading(advanced, "绑定导入与诊断");
-        screen.caption(advanced, "导入和协议采集前，先恢复官方管理，再在小米运动健康中操作。设备登记和健康历史会保留。");
+        screen.caption(advanced, "导入绑定直接读取小米运动健康的本地数据库。采集连接参数时仍要先恢复官方管理，再在官方应用里重连。");
         advancedRestore = screen.outlined(advanced, "恢复官方管理", () -> changeOwnership(Change.RESTORE));
         screen.caption(advanced, "选择已配对设备");
         bonded = new LinearLayout(this);
@@ -826,6 +826,11 @@ public final class MainActivity extends AppCompatActivity {
             case "BINDING_INCOMPLETE" -> "BINDING_INCOMPLETE\n已加密保存转换结果，但尚缺实机协议证据，不能独立连接。\n型号："
                     + response.getString("model", "") + "\n产品：" + response.getString("productId", "")
                     + "\n固件：" + response.getString("firmware", "") + "\n导入时缺失：" + response.getString("missing", "");
+            case "NO_BAND_KEY" -> "本地数据库里没有手环密钥。请先在小米运动健康中完成配对。";
+            case "MI_DATABASE_MISSING" -> "没有找到小米运动健康的设备数据库。";
+            case "MI_DATABASE_UNREADABLE" -> "设备数据库无法读取，请稍后重试。";
+            case "ROOT_ACTION_FAILED", "ROOT_ACTION_TIMEOUT" -> "root 读取数据库没有完成。";
+            case "MULTIPLE_BANDS" -> "数据库里有多只手环，请选择其中一只。";
             case "USER_LOCKED" -> "请先解锁手机。";
             default -> "本机私有存储操作失败，采集窗口已关闭。已有凭据未主动删除。";
         };
@@ -896,7 +901,7 @@ public final class MainActivity extends AppCompatActivity {
         new MaterialAlertDialogBuilder(this)
                 .setTitle("使用说明")
                 .setMessage("1. 打开 KernelSU，为本应用打开超级用户权限，返回后点「检查 Root」。\n"
-                        + "2. 导入绑定：选择已配对手环，打开小米运动健康点开该设备。连接参数会同时记录。\n"
+                        + "2. 导入绑定：用 root 读取小米运动健康本地数据库里的手环密钥。\n"
                         + "3. 若提示连接参数丢失：点「采集连接参数」，在小米运动健康里再连一次手环。\n"
                         + "4. 添加到健康：暂停小米运动健康并由本应用接管。\n"
                         + "控制中心编辑里添加「手环」。下拉或点一下会拉起连接。\n\n"
@@ -915,35 +920,7 @@ public final class MainActivity extends AppCompatActivity {
             ownershipStatus.setText("请先解锁手机，再导入绑定。");
             return;
         }
-        if (!hostSupported) {
-            ownershipStatus.setText("已安装的小米运动健康版本不受支持。导入已禁用。");
-            return;
-        }
-        if (needsOfficialRestore()) {
-            new MaterialAlertDialogBuilder(this)
-                    .setTitle("先恢复官方管理")
-                    .setMessage("导入绑定需要小米运动健康可用。请先恢复官方管理，再导入。")
-                    .setNegativeButton("取消", null)
-                    .setPositiveButton("恢复", (dialog, which) -> changeOwnership(Change.RESTORE))
-                    .show();
-            return;
-        }
-        if (!hasBluetoothPermission()) {
-            requestPermissions(new String[]{Manifest.permission.BLUETOOTH_CONNECT}, BLUETOOTH_PERMISSION);
-            return;
-        }
-        try {
-            refreshBonded();
-            if (selectedAddress.isBlank()) {
-                pickBondedDevice();
-                return;
-            }
-            confirmBindingImport();
-        } catch (SecurityException denied) {
-            publishPermissionStatus(false,
-                    getSystemService(NotificationManager.class).areNotificationsEnabled());
-            requestPermissions(new String[]{Manifest.permission.BLUETOOTH_CONNECT}, BLUETOOTH_PERMISSION);
-        }
+        confirmBindingImport();
     }
 
     private void pickBondedDevice() {
@@ -1006,14 +983,54 @@ public final class MainActivity extends AppCompatActivity {
     private void confirmBindingImport() {
         new MaterialAlertDialogBuilder(this)
                 .setTitle("导入绑定？")
-                .setMessage("将开启 120 秒导入窗口。立刻打开小米运动健康并点开所选设备。连接参数会同时记录。")
+                .setMessage("用 root 读取小米运动健康本地数据库中的手环密钥。不会打开官方应用，也不会上传。")
                 .setNegativeButton("取消", null)
-                .setPositiveButton("开始导入", (dialog, which) -> {
-                    launchHostAfterOpen = true;
-                    Bundle selected = new Bundle();
-                    selected.putString("address", selectedAddress);
-                    action("openWindow", selected);
-                })
+                .setPositiveButton("读取", (dialog, which) -> importFromDatabase(selectedAddress))
+                .show();
+    }
+
+    private void importFromDatabase(String address) {
+        if (worker.isShutdown()) return;
+        ownershipStatus.setText("正在读取本地数据库…");
+        worker.execute(() -> {
+            Bundle selected = new Bundle();
+            if (address != null && !address.isBlank()) selected.putString("address", address);
+            Bundle response;
+            try {
+                response = getContentResolver().call(CredentialProvider.URI, "importFromDatabase", null, selected);
+            } catch (RuntimeException rejected) {
+                response = null;
+            }
+            Bundle shown = response;
+            main.post(() -> {
+                if (isDestroyed()) return;
+                if (shown != null && "MULTIPLE_BANDS".equals(shown.getString("status"))) {
+                    chooseDatabaseBand(shown.getStringArray("choices"));
+                    return;
+                }
+                show(shown);
+                updateControls();
+            });
+        });
+    }
+
+    private void chooseDatabaseBand(String[] choices) {
+        if (choices == null || choices.length == 0) {
+            ownershipStatus.setText("本地数据库里没有手环密钥。请先在小米运动健康中完成配对。");
+            return;
+        }
+        String[] labels = new String[choices.length];
+        String[] addresses = new String[choices.length];
+        for (int index = 0; index < choices.length; index++) {
+            String[] parts = choices[index].split("\t", 3);
+            addresses[index] = parts.length > 0 ? parts[0] : "";
+            String model = parts.length > 1 ? parts[1] : "";
+            String name = parts.length > 2 ? parts[2] : "";
+            labels[index] = BandCatalog.displayName(model, name);
+        }
+        new MaterialAlertDialogBuilder(this)
+                .setTitle("选择手环")
+                .setItems(labels, (dialog, which) -> importFromDatabase(addresses[which]))
                 .show();
     }
 

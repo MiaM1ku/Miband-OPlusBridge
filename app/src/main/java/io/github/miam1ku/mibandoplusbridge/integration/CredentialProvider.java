@@ -13,6 +13,8 @@ import io.github.miam1ku.mibandoplusbridge.HostIdentity;
 import io.github.miam1ku.mibandoplusbridge.data.AuthToken;
 import io.github.miam1ku.mibandoplusbridge.data.BindingStore;
 import io.github.miam1ku.mibandoplusbridge.data.ImportWindow;
+import io.github.miam1ku.mibandoplusbridge.data.MiFitnessDatabase;
+import io.github.miam1ku.mibandoplusbridge.data.MiFitnessDeviceRows;
 import io.github.miam1ku.mibandoplusbridge.data.ProtocolCaptureStore;
 import io.github.miam1ku.mibandoplusbridge.data.TransportObservation;
 import org.json.JSONObject;
@@ -86,6 +88,10 @@ public final class CredentialProvider extends ContentProvider {
                 case "importBinding" -> {
                     if (self) throw new SecurityException("MI_CALLER_REQUIRED");
                     yield importBinding(extras);
+                }
+                case "importFromDatabase" -> {
+                    requireSelf(self);
+                    yield importFromDatabase(extras);
                 }
                 case "openDiagnostics" -> {
                     requireSelf(self);
@@ -321,6 +327,56 @@ public final class CredentialProvider extends ContentProvider {
         boolean ready = record.optString("missing").isBlank()
                 && TransportObservation.supportsLive(observation, record.optString("model", ""));
         return result(ready ? "BINDING_SAVED" : "BINDING_INCOMPLETE");
+    }
+
+    private Bundle importFromDatabase(Bundle extras) throws Exception {
+        String address = extras == null ? "" : extras.getString("address", "");
+        MiFitnessDatabase.Snapshot snapshot;
+        try {
+            snapshot = MiFitnessDatabase.read(getContext());
+        } catch (MiFitnessDatabase.Failure failure) {
+            return result(failure.code);
+        }
+        java.util.List<MiFitnessDeviceRows.Row> rows = MiFitnessDeviceRows.select(snapshot.details, address);
+        if (rows.isEmpty()) return result("NO_BAND_KEY");
+        if (rows.size() > 1) {
+            Bundle many = result("MULTIPLE_BANDS");
+            String[] choices = new String[rows.size()];
+            for (int index = 0; index < rows.size(); index++) {
+                MiFitnessDeviceRows.Row row = rows.get(index);
+                choices[index] = row.address + "\t" + row.model + "\t" + row.name;
+            }
+            many.putStringArray("choices", choices);
+            return many;
+        }
+        MiFitnessDeviceRows.Row row = rows.get(0);
+        JSONObject record = new JSONObject();
+        record.put("address", row.address);
+        record.put("model", row.model);
+        record.put("token", row.token);
+        if (!row.did.isEmpty()) record.put("did", row.did);
+        if (!row.productId.isEmpty()) record.put("productId", row.productId);
+        if (!row.name.isEmpty()) record.put("deviceName", row.name);
+        if (!row.phoneId.isEmpty()) record.put("appDeviceId", row.phoneId);
+        if (!snapshot.userId.isEmpty()) record.put("userId", snapshot.userId);
+        if (!snapshot.region.isEmpty()) record.put("region", snapshot.region);
+        JSONObject observation = TransportObservation.read(getContext());
+        TransportObservation.applyToBinding(record, observation);
+        record.put("missing", TransportObservation.missingForLive(record, observation));
+        io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(getContext(),
+                "bridge IMPORT_DB " + io.github.miam1ku.mibandoplusbridge.data.BindingShape.describe(record));
+        store.save(record);
+        closeCapture();
+        window.close();
+        getContext().getContentResolver().notifyChange(URI, null);
+        boolean ready = record.optString("missing").isBlank()
+                && TransportObservation.supportsLive(observation, record.optString("model", ""));
+        Bundle saved = result(ready ? "BINDING_SAVED" : "BINDING_INCOMPLETE");
+        saved.putString("model", record.optString("model", ""));
+        saved.putString("productId", record.optString("productId", ""));
+        saved.putString("firmware", record.optString("firmware", ""));
+        saved.putString("missing", record.optString("missing", ""));
+        return saved;
     }
 
 
