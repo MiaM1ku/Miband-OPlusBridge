@@ -19,6 +19,49 @@ public final class TransportObservation {
         return captured | ZEN_RULE_SYNC;
     }
 
+    /**
+     * A saved capture wins. Otherwise a known Xiaomi band gets BLE or SPP defaults,
+     * so setup does not wait for another official-app reconnect.
+     */
+    public static JSONObject liveProfile(Context context, String model) {
+        JSONObject saved = read(context);
+        if (supportsLive(saved, model)) return saved;
+        JSONObject known = knownProfile(model);
+        if (known == null) return saved;
+        write(context, known);
+        return known;
+    }
+
+    static JSONObject knownProfile(String model) {
+        if (model == null || !(model.startsWith("miwear.watch.") || model.startsWith("lchz.watch."))) {
+            return null;
+        }
+        try {
+            JSONObject profile = new JSONObject()
+                    .put("model", model)
+                    .put("officialAuthConnected", true)
+                    .put("appCapability", APP_CAPABILITY)
+                    .put("authOobPresent", false)
+                    .put("authAppDeviceIdPresent", false)
+                    .put("authImplementation", "WearAuthV2");
+            if (model.contains(".m66")) {
+                profile.put("transport", "GATT");
+                return profile;
+            }
+            boolean legacy = model.startsWith("lchz.") || model.contains(".m67");
+            profile.put("transport", "SPP")
+                    .put("versionName", legacy ? "1.0.50" : "3.0.0")
+                    .put("queueClass", legacy
+                            ? "com.xiaomi.wearable.transport.queue.SppTaskQueueV1"
+                            : "com.xiaomi.wearable.transport.queue.SppTaskQueueV2")
+                    .put("rfcommUuid", SERVICE)
+                    .put("rfcommSecure", true);
+            return profile;
+        } catch (org.json.JSONException invalid) {
+            return null;
+        }
+    }
+
     public static JSONObject read(Context context) {
         String snapshot = LocalPrefs.open(context, NAME).getString(KEY, "");
         if (snapshot.isBlank()) return new JSONObject();

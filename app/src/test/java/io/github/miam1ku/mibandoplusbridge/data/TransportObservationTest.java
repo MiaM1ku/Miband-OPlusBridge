@@ -47,6 +47,16 @@ public final class TransportObservationTest {
                 "miwear.watch.m66"));
     }
 
+    @Test public void knownBandUsesDefaultsUntilACaptureExists() throws Exception {
+        JSONObject band11 = TransportObservation.knownProfile("miwear.watch.q66cn");
+        assertTrue(TransportObservation.supportsLive(band11, "miwear.watch.q66cn"));
+        assertEquals("2", TransportObservation.framingVersion(band11));
+        JSONObject band8 = TransportObservation.knownProfile("miwear.watch.m66");
+        assertEquals("GATT", band8.getString("transport"));
+        assertTrue(TransportObservation.supportsLive(band8, "miwear.watch.m66"));
+        assertEquals(null, TransportObservation.knownProfile("other.model"));
+    }
+
     @Test public void emptyMismatchedOrOobProfileBlocksLiveSession() throws Exception {
         JSONObject band11 = verified("miwear.watch.q66cn", "3.2.15");
         assertFalse(TransportObservation.supportsLive(new JSONObject(), "miwear.watch.q66cn"));

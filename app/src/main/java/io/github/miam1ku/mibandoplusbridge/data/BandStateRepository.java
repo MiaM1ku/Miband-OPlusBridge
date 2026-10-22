@@ -45,7 +45,7 @@ public final class BandStateRepository {
             if (binding == null) throw new IllegalStateException("UNPROVISIONED");
             String model = binding.optString("model", "");
             if (model.isBlank()
-                    || !TransportObservation.supportsLive(TransportObservation.read(context), model)) {
+                    || !TransportObservation.supportsLive(TransportObservation.liveProfile(context, model), model)) {
                 throw new IllegalStateException("OBSERVED_PROFILE_REQUIRED");
             }
             normalizeStoredSecrets(binding);

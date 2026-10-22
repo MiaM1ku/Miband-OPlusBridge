@@ -6,6 +6,7 @@ import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
@@ -57,7 +58,10 @@ public final class MiFitnessDatabase {
         SQLiteDatabase database = null;
         SQLiteDatabase profile = null;
         try {
-            database = SQLiteDatabase.openDatabase(device.getAbsolutePath(), null, SQLiteDatabase.OPEN_READONLY);
+            // The copy is private. Read-write applies the WAL. The live shm is not copied:
+            // it carries the official app's lock and the open would wait on that process.
+            database = SQLiteDatabase.openDatabase(device.getAbsolutePath(), null, SQLiteDatabase.OPEN_READWRITE);
+            database.rawQuery("PRAGMA busy_timeout=2000", null).close();
             ArrayList<MiFitnessDeviceRows.Detail> details = new ArrayList<>();
             try (Cursor cursor = database.rawQuery(
                     "SELECT model, name, productId, did, detail FROM device", null)) {
@@ -71,7 +75,8 @@ public final class MiFitnessDatabase {
             String region = "";
             File users = new File(dir, "fitness_user");
             if (users.isFile()) {
-                profile = SQLiteDatabase.openDatabase(users.getAbsolutePath(), null, SQLiteDatabase.OPEN_READONLY);
+                profile = SQLiteDatabase.openDatabase(users.getAbsolutePath(), null, SQLiteDatabase.OPEN_READWRITE);
+                profile.rawQuery("PRAGMA busy_timeout=2000", null).close();
                 try (Cursor cursor = profile.rawQuery("SELECT region FROM user_info_profile LIMIT 1", null)) {
                     if (cursor.moveToFirst()) region = cursor.getString(0) == null ? "" : cursor.getString(0).trim();
                 }
@@ -87,22 +92,11 @@ public final class MiFitnessDatabase {
     }
 
     private static String copy(File dir) throws Failure {
-        String dest = dir.getAbsolutePath();
-        String command = "set -eu; "
-                + "test -f " + quote(SOURCE + "/device_db") + "; "
-                + "rm -f " + quote(dest + "/device_db") + " " + quote(dest + "/device_db-wal")
-                + " " + quote(dest + "/device_db-shm") + " " + quote(dest + "/fitness_user")
-                + " " + quote(dest + "/fitness_user-wal") + " " + quote(dest + "/fitness_user-shm") + "; "
-                + "cp -a " + quote(SOURCE + "/device_db") + " " + quote(dest + "/device_db") + "; "
-                + optional(SOURCE + "/device_db-wal", dest + "/device_db-wal")
-                + optional(SOURCE + "/device_db-shm", dest + "/device_db-shm")
-                + optional(SOURCE + "/fitness_user", dest + "/fitness_user")
-                + optional(SOURCE + "/fitness_user-wal", dest + "/fitness_user-wal")
-                + optional(SOURCE + "/fitness_user-shm", dest + "/fitness_user-shm")
-                + "owner=$(stat -c %u " + quote(dest) + "); group=$(stat -c %g " + quote(dest) + "); "
-                + "chown \"$owner:$group\" " + quote(dest) + "/*; chmod 600 " + quote(dest) + "/*; "
-                + "ls -1 " + quote(SOURCE) + " | grep -E '^[0-9]{5,}$' | head -n 1";
-        String text = execute(command);
+        File script = new File(dir, "copy.sh");
+        // KernelSU runs su -c through another shell. A quoted command is split and exits 1.
+        // The script path has no spaces, so su receives one plain argument.
+        writeScript(script, dir.getAbsolutePath());
+        String text = execute(script.getAbsolutePath());
         for (String line : text.split("\\R")) {
             String trimmed = line.trim();
             if (trimmed.matches("[0-9]{5,}")) return trimmed;
@@ -110,18 +104,35 @@ public final class MiFitnessDatabase {
         return "";
     }
 
-    private static String optional(String source, String dest) {
-        return "if [ -f " + quote(source) + " ]; then cp -a " + quote(source) + " " + quote(dest) + "; fi; ";
+    private static void writeScript(File script, String dest) throws Failure {
+        if (!dest.matches("[A-Za-z0-9_./-]+")) throw new Failure("MI_DATABASE_UNREADABLE");
+        String source = SOURCE;
+        String body = "set -eu\n"
+                + "test -f " + source + "/device_db\n"
+                + "rm -f " + dest + "/device_db " + dest + "/device_db-wal " + dest + "/device_db-shm "
+                + dest + "/fitness_user " + dest + "/fitness_user-wal " + dest + "/fitness_user-shm\n"
+                + "cp -a " + source + "/device_db " + dest + "/device_db\n"
+                + "if [ -f " + source + "/device_db-wal ]; then cp -a " + source + "/device_db-wal " + dest + "/device_db-wal; fi\n"
+                + "if [ -f " + source + "/fitness_user ]; then cp -a " + source + "/fitness_user " + dest + "/fitness_user; fi\n"
+                + "if [ -f " + source + "/fitness_user-wal ]; then cp -a " + source + "/fitness_user-wal " + dest + "/fitness_user-wal; fi\n"
+                + "owner=$(stat -c %u " + dest + ")\n"
+                + "group=$(stat -c %g " + dest + ")\n"
+                + "chown \"$owner:$group\" " + dest + "/*\n"
+                + "chmod 600 " + dest + "/*\n"
+                + "ls -1 " + source + " | grep -E '^[0-9]{5,}$' | head -n 1\n";
+        try (FileOutputStream out = new FileOutputStream(script)) {
+            out.write(body.getBytes(StandardCharsets.UTF_8));
+        } catch (IOException failure) {
+            throw new Failure("MI_DATABASE_UNREADABLE");
+        }
     }
 
-    private static String quote(String value) {
-        return "'" + value.replace("'", "'\\''") + "'";
-    }
-
-    private static String execute(String command) throws Failure {
+    private static String execute(String scriptPath) throws Failure {
+        if (!scriptPath.matches("[A-Za-z0-9_./-]+")) throw new Failure("MI_DATABASE_UNREADABLE");
         Process process = null;
         try {
-            process = new ProcessBuilder("su", "-c", "/system/bin/sh -c " + quote(command))
+            // -M leaves the app mount namespace, where other apps' /data/data is hidden.
+            process = new ProcessBuilder("su", "-M", "-c", "sh " + scriptPath)
                     .redirectErrorStream(true).start();
             if (!process.waitFor(20, TimeUnit.SECONDS)) {
                 process.destroyForcibly();

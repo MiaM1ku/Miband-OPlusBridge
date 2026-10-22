@@ -25,7 +25,6 @@ public final class SetupProgress {
     public Step current() {
         if (!hasRoot) return Step.ROOT;
         if (!hasBinding) return Step.IMPORT;
-        if (!hasProfile) return Step.PROFILE;
         if (!registered || !nativeOwned) return Step.ADD;
         return Step.DONE;
     }
@@ -48,7 +47,7 @@ public final class SetupProgress {
         return switch (current()) {
             case ROOT -> "打开 KernelSU，为本应用打开超级用户权限，返回后点「检查 Root」。";
             case IMPORT -> "用 root 读取小米运动健康本地数据库里的手环密钥。不必打开官方应用。";
-            case PROFILE -> "打开小米运动健康并点开这只手环，让它重新连上。120 秒内记录 SPP 连接参数。";
+            case PROFILE -> "绑定已保存。点「添加到健康」后即可连接。";
             case ADD -> "将暂停小米运动健康并由本应用接管。手环不必在线。";
             case DONE -> "";
         };

@@ -165,7 +165,8 @@ public final class CredentialProvider extends ContentProvider {
                 case "status" -> {
                     requireSelf(self);
                     JSONObject saved = store.read();
-                    JSONObject observation = TransportObservation.read(getContext());
+                    JSONObject observation = TransportObservation.liveProfile(getContext(),
+                            saved == null ? "" : saved.optString("model", ""));
                     boolean ready = saved != null && TransportObservation.supportsLive(
                             observation, saved.optString("model", ""));
                     Bundle status = result(open ? "IMPORT_WINDOW_OPEN"
@@ -190,12 +191,17 @@ public final class CredentialProvider extends ContentProvider {
         } catch (SecurityException | IllegalArgumentException rejected) {
             throw rejected;
         } catch (Exception unavailable) {
+            String kind = unavailable.getClass().getSimpleName();
+            io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(getContext(),
+                    "bridge STORAGE_FAIL " + kind);
             window.close();
             diagnosticWindow.close();
             pendingToken = "";
             if (captureOpen) captureError = "CAPTURE_STORAGE_FAILED";
             closeCapture();
-            return result("CREDENTIAL_STORAGE_FAILED");
+            Bundle failed = result("CREDENTIAL_STORAGE_FAILED");
+            failed.putString("detail", kind);
+            return failed;
         }
     }
 
@@ -335,10 +341,15 @@ public final class CredentialProvider extends ContentProvider {
         try {
             snapshot = MiFitnessDatabase.read(getContext());
         } catch (MiFitnessDatabase.Failure failure) {
+            io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(getContext(),
+                    "bridge IMPORT_DB_FAIL " + failure.code);
             return result(failure.code);
         }
         java.util.List<MiFitnessDeviceRows.Row> rows = MiFitnessDeviceRows.select(snapshot.details, address);
-        if (rows.isEmpty()) return result("NO_BAND_KEY");
+        if (rows.isEmpty()) {
+            io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(getContext(), "bridge IMPORT_DB_FAIL NO_BAND_KEY");
+            return result("NO_BAND_KEY");
+        }
         if (rows.size() > 1) {
             Bundle many = result("MULTIPLE_BANDS");
             String[] choices = new String[rows.size()];
@@ -360,7 +371,7 @@ public final class CredentialProvider extends ContentProvider {
         if (!row.phoneId.isEmpty()) record.put("appDeviceId", row.phoneId);
         if (!snapshot.userId.isEmpty()) record.put("userId", snapshot.userId);
         if (!snapshot.region.isEmpty()) record.put("region", snapshot.region);
-        JSONObject observation = TransportObservation.read(getContext());
+        JSONObject observation = TransportObservation.liveProfile(getContext(), row.model);
         TransportObservation.applyToBinding(record, observation);
         record.put("missing", TransportObservation.missingForLive(record, observation));
         io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(getContext(),

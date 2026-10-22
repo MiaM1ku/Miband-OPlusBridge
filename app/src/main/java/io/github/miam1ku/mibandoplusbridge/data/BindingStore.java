@@ -4,6 +4,7 @@ package io.github.miam1ku.mibandoplusbridge.data;
 import android.content.Context;
 import android.os.UserManager;
 import android.security.keystore.KeyGenParameterSpec;
+import android.security.keystore.KeyPermanentlyInvalidatedException;
 import android.security.keystore.KeyProperties;
 import android.util.AtomicFile;
 import java.io.File;
@@ -116,8 +117,21 @@ public final class BindingStore {
     private SecretKey key() throws Exception {
         KeyStore store = KeyStore.getInstance("AndroidKeyStore");
         store.load(null);
-        if (store.containsAlias(ALIAS)) return (SecretKey) store.getKey(ALIAS, null);
-        // Replacing the key for an existing ciphertext is a step the caller asks for.
+        if (store.containsAlias(ALIAS)) {
+            try {
+                SecretKey existing = (SecretKey) store.getKey(ALIAS, null);
+                Cipher probe = Cipher.getInstance("AES/GCM/NoPadding");
+                probe.init(Cipher.ENCRYPT_MODE, existing);
+                return existing;
+            } catch (KeyPermanentlyInvalidatedException invalid) {
+                // A lock-screen change invalidates the key. Ciphertext under it cannot be read.
+                store.deleteEntry(ALIAS);
+                if (file.getBaseFile().exists() && !file.getBaseFile().delete()) {
+                    throw new IllegalStateException("BINDING_KEY_UNAVAILABLE");
+                }
+                SessionLog.line(context, "bridge BINDING_KEY_RESET");
+            }
+        }
         if (file.getBaseFile().exists()) throw new IllegalStateException("BINDING_KEY_UNAVAILABLE");
         KeyGenerator generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore");
         generator.init(new KeyGenParameterSpec.Builder(ALIAS,

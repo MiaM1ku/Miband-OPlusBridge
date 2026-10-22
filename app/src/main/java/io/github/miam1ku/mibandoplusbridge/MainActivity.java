@@ -59,6 +59,7 @@ public final class MainActivity extends AppCompatActivity {
     private LinearLayout setupCard;
     private LinearLayout healthAccessCard;
     private String selectedAddress = "";
+    private String databaseImportNote = "";
     private TextView status;
     private TextView ownershipStatus;
     private Button open;
@@ -128,6 +129,7 @@ public final class MainActivity extends AppCompatActivity {
         checklistRoot = screen.caption(setupCard, "");
         checklistImport = screen.caption(setupCard, "");
         checklistProfile = screen.caption(setupCard, "");
+        checklistProfile.setVisibility(View.GONE);
         checklistAdd = screen.caption(setupCard, "");
         primaryHint = screen.caption(setupCard, "");
         screen.caption(setupCard, SETUP_PREREQ);
@@ -190,7 +192,7 @@ public final class MainActivity extends AppCompatActivity {
         LinearLayout.LayoutParams advancedParams = new LinearLayout.LayoutParams(-1, -2);
         screen.body.addView(advanced, advancedParams);
         screen.heading(advanced, "绑定导入与诊断");
-        screen.caption(advanced, "导入绑定直接读取小米运动健康的本地数据库。采集连接参数时仍要先恢复官方管理，再在官方应用里重连。");
+        screen.caption(advanced, "导入绑定直接读取小米运动健康的本地数据库。手环 8 及以后使用已确认的蓝牙参数，导入后即可添加到健康。");
         advancedRestore = screen.outlined(advanced, "恢复官方管理", () -> changeOwnership(Change.RESTORE));
         screen.caption(advanced, "选择已配对设备");
         bonded = new LinearLayout(this);
@@ -405,10 +407,10 @@ public final class MainActivity extends AppCompatActivity {
                         ? "设备登记已保留。连接恢复未完成，请重试或恢复官方管理。"
                         : "设备未登记，官方恢复未完成，请重试恢复官方管理。";
             }
-            String visible = message;
+            String idle = message;
             main.post(() -> {
                 if (isDestroyed()) return;
-                ownershipStatus.setText(visible);
+                ownershipStatus.setText(databaseImportNote.isEmpty() ? idle : databaseImportNote);
                 updateControls();
             });
         });
@@ -597,7 +599,7 @@ public final class MainActivity extends AppCompatActivity {
             if (binding != null) model = binding.optString("model", "");
         } catch (Exception ignored) { }
         boolean hasProfile = hasBinding && TransportObservation.supportsLive(
-                TransportObservation.read(this), model);
+                TransportObservation.liveProfile(this, model), model);
         boolean nativeOwned = false;
         try {
             nativeOwned = new OwnershipController(this).nativeReady();
@@ -823,16 +825,17 @@ public final class MainActivity extends AppCompatActivity {
             case "BINDING_SAVED" -> "绑定已保存。型号：" + response.getString("model", "")
                     + "\n产品：" + response.getString("productId", "")
                     + "\n固件：" + (response.getString("firmware", "").isBlank() ? "连接后读取" : response.getString("firmware", ""));
-            case "BINDING_INCOMPLETE" -> "BINDING_INCOMPLETE\n已加密保存转换结果，但尚缺实机协议证据，不能独立连接。\n型号："
+            case "BINDING_INCOMPLETE" -> "绑定已保存。点「添加到健康」后即可连接。\n型号："
                     + response.getString("model", "") + "\n产品：" + response.getString("productId", "")
-                    + "\n固件：" + response.getString("firmware", "") + "\n导入时缺失：" + response.getString("missing", "");
+                    + "\n固件：" + (response.getString("firmware", "").isBlank() ? "连接后读取" : response.getString("firmware", ""));
             case "NO_BAND_KEY" -> "本地数据库里没有手环密钥。请先在小米运动健康中完成配对。";
             case "MI_DATABASE_MISSING" -> "没有找到小米运动健康的设备数据库。";
             case "MI_DATABASE_UNREADABLE" -> "设备数据库无法读取，请稍后重试。";
             case "ROOT_ACTION_FAILED", "ROOT_ACTION_TIMEOUT" -> "root 读取数据库没有完成。";
             case "MULTIPLE_BANDS" -> "数据库里有多只手环，请选择其中一只。";
             case "USER_LOCKED" -> "请先解锁手机。";
-            default -> "本机私有存储操作失败，采集窗口已关闭。已有凭据未主动删除。";
+            case "CREDENTIAL_STORAGE_FAILED" -> "绑定这次没有保存。请解锁手机后再点一次「导入绑定」。";
+            default -> "操作没有完成。请再试一次。";
         };
         String observation = response.getString("transportObservation", "");
         if (!observation.isBlank()) text += "\n连接参数（仅观察）：\n" + observation;
@@ -902,8 +905,7 @@ public final class MainActivity extends AppCompatActivity {
                 .setTitle("使用说明")
                 .setMessage("1. 打开 KernelSU，为本应用打开超级用户权限，返回后点「检查 Root」。\n"
                         + "2. 导入绑定：用 root 读取小米运动健康本地数据库里的手环密钥。\n"
-                        + "3. 若提示连接参数丢失：点「采集连接参数」，在小米运动健康里再连一次手环。\n"
-                        + "4. 添加到健康：暂停小米运动健康并由本应用接管。\n"
+                        + "3. 添加到健康：暂停小米运动健康并由本应用接管。\n"
                         + "控制中心编辑里添加「手环」。下拉或点一下会拉起连接。\n\n"
                         + SETUP_PREREQ)
                 .setPositiveButton("关闭", null)
@@ -991,6 +993,7 @@ public final class MainActivity extends AppCompatActivity {
 
     private void importFromDatabase(String address) {
         if (worker.isShutdown()) return;
+        databaseImportNote = "";
         ownershipStatus.setText("正在读取本地数据库…");
         worker.execute(() -> {
             Bundle selected = new Bundle();
@@ -1009,6 +1012,10 @@ public final class MainActivity extends AppCompatActivity {
                     return;
                 }
                 show(shown);
+                if (ownershipStatus != null && status != null) {
+                    databaseImportNote = status.getText().toString();
+                    ownershipStatus.setText(databaseImportNote);
+                }
                 updateControls();
             });
         });

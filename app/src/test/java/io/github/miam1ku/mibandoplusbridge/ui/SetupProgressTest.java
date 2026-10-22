@@ -21,18 +21,18 @@ public final class SetupProgressTest {
         assertEquals("导入绑定", progress.primaryLabel());
     }
 
-    @Test public void importedWithoutProfileIsCapture() {
+    @Test public void importedWithoutProfileGoesToAdd() {
         SetupProgress progress = new SetupProgress(true, true, false, false, false, false);
-        assertEquals(SetupProgress.Step.PROFILE, progress.current());
+        assertEquals(SetupProgress.Step.ADD, progress.current());
         assertTrue(progress.showChecklist());
-        assertEquals("采集连接参数", progress.primaryLabel());
+        assertEquals("添加到健康", progress.primaryLabel());
     }
 
-    @Test public void registeredWithoutProfileIsCapture() {
+    @Test public void registeredWithoutProfileIsDone() {
         SetupProgress progress = new SetupProgress(true, true, false, true, true, true);
-        assertEquals(SetupProgress.Step.PROFILE, progress.current());
-        assertTrue(progress.showChecklist());
-        assertEquals("采集连接参数", progress.primaryLabel());
+        assertEquals(SetupProgress.Step.DONE, progress.current());
+        assertFalse(progress.showChecklist());
+        assertEquals("立即同步", progress.primaryLabel());
     }
 
     @Test public void importedUnregisteredIsAdd() {

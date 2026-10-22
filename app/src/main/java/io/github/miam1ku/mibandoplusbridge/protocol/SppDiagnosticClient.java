@@ -367,7 +367,7 @@ public final class SppDiagnosticClient implements AutoCloseable {
         if (!new OwnershipController(context).nativeReady()) throw new Failure("NATIVE_OWNERSHIP_REQUIRED");
         JSONObject binding = new BindingStore(context).read();
         if (binding == null) throw new Failure("UNPROVISIONED");
-        JSONObject observation = TransportObservation.read(context);
+        JSONObject observation = TransportObservation.liveProfile(context, binding.optString("model"));
         if (!TransportObservation.supportsLive(observation, binding.optString("model"))) {
             throw new Failure("OBSERVED_PROFILE_REQUIRED");
         }
