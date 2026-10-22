@@ -62,7 +62,7 @@ public final class LabActivity extends AppCompatActivity {
 
         LinearLayout notify = screen.card();
         screen.overline(notify, "消息通知");
-        screen.caption(notify, "经当前 SPP 会话发一条测试通知到这只手环。不经过系统通知监听。");
+        screen.caption(notify, "经当前 SPP 会话发一条测试通知到这只手环。");
         screen.setLastChildMargin(notify, 0);
         screen.filled("发送测试通知", () -> send("测试通知", BandNotificationCommand.post(
                 getPackageName(), "桥接测试", "lab-notify", 1,
@@ -80,7 +80,7 @@ public final class LabActivity extends AppCompatActivity {
 
         LinearLayout find = screen.card();
         screen.overline(find, "查找手机");
-        screen.caption(find, "调用 OPPO 健康自己的查找手机响铃，不向手环发命令。");
+        screen.caption(find, "调用 OPPO 健康自己的查找手机响铃。");
         screen.setLastChildMargin(find, 0);
         screen.filled("测试查找手机", () -> FindPhone.start(this));
         screen.outlined("停止查找", () -> FindPhone.stop(this));
@@ -94,14 +94,14 @@ public final class LabActivity extends AppCompatActivity {
 
         LinearLayout dnd = screen.card();
         screen.overline(dnd, "免打扰");
-        screen.caption(dnd, "先发同步开关，再发当前手机免打扰状态。两包都发，不看型号。");
+        screen.caption(dnd, "先发同步开关，再发当前手机免打扰状态。两包都发。");
         screen.setLastChildMargin(dnd, 0);
         screen.filled("同步免打扰", () -> sendAll("免打扰",
                 BandDndCommand.mirror(PhoneDnd.currentFilter(this))));
 
         LinearLayout alarm = screen.card();
         screen.overline(alarm, "闹钟");
-        screen.caption(alarm, "只测响铃、关闭和稍后响，不写入手环自己的闹钟列表。");
+        screen.caption(alarm, "测试响铃、关闭和稍后响。");
         screen.setLastChildMargin(alarm, 0);
         screen.filled("测试闹钟响铃", () -> send("闹钟响铃",
                 BandAlarmCommand.operation(0, 1, (int) (System.currentTimeMillis() / 1000L), "测试闹钟"), true));

@@ -44,7 +44,7 @@ public final class HostVersionNotice {
 
     public static String message(List<Installed> installed) {
         StringBuilder text = new StringBuilder(
-                "这些应用和已验证版本不一致，通知、设备卡片或健康同步可能不完整。不强制更换，可以继续使用。\n");
+                "这些应用和已验证版本不一致，可以继续使用。通知、设备卡片和健康同步以已验证版本的实机结果为准。\n");
         for (Expectation expect : EXPECTATIONS) {
             Installed app = find(installed, expect.packageName());
             if (app == null || !app.present()

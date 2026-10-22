@@ -149,7 +149,7 @@ public final class MainActivity extends AppCompatActivity {
         screen.navRow(shortcuts, "协议测试", () -> startActivity(new Intent(this, LabActivity.class)));
         screen.navRow(shortcuts, "天气同步", () -> startActivity(new Intent(this, WeatherActivity.class)));
         screen.navRow(shortcuts, "发送调试日志到 QQ", this::shareDebugLog);
-        screen.caption(shortcuts, "控制中心编辑里添加「手环」。下拉或点一下会拉起连接，不会断开。");
+        screen.caption(shortcuts, "控制中心编辑里添加「手环」。下拉或点一下会拉起连接。");
         screen.setLastChildMargin(shortcuts, 0);
         LinearLayout sleepCard = screen.card();
         MaterialSwitch sleepPause = new MaterialSwitch(this);
@@ -161,7 +161,7 @@ public final class MainActivity extends AppCompatActivity {
         LinearLayout.LayoutParams sleepParams = new LinearLayout.LayoutParams(-1, -2);
         sleepParams.bottomMargin = BridgeScreen.dp(this, 8);
         sleepCard.addView(sleepPause, sleepParams);
-        screen.caption(sleepCard, "手环报入睡后暂停正在播放的音乐，醒来不自动继续。刚打开时如果已经在睡，不会马上暂停。这只手环若不回报实时入睡，就等睡眠记录同步后再暂停，大约几分钟。");
+        screen.caption(sleepCard, "手环报入睡后暂停正在播放的音乐，醒来后保持暂停。开关打开时若已经在睡，等下一次入睡再暂停。只在睡眠记录里报入睡的手环，等记录同步后再暂停，大约几分钟。");
         screen.setLastChildMargin(sleepCard, 0);
         final boolean[] writingSleepPause = {false};
         sleepPause.setChecked(SleepMusic.enabled(this));
@@ -224,7 +224,7 @@ public final class MainActivity extends AppCompatActivity {
             screen.outlined(advanced, "采集连接参数（120 秒）", () -> action("openDiagnostics", null));
             screen.outlined(advanced, "采集协议消息（120 秒）", () -> new MaterialAlertDialogBuilder(this)
                     .setTitle("采集所选手环的协议消息")
-                    .setMessage("可能包含通知和健康数据。原始消息只保存在本机私有目录，不输出日志、不上传。仅用于本次协议分析。")
+                    .setMessage("可能包含通知和健康数据。原始消息保存在本机私有目录，用于本次协议分析。")
                     .setNegativeButton("取消", null)
                     .setPositiveButton("开始采集", (dialog, which) -> action("openCapture", null))
                     .show());
@@ -232,7 +232,7 @@ public final class MainActivity extends AppCompatActivity {
             screen.outlined(advanced, "协议测试", () -> startActivity(new Intent(this, LabActivity.class)));
         }
         status = screen.bodyText(advanced, "正在检查小米运动健康是否可用…");
-        screen.caption(advanced, "只读取所选设备的绑定信息。信息在本机加密保存，不上传、不写入设备卡片。蓝牙名称不能证明型号。");
+        screen.caption(advanced, "读取所选设备的绑定信息，在本机加密保存。型号以绑定里的设备信息为准。");
         getContentResolver().registerContentObserver(CredentialProvider.URI, false, observer);
         getContentResolver().registerContentObserver(DeviceCardProvider.URI, false, deviceObserver);
         getContentResolver().registerContentObserver(HealthQueueProvider.URI, false, deviceObserver);
@@ -899,7 +899,7 @@ public final class MainActivity extends AppCompatActivity {
                         + "2. 导入绑定：选择已配对手环，打开小米运动健康点开该设备。连接参数会同时记录。\n"
                         + "3. 若提示连接参数丢失：点「采集连接参数」，在小米运动健康里再连一次手环。\n"
                         + "4. 添加到健康：暂停小米运动健康并由本应用接管。\n"
-                        + "控制中心编辑里添加「手环」。下拉或点一下会拉起连接，不会断开。\n\n"
+                        + "控制中心编辑里添加「手环」。下拉或点一下会拉起连接。\n\n"
                         + SETUP_PREREQ)
                 .setPositiveButton("关闭", null)
                 .show();

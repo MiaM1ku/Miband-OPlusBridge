@@ -28,7 +28,7 @@ public final class DiagnosticActivity extends AppCompatActivity {
         super.onCreate(state);
         BridgeScreen screen = BridgeScreen.attach(this, "连接诊断", true);
         LinearLayout card = screen.card();
-        screen.caption(card, "先结束官方高级操作并暂停小米运动健康。禁止在固件升级中测试。仅鉴权、核对型号和读取电量；不读取历史、不修改设置。30 秒截止，完成后自动断开。");
+        screen.caption(card, "先结束官方高级操作并暂停小米运动健康，等固件升级结束后再测。这一步做鉴权、核对型号和读取电量，30 秒后自动断开。");
         Button permission = screen.outlined(card, "授予附近设备权限",
                 () -> requestPermissions(new String[]{Manifest.permission.BLUETOOTH_CONNECT}, 1));
         permission.setEnabled(true);
