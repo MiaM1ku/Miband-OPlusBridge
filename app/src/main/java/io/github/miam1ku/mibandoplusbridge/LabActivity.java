@@ -40,82 +40,64 @@ public final class LabActivity extends AppCompatActivity {
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         screen = BridgeScreen.attach(this, "协议测试", true);
-        LinearLayout device = screen.card();
-        screen.overline(device, "设备信息");
-        info = screen.bodyText(device, "正在读取…");
-        screen.setLastChildMargin(device, 0);
-        screen.outlined("刷新设备信息", this::refresh);
-
-        LinearLayout live = screen.card();
-        screen.overline(live, "会话");
+        LinearLayout live = screen.section("会话与最近结果");
         session = screen.bodyText(live, "正在检查连接会话…");
-        screen.setLastChildMargin(live, 0);
-        screen.outlined("立即同步", () -> {
+        result = screen.caption(live, "选择下方任一测试开始。");
+        screen.filled(live, "立即同步", () -> {
             try {
                 BandLiveService.start(this);
-                setResultText("已请求同步。等手环连上后再发通知或来电。");
+                setResultText("已请求同步，手环连上后就可以发通知和来电。");
             } catch (RuntimeException failure) {
-                setResultText("无法启动会话：" + failure.getClass().getSimpleName());
+                setResultText("会话启动中断：" + failure.getClass().getSimpleName() + "。回首页点「立即同步」再试一次。");
             }
             refresh();
         });
 
-        LinearLayout notify = screen.card();
-        screen.overline(notify, "消息通知");
-        screen.caption(notify, "经当前 SPP 会话发一条测试通知到这只手环。");
-        screen.setLastChildMargin(notify, 0);
-        screen.filled("发送测试通知", () -> send("测试通知", BandNotificationCommand.post(
+        LinearLayout device = screen.section("设备信息");
+        info = screen.bodyText(device, "正在读取…");
+        screen.outlined(device, "刷新设备信息", this::refresh);
+
+        LinearLayout notify = screen.section("消息通知");
+        screen.caption(notify, "经当前会话发一条测试通知到这只手环。");
+        screen.filled(notify, "发送测试通知", () -> send("测试通知", BandNotificationCommand.post(
                 getPackageName(), "桥接测试", "lab-notify", 1,
                 "测试通知", "这是一条发往手环的测试消息。", Instant.now(), ZoneId.systemDefault()), false));
-        screen.outlined("撤回测试通知", () -> send("撤回通知",
+        screen.outlined(notify, "撤回测试通知", () -> send("撤回通知",
                 BandNotificationCommand.dismiss(getPackageName(), "lab-notify", 1), false));
 
-        LinearLayout call = screen.card();
-        screen.overline(call, "来电");
-        screen.caption(call, "手环应显示来电界面。点结束来电可关掉。");
-        screen.setLastChildMargin(call, 0);
-        screen.filled("发送测试来电", () -> send("测试来电",
+        LinearLayout call = screen.section("来电");
+        screen.caption(call, "手环会显示来电界面，点「结束测试来电」即可关掉。");
+        screen.filled(call, "发送测试来电", () -> send("测试来电",
                 BandNotificationCommand.incomingCall("测试来电", Instant.now(), ZoneId.systemDefault()), false));
-        screen.outlined("结束测试来电", () -> send("来电结束", BandNotificationCommand.endCall(), false));
+        screen.outlined(call, "结束测试来电", () -> send("来电结束", BandNotificationCommand.endCall(), false));
 
-        LinearLayout find = screen.card();
-        screen.overline(find, "查找手机");
+        LinearLayout find = screen.section("查找手机");
         screen.caption(find, "调用 OPPO 健康自己的查找手机响铃。");
-        screen.setLastChildMargin(find, 0);
-        screen.filled("测试查找手机", () -> FindPhone.start(this));
-        screen.outlined("停止查找", () -> FindPhone.stop(this));
+        screen.filled(find, "测试查找手机", () -> FindPhone.start(this));
+        screen.outlined(find, "停止查找", () -> FindPhone.stop(this));
 
-        LinearLayout music = screen.card();
-        screen.overline(music, "音乐");
-        screen.caption(music, "把手环上的播放信息刷成一条测试曲目。真正播放时会自动同步，手环按键会控制手机。");
-        screen.setLastChildMargin(music, 0);
-        screen.filled("发送测试音乐", () -> send("测试音乐", BandMusicCommand.playback(
+        LinearLayout music = screen.section("音乐");
+        screen.caption(music, "把手环上的播放信息刷成一条测试曲目。实际播放时自动同步，手环按键控制手机。");
+        screen.filled(music, "发送测试音乐", () -> send("测试音乐", BandMusicCommand.playback(
                 50, "测试音乐", "桥接", 12, 180, true), true));
 
-        LinearLayout dnd = screen.card();
-        screen.overline(dnd, "免打扰");
-        screen.caption(dnd, "先发同步开关，再发当前手机免打扰状态。两包都发。");
-        screen.setLastChildMargin(dnd, 0);
-        screen.filled("同步免打扰", () -> sendAll("免打扰",
+        LinearLayout dnd = screen.section("免打扰");
+        screen.caption(dnd, "依次发送同步开关和手机当前的免打扰状态，共两包。");
+        screen.filled(dnd, "同步免打扰", () -> sendAll("免打扰",
                 BandDndCommand.mirror(PhoneDnd.currentFilter(this))));
 
-        LinearLayout alarm = screen.card();
-        screen.overline(alarm, "闹钟");
+        LinearLayout alarm = screen.section("闹钟");
         screen.caption(alarm, "测试响铃、关闭和稍后响。");
-        screen.setLastChildMargin(alarm, 0);
-        screen.filled("测试闹钟响铃", () -> send("闹钟响铃",
+        screen.filled(alarm, "测试闹钟响铃", () -> send("闹钟响铃",
                 BandAlarmCommand.operation(0, 1, (int) (System.currentTimeMillis() / 1000L), "测试闹钟"), true));
-        screen.outlined("测试关闭闹钟", () -> send("关闭闹钟",
+        screen.outlined(alarm, "测试关闭闹钟", () -> send("关闭闹钟",
                 BandAlarmCommand.operation(1, 1, -1, ""), true));
-        screen.outlined("测试稍后响", () -> send("稍后响",
+        screen.outlined(alarm, "测试稍后响", () -> send("稍后响",
                 BandAlarmCommand.operation(2, 1, (int) (System.currentTimeMillis() / 1000L), "测试闹钟"), true));
 
-        LinearLayout extra = screen.card();
-        screen.overline(extra, "其他");
-        screen.setLastChildMargin(extra, 0);
+        LinearLayout extra = screen.section("其他");
         screen.navRow(extra, "独立鉴权与电量", () -> startActivity(new Intent(this, DiagnosticActivity.class)));
         screen.navRow(extra, "检查更新", this::checkUpdate);
-        result = screen.bodyText("等待操作。");
         refresh();
     }
 
@@ -133,32 +115,32 @@ public final class LabActivity extends AppCompatActivity {
         info.setText(deviceText(state, registered, connected, battery));
         session.setText(ready
                 ? "会话就绪，可以发通知、来电和音乐。"
-                : (connected ? "已连接，会话尚未就绪。点立即同步。" : "未连接。点立即同步后再测。"));
+                : (connected ? "已连接，会话准备中，点「立即同步」。" : "等待连接，点「立即同步」后开始测试。"));
     }
 
     private static String deviceText(LocalPrefs state, boolean registered, boolean connected, int battery) {
-        if (!registered) return "未登记手环。请先在首页导入并添加到健康。";
+        if (!registered) return "回首页导入绑定并添加到健康，这里会显示设备信息。";
         StringBuilder text = new StringBuilder();
-        text.append("名称：").append(blank(state.getString("name", ""), "未命名")).append('\n');
-        text.append("型号：").append(blank(state.getString("modelId", ""), "未知")).append('\n');
+        text.append("名称：").append(blank(state.getString("name", ""), "—")).append('\n');
+        text.append("型号：").append(blank(state.getString("modelId", ""), "—")).append('\n');
         String firmware = state.getString("verifiedFirmware", "");
         if (firmware.isBlank()) firmware = state.getString("firmware", "");
-        text.append("固件：").append(blank(firmware, "未读取")).append('\n');
-        text.append("硬件：").append(blank(state.getString("verifiedHardware", ""), "未读取")).append('\n');
-        text.append("连接：").append(connected ? "已连接" : "未连接").append('\n');
-        text.append("电量：").append(battery >= 0 && battery <= 100 ? battery + "%" : "未读取");
+        text.append("固件：").append(blank(firmware, "待读取")).append('\n');
+        text.append("硬件：").append(blank(state.getString("verifiedHardware", ""), "待读取")).append('\n');
+        text.append("连接：").append(connected ? "已连接" : "等待连接").append('\n');
+        text.append("电量：").append(battery >= 0 && battery <= 100 ? battery + "%" : "待读取");
         if (state.getBoolean("charging", false)) text.append("（充电中）");
         text.append('\n');
         long sync = state.getLong("lastSyncAtMs", 0);
-        text.append("上次同步：").append(sync > 0 ? TIME.format(Instant.ofEpochMilli(sync)) : "无").append('\n');
+        text.append("上次同步：").append(sync > 0 ? TIME.format(Instant.ofEpochMilli(sync)) : "—").append('\n');
         String deviceId = state.getString("deviceId", "");
-        text.append("设备号：").append(deviceId.length() >= 16 ? deviceId.substring(0, 16) + "…" : blank(deviceId, "无")).append('\n');
+        text.append("设备号：").append(deviceId.length() >= 16 ? deviceId.substring(0, 16) + "…" : blank(deviceId, "—")).append('\n');
         text.append("MAC：").append(tailMac(state.getString("mac", "")));
         return text.toString();
     }
 
     private static String tailMac(String mac) {
-        if (mac == null || mac.length() < 5) return "未保存";
+        if (mac == null || mac.length() < 5) return "—";
         return "…" + mac.substring(mac.length() - 5).replace(":", "");
     }
 
@@ -202,7 +184,7 @@ public final class LabActivity extends AppCompatActivity {
     private boolean ready() {
         if (BandLiveService.notificationSessionReady(this)) return true;
         try { BandLiveService.start(this); } catch (RuntimeException ignored) { }
-        setResultText("会话未就绪。请先点立即同步，等手环连上后再试。");
+        setResultText("会话准备中。点「立即同步」，手环连上后再发送。");
         refresh();
         return false;
     }
@@ -210,7 +192,8 @@ public final class LabActivity extends AppCompatActivity {
     private void finishSend(String label, Throwable error) {
         if (isDestroyed()) return;
         String detail = error == null ? "已确认送达手环。"
-                : ("发送失败：" + (error.getMessage() == null ? error.getClass().getSimpleName() : error.getMessage()));
+                : ("发送中断：" + (error.getMessage() == null ? error.getClass().getSimpleName() : error.getMessage())
+                        + "。点「立即同步」后再试一次。");
         Log.i("OplusBandBridge", "LAB " + label + " " + (error == null ? "ok" : error.getClass().getSimpleName()));
         setResultText(label + detail);
         refresh();
@@ -232,7 +215,7 @@ public final class LabActivity extends AppCompatActivity {
                     message = "已是最新：" + BuildConfig.VERSION_NAME + "（" + BuildConfig.VERSION_CODE + "）。";
                 }
             } catch (Exception failure) {
-                message = "检查更新失败：" + failure.getClass().getSimpleName();
+                message = "检查更新中断：" + failure.getClass().getSimpleName() + "。联网后再点一次。";
             }
             String open = url;
             String text = message;

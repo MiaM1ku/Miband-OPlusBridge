@@ -725,7 +725,7 @@ public final class BandLiveService extends Service {
                             + repository.isRegistered() + " mode=" + owner.mode()
                             + " ready=" + owner.nativeReady();
                     android.util.Log.i("OplusBandBridge", status);
-                    show("连接已停止");
+                    show("连接已暂停");
                     break;
                 }
                 bindHealthHost();
@@ -883,7 +883,7 @@ public final class BandLiveService extends Service {
                 } catch (Exception failure) {
                     status = failure instanceof SppDiagnosticClient.Failure typed
                             ? typed.code : failure.getClass().getSimpleName();
-                    show(retryable(status) ? "正在重连" : "等待重连");
+                    show(retryable(status) ? "正在重连" : "稍后自动重连");
                 } finally {
                     client = null;
                     commands = null;

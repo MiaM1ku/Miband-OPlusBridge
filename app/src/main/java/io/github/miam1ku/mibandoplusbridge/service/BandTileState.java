@@ -12,13 +12,10 @@ public final class BandTileState {
     private BandTileState() {}
 
     static View of(boolean registered, boolean serviceUp, boolean connected, int battery) {
-        if (!registered) return new View(UNAVAILABLE, "未添加");
-        if (serviceUp && connected) {
-            if (battery >= 0 && battery <= 100) return new View(ACTIVE, "已连接 · " + battery + "%");
-            return new View(ACTIVE, "已连接");
-        }
-        if (serviceUp) return new View(INACTIVE, "连接中");
-        return new View(INACTIVE, "未连接");
+        String subtitle = io.github.miam1ku.mibandoplusbridge.ui.Copy.tileSubtitle(registered, serviceUp, connected, battery);
+        if (!registered) return new View(UNAVAILABLE, subtitle);
+        if (serviceUp && connected) return new View(ACTIVE, subtitle);
+        return new View(INACTIVE, subtitle);
     }
 
     enum Action { WAKE, OPEN_APP }

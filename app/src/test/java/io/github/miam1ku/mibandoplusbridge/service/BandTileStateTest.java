@@ -8,7 +8,7 @@ public final class BandTileStateTest {
     @Test public void unregisteredTileIsUnavailable() {
         BandTileState.View view = BandTileState.of(false, true, true, 40);
         assertEquals(BandTileState.UNAVAILABLE, view.state());
-        assertEquals("未添加", view.subtitle());
+        assertEquals("在应用中添加", view.subtitle());
     }
 
     @Test public void connectedBatteryIsShown() {
@@ -29,13 +29,13 @@ public final class BandTileStateTest {
     @Test public void runningButNotConnectedIsConnecting() {
         BandTileState.View view = BandTileState.of(true, true, false, 40);
         assertEquals(BandTileState.INACTIVE, view.state());
-        assertEquals("连接中", view.subtitle());
+        assertEquals("正在连接", view.subtitle());
     }
 
     @Test public void stoppedServiceIsDisconnected() {
         BandTileState.View view = BandTileState.of(true, false, true, 40);
         assertEquals(BandTileState.INACTIVE, view.state());
-        assertEquals("未连接", view.subtitle());
+        assertEquals("点按连接", view.subtitle());
     }
 
     @Test public void clickWakesOnlyWhenTheBridgeMayStart() {

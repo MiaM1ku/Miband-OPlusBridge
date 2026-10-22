@@ -33,7 +33,7 @@ public final class UpdateChecker {
             try (InputStream in = stream) {
                 body = read(in);
             }
-            if (status == 404) return new Result(false, "", installedName, installedCode, PAGE, "还没有正式版本。");
+            if (status == 404) return new Result(false, "", installedName, installedCode, PAGE, "正式版本发布后会显示在这里。");
             if (status >= 400) throw new IllegalStateException("UPDATE_HTTP_" + status);
             JSONObject json = new JSONObject(body);
             String tag = json.optString("tag_name", "");

@@ -12,6 +12,7 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import io.github.miam1ku.mibandoplusbridge.ui.BridgeScreen;
+import io.github.miam1ku.mibandoplusbridge.ui.Copy;
 import io.github.miam1ku.mibandoplusbridge.integration.WeatherSnapshotProvider;
 import io.github.miam1ku.mibandoplusbridge.protocol.BandWeatherEncoder;
 import io.github.miam1ku.mibandoplusbridge.service.BandLiveService;
@@ -25,7 +26,10 @@ import java.util.Date;
 public final class WeatherActivity extends AppCompatActivity {
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final Handler main = new Handler(Looper.getMainLooper());
+    private BridgeScreen screen;
     private TextView status;
+    private TextView delivery;
+    private TextView association;
     private Button send;
     private Button review;
     private Button clearReview;
@@ -37,16 +41,20 @@ public final class WeatherActivity extends AppCompatActivity {
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
-        BridgeScreen screen = BridgeScreen.attach(this, "天气", true);
-        LinearLayout statusCard = screen.card();
-        status = screen.bodyText(statusCard, "尚未读取 OHealth 天气。");
-        screen.caption(statusCard, "使用 OHealth 已有的天气和定位。天气和地点有效后发送到手环。");
-        screen.setLastChildMargin(statusCard, 0);
-        screen.filled("获取当前位置天气", this::requestWeather);
-        send = screen.outlined("发送到手环", this::sendWeather);
-        screen.textButton("打开 OHealth", this::openHealth);
-        review = screen.textButton("核对手环城市", this::inspectCities);
-        clearReview = screen.textButton("撤销城市关联", this::clearAssociation);
+        screen = BridgeScreen.attach(this, "天气同步", true);
+        LinearLayout source = screen.section("OHealth 天气");
+        status = screen.bodyText(source, "正在读取 OHealth 天气…");
+        screen.caption(source, "使用 OHealth 已有的天气和定位，天气和地点有效后即可发送到手环。");
+        screen.filled(source, "获取当前位置天气", this::requestWeather);
+        screen.textButton(source, "打开 OHealth", this::openHealth);
+        LinearLayout band = screen.section("手环");
+        delivery = screen.bodyText(band, "发送后，在手环上看一眼城市、温度和预报。");
+        send = screen.filled(band, "发送到手环", this::sendWeather);
+        review = screen.outlined(band, "核对手环城市", this::inspectCities);
+        LinearLayout city = screen.section("城市关联");
+        association = screen.bodyText(city, "");
+        clearReview = screen.textButton(city, "解除城市关联", this::clearAssociation);
+        refreshAssociation();
         review.setEnabled(false);
         clearReview.setEnabled(false);
         send.setEnabled(false);
@@ -61,13 +69,13 @@ public final class WeatherActivity extends AppCompatActivity {
 
     private void requestWeather() {
         if (worker.isShutdown()) return;
-        status.setText("正在请求当前位置天气。上一份有效天气会保留。");
+        status.setText("正在获取当前位置天气，上一份有效天气会继续保留。");
         BandLiveService.refreshWeather(this);
         worker.execute(() -> {
             try {
                 getContentResolver().call(WeatherSnapshotProvider.URI, "requestRefresh", null, null);
             } catch (RuntimeException unavailable) {
-                main.post(() -> { if (!isDestroyed()) status.setText("天气源不可用，可手动打开 OHealth 后重试。"); });
+                main.post(() -> { if (!isDestroyed()) status.setText("打开一次 OHealth，再点「获取当前位置天气」。"); });
             }
             refreshSnapshot();
         });
@@ -75,9 +83,9 @@ public final class WeatherActivity extends AppCompatActivity {
 
     private void openHealth() {
         Intent launcher = getPackageManager().getLaunchIntentForPackage("com.heytap.health");
-        if (launcher == null) { status.setText("OHealth 未安装，无法获取天气。"); return; }
+        if (launcher == null) { status.setText("安装 OPPO 健康后即可获取天气。"); return; }
         try { startActivity(launcher); }
-        catch (RuntimeException unavailable) { status.setText("无法打开 OHealth，请从手机桌面打开。"); }
+        catch (RuntimeException unavailable) { status.setText("从手机桌面打开 OPPO 健康即可。"); }
     }
 
     private void refreshSnapshot() {
@@ -95,33 +103,39 @@ public final class WeatherActivity extends AppCompatActivity {
                         + "\n来源更新时间：" + time(response.getLong("updatedAtMs", 0))
                         + "\n天气发布时间：" + time(valid.publishedAtMs())
                         + "\n逐日：" + valid.daily().size() + " 天，逐时：" + valid.hourly().size()
-                        + " 小时。请核对城市后发送。"
-                        + (source.isEmpty() ? "" : "\n" + source + "；目前仍可发送以上有效快照。");
+                        + " 小时，可以发送。"
+                        + (source.isEmpty() ? "" : "\n" + source + "；以上快照仍可发送。");
             } catch (Exception invalid) {
                 valid = null;
                 String stored = storedWeather(response);
                 String source = response == null ? sourceStatus() : sourceText(response);
-                message = stored.isEmpty() ? "没有可发送的有效天气。" + source + " 请更新后再试。"
-                        : stored + (source.isEmpty() ? "" : "\n" + source);
+                message = stored.isEmpty() ? "点「获取当前位置天气」取一份天气。" + (source.isEmpty() ? "" : "\n" + source + "。")
+                        : stored + (source.isEmpty() ? "" : "\n" + source + "。");
             }
-            var delivery = getSharedPreferences("weather-sync", 0);
-            String deliveryCode = delivery.getString("status", "");
+            var sync = getSharedPreferences("weather-sync", 0);
+            String deliveryCode = sync.getString("status", "");
+            String deliveryText = "发送后，在手环上看一眼城市、温度和预报。";
             if ("WEATHER_TRANSPORT_CONFIRMED".equals(deliveryCode)) {
-                message += "\n上次确认传输：" + time(delivery.getLong("confirmedAtMs", 0))
-                        + "。仍需在手环核对实际显示。";
+                deliveryText = "上次送达：" + time(sync.getLong("confirmedAtMs", 0))
+                        + "\n在手环上看一眼城市、温度和预报。";
             } else if (!deliveryCode.isEmpty() && !"WEATHER_CITIES_READY".equals(deliveryCode)
                     && !"WEATHER_READING_CITIES".equals(deliveryCode)) {
-                message += "\n" + weatherError(deliveryCode);
+                deliveryText = Copy.weatherError(deliveryCode);
             }
             BandWeatherEncoder.Sample captured = valid;
             String result = message;
+            String deliveryResult = deliveryText;
             main.post(() -> {
                 if (isDestroyed()) return;
                 ready = captured;
                 send.setEnabled(captured != null && !running);
                 review.setEnabled(captured != null && !running);
                 clearReview.setEnabled(!running);
-                if (!running) status.setText(result);
+                if (!running) {
+                    status.setText(result);
+                    delivery.setText(deliveryResult);
+                }
+                refreshAssociation();
             });
         });
     }
@@ -135,9 +149,9 @@ public final class WeatherActivity extends AppCompatActivity {
             return "手机已保存天气：" + sample.cityName() + " / " + sample.locationName()
                     + "\n发布时间：" + time(sample.publishedAtMs())
                     + "\n逐日：" + sample.daily().size() + " 天，逐时：" + sample.hourly().size()
-                    + " 小时。这份天气当前不能发送，请重新获取。";
+                    + " 小时。点「获取当前位置天气」刷新后即可发送。";
         } catch (Exception ignored) {
-            return "手机已有一份天气快照，但当前不能发送。请重新获取。";
+            return "手机保存着一份旧天气，点「获取当前位置天气」刷新后即可发送。";
         }
     }
 
@@ -152,7 +166,7 @@ public final class WeatherActivity extends AppCompatActivity {
         send.setEnabled(false);
         review.setEnabled(false);
         clearReview.setEnabled(false);
-        status.setText(inspect ? "正在读取手环城市……" : "正在通过现有连接发送天气……");
+        delivery.setText(inspect ? "正在读取手环城市…" : "正在通过现有连接发送天气…");
         BandLiveService.requestWeather(this, sample, inspect).whenComplete((ignored, error) -> main.post(() -> {
             running = false;
             if (isDestroyed()) return;
@@ -161,10 +175,10 @@ public final class WeatherActivity extends AppCompatActivity {
             clearReview.setEnabled(true);
             String code = failureCode(error);
             if (error == null) {
-                status.setText(inspect ? reviewText(sample)
-                        : "天气已确认传输。请在手环核对城市、温度和预报；传输确认不代表屏幕验收。"
-                                + "\n请以来源快照显示的真实更新时间核对预报。");
-            } else status.setText(weatherError(code));
+                delivery.setText(inspect ? reviewText(sample)
+                        : "天气已送达手环。在手环上看一眼城市、温度和预报，预报以上方的发布时间为准。");
+            } else delivery.setText(Copy.weatherError(code));
+            refreshAssociation();
             if ((error == null && inspect) || "WEATHER_CITY_CONFIRMATION_REQUIRED".equals(code)) showCityChoices(sample);
         }));
     }
@@ -178,40 +192,17 @@ public final class WeatherActivity extends AppCompatActivity {
         return message != null && message.matches("[A-Z_]{1,80}") ? message : "WEATHER_UNAVAILABLE";
     }
 
-    private static String weatherError(String code) {
-        return switch (code) {
-            case "WEATHER_CITY_CONFIRMATION_REQUIRED", "WEATHER_PREVIEW_CHANGED" -> "城市关联尚未确认或已改变；请重新读取并核对城市。";
-            case "WEATHER_CITY_SETUP_REQUIRED" -> "手环没有有效城市，请先在官方应用配置城市，再切回桥接模式。";
-            case "WEATHER_CITY_LIST_INVALID" -> "手环城市列表不可用，请在官方应用检查配置。";
-            case "WEATHER_SOURCE_STALE", "WEATHER_FORECAST_STALE" -> "天气已过期，已停止发送，请重新获取。";
-            case "WEATHER_BAND_REJECTED" -> "手环拒绝本次天气；健康连接保持不变。";
-            case "WEATHER_BUSY" -> "天气任务正在处理，请稍后再试。";
-            case "WEATHER_DISCONNECTED", "LIVE_SESSION_UNAVAILABLE", "WEATHER_CLOSED", "NATIVE_OWNERSHIP_REQUIRED" -> "请先在配置首页确认手环已添加、已接管且已连接。";
-            case "WEATHER_DATA_INVALID" -> "天气数据或天气码不可用。";
-            default -> "天气未完成传输，请检查连接和天气源后重试。";
-        };
-    }
-
     private static String time(long value) { return DateFormat.getDateTimeInstance().format(new Date(value)); }
 
     private static String sourceText(Bundle response) {
-        if (response.getBoolean("pending", false)) return "正在等待 OHealth 更新天气";
-        return switch (response.getString("status", "")) {
-            case "" -> "";
-            case "OHEALTH_LOCATION_PERMISSION_REQUIRED" -> "OHealth 缺少定位权限";
-            case "OHEALTH_LOCATION_DISABLED" -> "网络定位已关闭";
-            case "OHEALTH_LOCATION_UNAVAILABLE" -> "未取得足够准确且新鲜的位置";
-            case "OHEALTH_WEATHER_CLOUD_UNAVAILABLE" -> "天气网络请求失败";
-            case "OHEALTH_WEATHER_TIMEOUT" -> "天气处理超时，可手动打开 OHealth 后重试";
-            default -> "天气源暂不可用，可手动打开 OHealth 后重试";
-        };
+        return Copy.weatherSource(response.getString("status", ""), response.getBoolean("pending", false));
     }
 
     private String sourceStatus() {
         try {
             Bundle response = getContentResolver().call(WeatherSnapshotProvider.URI, "getSnapshot", null, null);
-            return response == null ? "天气源不可用。" : sourceText(response);
-        } catch (RuntimeException unavailable) { return "天气源不可用。"; }
+            return response == null ? Copy.weatherSource("UNAVAILABLE", false) : sourceText(response);
+        } catch (RuntimeException unavailable) { return Copy.weatherSource("UNAVAILABLE", false); }
     }
 
     private void showCityChoices(BandWeatherEncoder.Sample sample) {
@@ -219,7 +210,7 @@ public final class WeatherActivity extends AppCompatActivity {
         if (!sample.locationKey().equals(prefs.getString("sourceKey", ""))
                 || !sample.cityName().equals(prefs.getString("sourceCity", ""))
                 || !sample.locationName().equals(prefs.getString("sourcePlace", ""))) {
-            status.setText("来源城市已改变，请重新读取手环城市后核对。");
+            delivery.setText("OHealth 的城市有变化，点「核对手环城市」重新关联。");
             return;
         }
         int count = prefs.getInt("bandCount", 0);
@@ -247,7 +238,8 @@ public final class WeatherActivity extends AppCompatActivity {
                                 .putString("confirmedSourceCity", sample.cityName())
                                 .putString("confirmedSourcePlace", sample.locationName())
                                 .putString("confirmedBandCode", code).putString("confirmedBandName", name).commit();
-                        status.setText(saved ? "城市关联已确认，可发送天气。每次发送仍会重新核对两端城市。" : "城市关联保存失败，请重试。");
+                        delivery.setText(saved ? "城市关联已确认，可以发送天气。每次发送都会再核对两端城市。" : "城市关联保存中断，再确认一次即可。");
+                        refreshAssociation();
                     })
                     .show();
         }).show();
@@ -269,7 +261,18 @@ public final class WeatherActivity extends AppCompatActivity {
         getSharedPreferences("weather-city-review", 0).edit()
                 .remove("confirmedSourceKey").remove("confirmedSourceCity").remove("confirmedSourcePlace")
                 .remove("confirmedBandCode").remove("confirmedBandName").commit();
-        status.setText("已撤销城市关联；未发送天气。");
+        delivery.setText("城市关联已解除。下次发送时会重新核对城市。");
+        refreshAssociation();
+    }
+
+    private void refreshAssociation() {
+        var prefs = getSharedPreferences("weather-city-review", 0);
+        String bandName = prefs.getString("confirmedBandName", "");
+        String sourceCity = prefs.getString("confirmedSourceCity", "");
+        boolean linked = !bandName.isEmpty();
+        association.setText(linked ? "已关联：OHealth " + sourceCity + " → 手环 " + bandName
+                : "发送时会自动核对两端城市。手环有多个城市时，点「核对手环城市」选一个关联。");
+        clearReview.setVisibility(linked ? android.view.View.VISIBLE : android.view.View.GONE);
     }
 
     @Override protected void onDestroy() {

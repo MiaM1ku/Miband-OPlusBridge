@@ -363,7 +363,7 @@ public final class OHealthSleepHook {
         boolean band = selected();
         for (Map.Entry<Object, CharSequence> toolbar : new ArrayList<>(TOOLBARS.entrySet())) {
             try { XposedHelpers.callMethod(toolbar.getKey(), "setSubtitle",
-                    band ? "手环区间未计入周/月统计" : toolbar.getValue()); } catch (Throwable ignored) { }
+                    band ? "周/月统计按 OHealth 原生数据计算" : toolbar.getValue()); } catch (Throwable ignored) { }
         }
         refreshingNavigation = true;
         try {
@@ -396,7 +396,7 @@ public final class OHealthSleepHook {
     }
 
     private static String describe(List<HealthRecord> records, boolean sourceStages) {
-        if (records.isEmpty()) return "尚未同步到睡眠记录";
+        if (records.isEmpty()) return "等待同步睡眠记录";
         StringBuilder text = new StringBuilder();
         boolean stages = sourceStages, unknown = false;
         for (HealthRecord record : records) {
@@ -406,7 +406,7 @@ public final class OHealthSleepHook {
                 text.append(stageName(record.stage)).append(' ');
             } else {
                 unknown |= record.value == null;
-                text.append(record.complete ? "完整区间 " : "未完整区间 ");
+                text.append(record.complete ? "完整区间 " : "部分区间 ");
             }
             text.append(format(record, record.startMs, "MM-dd HH:mm")).append("–")
                     .append(format(record, record.endMs, "MM-dd HH:mm")).append(" · ")
@@ -414,8 +414,8 @@ public final class OHealthSleepHook {
             if (record.timezone != null) text.append(" (").append(record.timezone).append(')');
             if (record.value != null) text.append(" · 已知总睡眠 ").append(duration(record.value.longValue()));
         }
-        if (unknown || records.stream().noneMatch(r -> "sleep_interval".equals(r.kind))) text.append("\n总睡眠时长未知");
-        if (!stages) text.append(" · 手环未提供分期");
+        if (unknown || records.stream().noneMatch(r -> "sleep_interval".equals(r.kind))) text.append("\n总睡眠时长待同步");
+        if (!stages) text.append(" · 手环记录整段睡眠");
         else if (sourceStages) text.append("\n已有真实分期，见日历史");
         return text.toString();
     }
@@ -441,14 +441,7 @@ public final class OHealthSleepHook {
         return DateTimeFormatter.ofPattern(pattern).withZone(zone).format(Instant.ofEpochMilli(time));
     }
     private static String stageName(Integer stage) {
-        return stage == null ? "阶段未知" : switch (stage) {
-            case 2 -> "深睡";
-            case 3 -> "浅睡";
-            case 4 -> "快速眼动（REM）";
-            case 5 -> "清醒";
-            case 6 -> "未分期";
-            default -> "阶段未知";
-        };
+        return io.github.miam1ku.mibandoplusbridge.ui.Copy.stageName(stage);
     }
 
     private record Cache(String account, String device, List<HealthRecord> records, List<Long> dates, boolean ready) {

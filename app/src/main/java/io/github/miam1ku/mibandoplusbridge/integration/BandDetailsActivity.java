@@ -10,9 +10,6 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.View;
-import android.widget.AdapterView;
-import android.widget.ArrayAdapter;
-import android.widget.Spinner;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.TextView;
@@ -42,7 +39,9 @@ public final class BandDetailsActivity extends AppCompatActivity {
     private TextView history;
     private TextView saved;
     private Button next;
-    private Spinner kindPicker;
+    private int kindIndex;
+    private BridgeScreen screen;
+    private TextView statusChip;
     private String after;
     private int historyGeneration;
     private final Handler main = new Handler(Looper.getMainLooper());
@@ -65,38 +64,55 @@ public final class BandDetailsActivity extends AppCompatActivity {
             finish();
             return;
         }
-        BridgeScreen screen = BridgeScreen.attach(this, "设备详情", true);
+        screen = BridgeScreen.attach(this, "设备详情", true);
         LinearLayout statusCard = screen.card();
-        name = screen.bodyText(statusCard, "手环状态");
-        connection = screen.bodyText(statusCard, "连接状态未读取");
-        battery = screen.caption(statusCard, "电量未读取");
-        updated = screen.caption(statusCard, "尚无同步记录");
-        history = screen.caption(statusCard, "尚无同步记录");
-        screen.setLastChildMargin(statusCard, 0);
+        name = screen.title(statusCard, "小米手环");
+        statusChip = screen.chip(statusCard, "正在读取", BridgeScreen.Tone.NEUTRAL);
+        connection = screen.caption(statusCard, "");
+        connection.setVisibility(View.GONE);
+        battery = screen.bodyText(statusCard, "电量待读取");
+        updated = screen.caption(statusCard, "");
+        history = screen.caption(statusCard, "");
         LinearLayout links = screen.card();
-        screen.navRow(links, "打开 OHealth", () -> openPackage(OHEALTH));
-        screen.navRow(links, "模块管理", () -> openPackage(KERNELSU));
-        screen.setLastChildMargin(links, 0);
+        screen.navRow(links, "打开 OPPO 健康", () -> openPackage(OHEALTH));
+        screen.navRow(links, "打开 KernelSU", () -> openPackage(KERNELSU));
         screen.heading("已保存历史");
-        screen.caption("显示当前 OHealth 账号下这台手环的记录。移除设备后记录仍保留。");
-        kindPicker = new Spinner(this);
-        kindPicker.setMinimumHeight(BridgeScreen.dp(this, 48));
-        ArrayAdapter<String> kinds = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item,
-                new String[]{"睡眠区间", "睡眠分期", "心率", "血氧", "压力", "每日步数", "步数区间"});
-        kinds.setDropDownViewResource(androidx.appcompat.R.layout.support_simple_spinner_dropdown_item);
-        kindPicker.setAdapter(kinds);
+        screen.caption("当前 OHealth 账号下这只手环的记录。移除设备后记录照样保留。");
         int requested = getIntent() == null ? 0 : getIntent().getIntExtra("historyKind", 0);
-        if (requested >= 0 && requested < KINDS.length) kindPicker.setSelection(requested);
-        LinearLayout.LayoutParams pickerParams = new LinearLayout.LayoutParams(-1, -2);
-        pickerParams.bottomMargin = BridgeScreen.dp(this, 12);
-        screen.body.addView(kindPicker, pickerParams);
+        kindIndex = requested >= 0 && requested < KINDS.length ? requested : 0;
+        android.widget.HorizontalScrollView chipScroll = new android.widget.HorizontalScrollView(this);
+        chipScroll.setHorizontalScrollBarEnabled(false);
+        com.google.android.material.chip.ChipGroup kinds = new com.google.android.material.chip.ChipGroup(this);
+        kinds.setSingleSelection(true);
+        kinds.setSelectionRequired(true);
+        kinds.setSingleLine(true);
+        String[] labels = {"睡眠区间", "睡眠分期", "心率", "血氧", "压力", "每日步数", "步数区间"};
+        for (int index = 0; index < labels.length; index++) {
+            com.google.android.material.chip.Chip chip = new com.google.android.material.chip.Chip(this, null,
+                    com.google.android.material.R.attr.chipStyle);
+            chip.setText(labels[index]);
+            chip.setCheckable(true);
+            chip.setCheckedIconVisible(false);
+            chip.setId(View.generateViewId());
+            chip.setTag(index);
+            kinds.addView(chip);
+            if (index == kindIndex) chip.setChecked(true);
+        }
+        kinds.setOnCheckedStateChangeListener((group, checked) -> {
+            if (checked.isEmpty()) return;
+            Object tag = group.findViewById(checked.get(0)).getTag();
+            if (tag instanceof Integer chosen && chosen != kindIndex) {
+                kindIndex = chosen;
+                loadHistory(true);
+            }
+        });
+        chipScroll.addView(kinds);
+        LinearLayout.LayoutParams chipParams = new LinearLayout.LayoutParams(-1, -2);
+        chipParams.bottomMargin = BridgeScreen.dp(this, 8);
+        screen.body.addView(chipScroll, chipParams);
         LinearLayout historyCard = screen.card();
         saved = screen.bodyText(historyCard, "正在读取已保存历史…");
-        next = screen.filled("下一页", () -> loadHistory(false));
-        kindPicker.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
-            @Override public void onItemSelected(AdapterView<?> parent, View view, int position, long id) { loadHistory(true); }
-            @Override public void onNothingSelected(AdapterView<?> parent) { }
-        });
+        next = screen.outlined(historyCard, "加载更多", () -> loadHistory(false));
         getContentResolver().registerContentObserver(DeviceCardProvider.URI, false, observer);
         getContentResolver().registerContentObserver(HealthQueueProvider.RECORDS_URI, true, historyObserver);
         refresh();
@@ -139,37 +155,39 @@ public final class BandDetailsActivity extends AppCompatActivity {
         String deviceName = BandCatalog.displayName(state.getString("modelId", ""), state.getString("name", ""));
         name.setText(deviceName);
         if (id == null || id.isBlank()) {
-            connection.setText("尚未获得设备标识");
-            connection.setTextColor(0xff475569);
-            battery.setText("电量未读取");
-            updated.setText("尚无同步记录");
+            screen.setChip(statusChip, "待添加", BridgeScreen.Tone.NEUTRAL);
+            battery.setText("添加手环后显示电量和同步信息。");
+            updated.setVisibility(View.GONE);
+            history.setVisibility(View.GONE);
             return;
         }
         boolean connected = state.getBoolean("connected", false);
-        connection.setText(connected ? "已连接" : "未连接");
-        connection.setTextColor(connected ? 0xff157347 : 0xff475569);
+        screen.setChip(statusChip, connected ? "已连接" : "等待连接",
+                connected ? BridgeScreen.Tone.POSITIVE : BridgeScreen.Tone.NEUTRAL);
         int level = state.getInt("battery", -1);
         battery.setText(level >= 0 && level <= 100
                 ? "电量 " + level + "%" + (state.getBoolean("charging", false) ? " · 充电中" : "")
-                : "电量未读取");
+                : "电量待读取");
         long lastRead = state.getLong("lastUpdateMs", 0);
+        updated.setVisibility(View.VISIBLE);
         updated.setText(lastRead > 0 && lastRead <= System.currentTimeMillis()
-                ? "上次读取 " + DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT)
+                ? "读取于 " + DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT)
                         .format(new Date(lastRead))
-                : "尚无读取记录");
+                : "连上后显示读取时间");
         long sync = state.getLong("lastSyncAtMs", 0);
         long steps = state.getLong("stepsToday", -1);
         int heart = state.getInt("heartRate", -1);
-        history.setText((steps >= 0 ? "今日 " + steps + " 步" : "今日步数尚未同步")
-                + (heart > 0 && heart <= 250 ? "，最近心率 " + heart + " 次/分" : "")
-                + (sync > 0 ? "。最近同步 " + DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(new Date(sync)) : ""));
+        history.setVisibility(View.VISIBLE);
+        history.setText((steps >= 0 ? "今日 " + steps + " 步" : "今日步数等待同步")
+                + (heart > 0 && heart <= 250 ? " · 最近心率 " + heart + " 次/分" : "")
+                + (sync > 0 ? "\n同步于 " + DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(new Date(sync)) : ""));
     }
 
     private void loadHistory(boolean reset) {
         if (saved == null || isFinishing() || isDestroyed()) return;
         if (reset) after = null;
         String cursor = after;
-        String kind = KINDS[kindPicker.getSelectedItemPosition()];
+        String kind = KINDS[kindIndex];
         int generation = ++historyGeneration;
         next.setEnabled(false);
         saved.setText("正在读取已保存历史…");
@@ -183,7 +201,7 @@ public final class BandDetailsActivity extends AppCompatActivity {
                 String device = BandStateRepository.deviceId(binding);
                 String account = store.confirmedAccountHash();
                 if (account == null) {
-                    message = "健康记录写入当前 OHealth 账号后，可在这里查看。";
+                    message = "健康记录写入当前 OHealth 账号后会显示在这里。";
                 } else {
                     List<HealthRecord> page = new ArrayList<>();
                     try (Cursor rows = store.localMeasurements(device, kind, 0, Long.MAX_VALUE, cursor)) {
@@ -201,10 +219,12 @@ public final class BandDetailsActivity extends AppCompatActivity {
                         if (text.length() > 0) text.append("\n\n");
                         appendRecord(text, record);
                     }
-                    message = page.isEmpty() ? "这一页没有已保存记录。" : text.toString();
+                    message = page.isEmpty()
+                            ? (cursor == null ? "这一类还在等待记录，手环同步后会出现在这里。" : "已显示全部记录。")
+                            : text.toString();
                 }
             } catch (Exception unavailable) {
-                message = "暂时无法读取已保存历史。请确认已解锁并已导入绑定后重试。";
+                message = "解锁手机并导入绑定后即可查看历史。";
             }
             String result = message;
             String nextCursor = last;
@@ -214,7 +234,7 @@ public final class BandDetailsActivity extends AppCompatActivity {
                 saved.setText(result);
                 after = nextCursor;
                 next.setEnabled(hasMore);
-                next.setText(hasMore ? "下一页" : "已到本页末尾");
+                next.setText(hasMore ? "加载更多" : "已显示全部记录");
             });
         });
     }
@@ -226,14 +246,10 @@ public final class BandDetailsActivity extends AppCompatActivity {
         if (record.kind.startsWith("sleep_")) {
             text.append("–").append(date.format(java.time.Instant.ofEpochMilli(record.endMs)));
             text.append("\n区间 ").append((record.endMs - record.startMs) / 60_000).append(" 分钟");
-            if (record.stage != null) text.append(" · ").append(switch (record.stage) {
-                case 2 -> "深睡"; case 3 -> "浅睡"; case 4 -> "快速眼动（REM）"; case 5 -> "清醒";
-                case 6 -> "未分期";
-                default -> "阶段未知";
-            });
+            if (record.stage != null) text.append(" · ").append(io.github.miam1ku.mibandoplusbridge.ui.Copy.stageName(record.stage));
             else {
-                text.append(record.complete ? " · 完整区间" : " · 未完整区间");
-                text.append(record.value == null ? "\n总睡眠时长未知"
+                text.append(record.complete ? " · 完整区间" : " · 部分区间");
+                text.append(record.value == null ? "\n总睡眠时长待同步"
                         : "\n已知总睡眠 " + record.value.longValue() / 60_000 + " 分钟");
             }
         } else {
@@ -266,13 +282,13 @@ public final class BandDetailsActivity extends AppCompatActivity {
     private void openPackage(String target) {
         Intent launch = getPackageManager().getLaunchIntentForPackage(target);
         if (launch == null) {
-            Toast.makeText(this, "未找到对应应用", Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "安装对应应用后即可打开", Toast.LENGTH_SHORT).show();
             return;
         }
         try {
             startActivity(launch);
         } catch (ActivityNotFoundException unavailable) {
-            Toast.makeText(this, "无法打开对应应用", Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "从手机桌面打开对应应用即可", Toast.LENGTH_SHORT).show();
         }
     }
 }

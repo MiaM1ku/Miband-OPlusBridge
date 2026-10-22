@@ -44,7 +44,7 @@ public final class HostVersionNotice {
 
     public static String message(List<Installed> installed) {
         StringBuilder text = new StringBuilder(
-                "这些应用和已验证版本不一致，可以继续使用。通知、设备卡片和健康同步以已验证版本的实机结果为准。\n");
+                "这些应用的版本和实测版本有差异，可以照常使用。通知、设备卡片和健康同步在下列实测版本上经过实机验证：\n");
         for (Expectation expect : EXPECTATIONS) {
             Installed app = find(installed, expect.packageName());
             if (app == null || !app.present()
@@ -52,9 +52,9 @@ public final class HostVersionNotice {
             String current = app.versionName() == null || app.versionName().isBlank()
                     ? Long.toString(app.versionCode()) : app.versionName();
             text.append('\n').append(expect.label()).append(" 当前 ").append(current)
-                    .append("，已验证 ").append(expect.verified());
+                    .append("，实测 ").append(expect.verified());
         }
-        text.append("\n\n建议升级到已验证版本。");
+        text.append("\n\n升级到实测版本效果最稳定。");
         return text.toString();
     }
 

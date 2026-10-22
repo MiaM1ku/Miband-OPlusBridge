@@ -7,81 +7,97 @@ import android.app.NotificationManager;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothManager;
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
-import android.net.Uri;
-import android.os.UserManager;
-import android.provider.Settings;
-import io.github.miam1ku.mibandoplusbridge.data.BindingStore;
-import io.github.miam1ku.mibandoplusbridge.data.HealthRecordStore;
-import io.github.miam1ku.mibandoplusbridge.data.BandCatalog;
-import io.github.miam1ku.mibandoplusbridge.data.TransportObservation;
-import io.github.miam1ku.mibandoplusbridge.integration.DeviceCardProvider;
-import org.json.JSONObject;
-import androidx.appcompat.app.AppCompatActivity;
-import android.content.Intent;
 import android.database.ContentObserver;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.UserManager;
+import android.provider.Settings;
 import android.view.View;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.TextView;
+import androidx.appcompat.app.AppCompatActivity;
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import com.google.android.material.materialswitch.MaterialSwitch;
-import com.google.android.material.color.MaterialColors;
-import io.github.miam1ku.mibandoplusbridge.ui.BridgeScreen;
-import io.github.miam1ku.mibandoplusbridge.ui.SetupProgress;
-import io.github.miam1ku.mibandoplusbridge.integration.CredentialProvider;
-import io.github.miam1ku.mibandoplusbridge.integration.HealthQueueProvider;
+import io.github.miam1ku.mibandoplusbridge.data.BandCatalog;
 import io.github.miam1ku.mibandoplusbridge.data.BandStateRepository;
-import io.github.miam1ku.mibandoplusbridge.service.OwnershipController;
-import io.github.miam1ku.mibandoplusbridge.service.BandLiveService;
+import io.github.miam1ku.mibandoplusbridge.data.BindingStore;
+import io.github.miam1ku.mibandoplusbridge.data.HealthRecordStore;
+import io.github.miam1ku.mibandoplusbridge.data.LocalPrefs;
+import io.github.miam1ku.mibandoplusbridge.data.TransportObservation;
+import io.github.miam1ku.mibandoplusbridge.integration.BandDetailsActivity;
+import io.github.miam1ku.mibandoplusbridge.integration.CredentialProvider;
+import io.github.miam1ku.mibandoplusbridge.integration.DeviceCardProvider;
+import io.github.miam1ku.mibandoplusbridge.integration.HealthQueueProvider;
 import io.github.miam1ku.mibandoplusbridge.notify.BandNotificationListener;
 import io.github.miam1ku.mibandoplusbridge.notify.SleepMusic;
-import io.github.miam1ku.mibandoplusbridge.protocol.BandNotificationCommand;
 import io.github.miam1ku.mibandoplusbridge.protocol.SppDiagnosticClient;
-import java.time.Instant;
-import java.time.ZoneId;
+import io.github.miam1ku.mibandoplusbridge.service.BandLiveService;
+import io.github.miam1ku.mibandoplusbridge.service.OwnershipController;
+import io.github.miam1ku.mibandoplusbridge.ui.BridgeScreen;
+import io.github.miam1ku.mibandoplusbridge.ui.BridgeScreen.StepState;
+import io.github.miam1ku.mibandoplusbridge.ui.BridgeScreen.Tone;
+import io.github.miam1ku.mibandoplusbridge.ui.Copy;
+import io.github.miam1ku.mibandoplusbridge.ui.SetupProgress;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import org.json.JSONObject;
 
-/** Persistent device registration is independent of connection ownership. */
+/**
+ * Home screen. Reads top to bottom: band status with one primary action, first-run checklist,
+ * things to fix now, features, help, management, advanced import and debug tools.
+ * Device registration stays independent of connection ownership.
+ */
 public final class MainActivity extends AppCompatActivity {
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final Handler main = new Handler(Looper.getMainLooper());
-    private BridgeScreen screen;
-    private LinearLayout bonded;
-    private LinearLayout advanced;
-    private LinearLayout setupCard;
-    private LinearLayout healthAccessCard;
-    private String selectedAddress = "";
-    private String databaseImportNote = "";
-    private TextView status;
-    private TextView ownershipStatus;
-    private Button open;
-    private boolean hostSupported;
     private static final int BLUETOOTH_PERMISSION = 1;
     private static final int CALL_PERMISSIONS = 2;
-    private boolean callPermissionsAsked;
+    enum Change { ADD, RECONNECT, REMOVE, RESTORE }
+
+    private BridgeScreen screen;
+    // status card
     private TextView deviceName;
-    private TextView connectionLine;
+    private TextView statusChip;
+    private TextView connectionHint;
     private TextView metricsLine;
     private TextView healthLine;
-    private TextView permissionStatus;
-    private TextView checklistRoot;
-    private TextView checklistImport;
-    private TextView checklistProfile;
-    private TextView checklistAdd;
-    private TextView primaryHint;
+    private TextView ownershipStatus;
     private Button homePrimary;
+    // setup card
+    private LinearLayout setupCard;
+    private TextView setupTitle;
+    private TextView stepRoot;
+    private TextView stepImport;
+    private TextView stepAdd;
+    private TextView primaryHint;
     private Button openKsu;
+    // notices
+    private LinearLayout nearbyNotice;
+    private LinearLayout notifyNotice;
+    private LinearLayout healthAccessNotice;
+    // management
+    private TextView manageHeading;
+    private LinearLayout manageCard;
     private Button remove;
     private Button restore;
+    // advanced
+    private LinearLayout bonded;
+    private TextView status;
+    private Button open;
     private Button advancedRestore;
+
+    private String selectedAddress = "";
+    private String databaseImportNote = "";
+    private boolean hostSupported;
+    private boolean callPermissionsAsked;
     private boolean changingOwnership;
     private boolean versionPromptShown;
     private boolean launchHostAfterOpen;
@@ -89,13 +105,12 @@ public final class MainActivity extends AppCompatActivity {
     private boolean rootGranted;
     private boolean probingRoot;
     private Change pendingPermission;
-    private static final String SETUP_PREREQ = "开始前：系统蓝牙配对；LSPosed 启用本模块并勾选小米运动健康、OHealth、我的设备后强停一次；在 KernelSU 中允许本应用。";
-    enum Change { ADD, RECONNECT, REMOVE, RESTORE }
 
     /** Open the profile window when this restore task succeeded and the user came in from the capture entry. */
     static boolean openProfileAfterRestore(Change change, boolean restored) {
         return restored && change == Change.RESTORE;
     }
+
     private final ContentObserver deviceObserver = new ContentObserver(main) {
         @Override public void onChange(boolean selfChange) { refreshDevice(); }
     };
@@ -109,62 +124,80 @@ public final class MainActivity extends AppCompatActivity {
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
-        screen = BridgeScreen.attach(this, "小米手环", false);
-        LinearLayout statusCard = screen.card();
-        deviceName = screen.title(statusCard, "正在读取设备状态…");
-        connectionLine = screen.bodyText(statusCard, "");
-        metricsLine = screen.caption(statusCard, "");
-        ownershipStatus = screen.caption(statusCard, "");
-        permissionStatus = screen.caption(statusCard, "正在读取权限状态…");
-        healthLine = screen.caption(statusCard, "");
+        screen = BridgeScreen.attach(this, "小米手环桥接", false);
+        buildStatusCard();
+        buildSetupCard();
+        buildNotices();
+        buildFeatures();
+        buildHelp();
+        buildManagement();
+        buildAdvanced();
+        getContentResolver().registerContentObserver(CredentialProvider.URI, false, observer);
+        getContentResolver().registerContentObserver(DeviceCardProvider.URI, false, deviceObserver);
+        getContentResolver().registerContentObserver(HealthQueueProvider.URI, false, deviceObserver);
+        refreshDevice();
+        requestRoot();
+    }
+
+    // ---- layout ----
+
+    private void buildStatusCard() {
+        LinearLayout card = screen.card();
+        deviceName = screen.title(card, "小米手环");
+        statusChip = screen.chip(card, "正在读取", Tone.NEUTRAL);
+        connectionHint = screen.caption(card, "");
+        metricsLine = screen.caption(card, "");
+        healthLine = screen.caption(card, "");
+        ownershipStatus = screen.bodyText(card, "");
+        ownershipStatus.setTextSize(14);
+        homePrimary = screen.filled(card, Copy.setupLabel(SetupProgress.Step.ROOT), this::runHomePrimary);
+        connectionHint.setVisibility(View.GONE);
+        metricsLine.setVisibility(View.GONE);
         healthLine.setVisibility(View.GONE);
-        screen.setLastChildMargin(statusCard, 0);
-        healthAccessCard = screen.card();
-        screen.bodyText(healthAccessCard, "系统没有真正给 OPPO 健康通知使用权。请关掉再打开一次。");
-        screen.outlined(healthAccessCard, "打开健康的通知使用权", this::openHealthListenerSettings);
-        screen.setLastChildMargin(healthAccessCard, 0);
-        healthAccessCard.setVisibility(View.GONE);
+    }
+
+    private void buildSetupCard() {
         setupCard = screen.card();
-        screen.overline(setupCard, "首次设置");
-        checklistRoot = screen.caption(setupCard, "");
-        checklistImport = screen.caption(setupCard, "");
-        checklistProfile = screen.caption(setupCard, "");
-        checklistProfile.setVisibility(View.GONE);
-        checklistAdd = screen.caption(setupCard, "");
+        setupTitle = screen.overline(setupCard, "首次设置");
+        stepRoot = screen.stepRow(setupCard, 1, "授权 Root", StepState.CURRENT);
+        stepImport = screen.stepRow(setupCard, 2, "导入绑定", StepState.LATER);
+        stepAdd = screen.stepRow(setupCard, 3, "添加到健康", StepState.LATER);
         primaryHint = screen.caption(setupCard, "");
-        screen.caption(setupCard, SETUP_PREREQ);
-        screen.setLastChildMargin(setupCard, 0);
-        homePrimary = screen.filled("检查 Root", this::runHomePrimary);
-        openKsu = screen.outlined("打开 KernelSU", this::openKernelSu);
-        remove = screen.outlined("从健康移除", () -> new MaterialAlertDialogBuilder(this)
-                .setTitle("从健康移除手环？")
-                .setMessage("将停止桥接连接并恢复小米运动健康。已保存的健康历史和加密绑定信息会保留；以后可重新添加同一只手环。")
-                .setNegativeButton("取消", null)
-                .setPositiveButton("移除", (dialog, which) -> changeOwnership(Change.REMOVE))
-                .show());
-        restore = screen.textButton("重试恢复小米运动健康", () -> changeOwnership(Change.RESTORE));
-        restore.setVisibility(View.GONE);
-        screen.heading("常用");
-        LinearLayout shortcuts = screen.card();
-        screen.navRow(shortcuts, "设备详情", () -> startActivity(new Intent(this,
-                io.github.miam1ku.mibandoplusbridge.integration.BandDetailsActivity.class)));
-        screen.navRow(shortcuts, "协议测试", () -> startActivity(new Intent(this, LabActivity.class)));
-        screen.navRow(shortcuts, "天气同步", () -> startActivity(new Intent(this, WeatherActivity.class)));
-        screen.navRow(shortcuts, "发送调试日志到 QQ", this::shareDebugLog);
-        screen.caption(shortcuts, "控制中心编辑里添加「手环」。下拉或点一下会拉起连接。");
-        screen.setLastChildMargin(shortcuts, 0);
+        openKsu = screen.outlined(setupCard, "打开 KernelSU", this::openKernelSu);
+        LinearLayout prereq = screen.expander(setupCard, "开始前准备", null);
+        screen.caption(prereq, Copy.SETUP_PREREQ);
+    }
+
+    private void buildNotices() {
+        nearbyNotice = screen.noticeCard(Tone.ATTENTION);
+        screen.bodyText(nearbyNotice, "授权附近设备后即可连接手环。");
+        screen.filled(nearbyNotice, "授权附近设备", () -> {
+            pendingPermission = null;
+            requestPermissions(new String[]{Manifest.permission.BLUETOOTH_CONNECT}, BLUETOOTH_PERMISSION);
+        });
+        notifyNotice = screen.noticeCard(Tone.NEUTRAL);
+        screen.bodyText(notifyNotice, "开启通知后，可在通知栏看到手环连接状态。");
+        screen.outlined(notifyNotice, "开启通知", this::openAppNotificationSettings);
+        healthAccessNotice = screen.noticeCard(Tone.ACTIVE);
+        screen.bodyText(healthAccessNotice,
+                "在系统设置里把 OPPO 健康的通知使用权关掉再打开一次，手机通知就能转到手环。");
+        screen.outlined(healthAccessNotice, "打开通知使用权", this::openHealthListenerSettings);
+        setShown(nearbyNotice, false);
+        setShown(notifyNotice, false);
+        setShown(healthAccessNotice, false);
+    }
+
+    private void buildFeatures() {
+        screen.heading("功能");
+        LinearLayout links = screen.card();
+        screen.navRow(links, "设备详情", () -> startActivity(new Intent(this, BandDetailsActivity.class)));
+        screen.navRow(links, "天气同步", () -> startActivity(new Intent(this, WeatherActivity.class)));
+        screen.caption(links, "在控制中心添加「手环」磁贴，下拉或点按即可连接。");
+
         LinearLayout sleepCard = screen.card();
-        MaterialSwitch sleepPause = new MaterialSwitch(this);
-        sleepPause.setText("入睡后暂停音乐");
-        sleepPause.setTextSize(16);
-        sleepPause.setTextColor(MaterialColors.getColor(this,
-                com.google.android.material.R.attr.colorOnSurface, 0));
-        sleepPause.setMinHeight(BridgeScreen.dp(this, 48));
-        LinearLayout.LayoutParams sleepParams = new LinearLayout.LayoutParams(-1, -2);
-        sleepParams.bottomMargin = BridgeScreen.dp(this, 8);
-        sleepCard.addView(sleepPause, sleepParams);
-        screen.caption(sleepCard, "手环报入睡后暂停正在播放的音乐，醒来后保持暂停。开关打开时若已经在睡，等下一次入睡再暂停。只在睡眠记录里报入睡的手环，等记录同步后再暂停，大约几分钟。");
-        screen.setLastChildMargin(sleepCard, 0);
+        MaterialSwitch sleepPause = screen.switchRow(sleepCard, "入睡后暂停音乐",
+                "手环报告入睡时暂停正在播放的音乐，醒来后保持暂停。打开开关时如果已经入睡，会在下一次入睡时生效。"
+                        + "通过睡眠记录报告入睡的手环，会在记录同步后暂停，通常需要几分钟。");
         final boolean[] writingSleepPause = {false};
         sleepPause.setChecked(SleepMusic.enabled(this));
         sleepPause.setOnCheckedChangeListener((button, checked) -> {
@@ -176,36 +209,49 @@ public final class MainActivity extends AppCompatActivity {
             writingSleepPause[0] = true;
             button.setChecked(!checked);
             writingSleepPause[0] = false;
-            ownershipStatus.setText("入睡暂停开关未能保存。");
+            ownershipStatus.setText("开关状态保存中断，再拨一次即可。");
         });
-        screen.textButton("系统权限设置", () -> startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+    }
+
+    private void buildHelp() {
+        screen.heading("帮助");
+        LinearLayout help = screen.card();
+        screen.navRow(help, "使用说明", this::showSetupGuide);
+        screen.navRow(help, "系统权限设置", () -> startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
                 Uri.parse("package:" + getPackageName()))));
-        screen.textButton("使用说明", this::showSetupGuide);
-        advanced = new LinearLayout(this);
-        advanced.setOrientation(LinearLayout.VERTICAL);
-        advanced.setVisibility(View.GONE);
-        screen.textButton("高级设置", () -> {
-            boolean openNow = advanced.getVisibility() != View.VISIBLE;
-            advanced.setVisibility(openNow ? View.VISIBLE : View.GONE);
-            if (openNow) refreshBonded();
-        });
-        LinearLayout.LayoutParams advancedParams = new LinearLayout.LayoutParams(-1, -2);
-        screen.body.addView(advanced, advancedParams);
-        screen.heading(advanced, "绑定导入与诊断");
-        screen.caption(advanced, "导入绑定直接读取小米运动健康的本地数据库。手环 8 及以后使用已确认的蓝牙参数，导入后即可添加到健康。");
-        advancedRestore = screen.outlined(advanced, "恢复官方管理", () -> changeOwnership(Change.RESTORE));
-        screen.caption(advanced, "选择已配对设备");
+        screen.navRow(help, "发送调试日志", this::shareDebugLog);
+    }
+
+    private void buildManagement() {
+        manageHeading = screen.heading("管理");
+        manageCard = screen.card();
+        restore = screen.outlined(manageCard, "恢复小米运动健康", () -> changeOwnership(Change.RESTORE));
+        remove = screen.dangerOutlined(manageCard, "从健康移除", () -> new MaterialAlertDialogBuilder(this)
+                .setTitle("从健康移除这只手环？")
+                .setMessage("桥接会断开连接，把手环交还小米运动健康。健康历史和加密绑定都会保留，之后可随时重新添加。")
+                .setNegativeButton("取消", null)
+                .setPositiveButton("移除", (dialog, which) -> changeOwnership(Change.REMOVE))
+                .show());
+        screen.caption(manageCard, "绑定和健康历史始终保存在本机。");
+    }
+
+    private void buildAdvanced() {
+        LinearLayout advanced = screen.expander(screen.body, "高级设置", this::refreshBonded);
+        LinearLayout importCard = screen.card(advanced);
+        screen.overline(importCard, "绑定导入");
+        screen.caption(importCard, "首页的「导入绑定」直接读取小米运动健康的本地数据库。"
+                + "这里保留旧式导入窗口：选择已配对设备，在 120 秒内由官方应用重新读取绑定。");
         bonded = new LinearLayout(this);
         bonded.setOrientation(LinearLayout.VERTICAL);
-        advanced.addView(bonded);
+        importCard.addView(bonded);
         String preselected = getIntent().getStringExtra("deviceAddress");
         if (preselected != null && preselected.matches("[0-9A-F]{2}(:[0-9A-F]{2}){5}")) {
             selectedAddress = preselected;
         }
-        open = screen.outlined(advanced, "开启一次性导入（120 秒）", () -> {
+        open = screen.filled(importCard, "开启导入窗口（120 秒）", () -> {
             if (!hostSupported) return;
             if (selectedAddress.isBlank()) {
-                status.setText("请先选择一只已配对设备。");
+                status.setText("先在上方选择一只已配对设备。");
                 return;
             }
             Bundle selected = new Bundle();
@@ -213,33 +259,115 @@ public final class MainActivity extends AppCompatActivity {
             action("openWindow", selected);
         });
         open.setEnabled(false);
-        screen.outlined(advanced, "关闭所有导入／采集窗口", () -> action("closeWindow", null));
-        screen.outlined(advanced, "打开小米运动健康", () -> {
-            Intent launch = getPackageManager().getLaunchIntentForPackage(HostIdentity.MI_PACKAGE);
-            if (launch == null) {
-                status.setText("无法打开小米运动健康。请检查应用是否已安装且启用。");
-                return;
-            }
-            startActivity(launch);
-        });
+        screen.outlined(importCard, "关闭导入和采集窗口", () -> action("closeWindow", null));
+        screen.outlined(importCard, "打开小米运动健康", this::launchMiHealth);
+        advancedRestore = screen.outlined(importCard, "恢复官方管理", () -> changeOwnership(Change.RESTORE));
+        status = screen.bodyText(importCard, "正在检查小米运动健康…");
+        status.setTextSize(14);
+
+        LinearLayout debug = screen.card(advanced);
+        screen.overline(debug, "调试");
+        screen.navRow(debug, "协议测试", () -> startActivity(new Intent(this, LabActivity.class)));
         if (BuildConfig.DEBUG) {
-            screen.outlined(advanced, "采集连接参数（120 秒）", () -> action("openDiagnostics", null));
-            screen.outlined(advanced, "采集协议消息（120 秒）", () -> new MaterialAlertDialogBuilder(this)
+            screen.navRow(debug, "独立连接诊断", () -> startActivity(new Intent(this, DiagnosticActivity.class)));
+            screen.outlined(debug, "采集连接参数（120 秒）", this::startProfileCapture);
+            screen.outlined(debug, "采集协议消息（120 秒）", () -> new MaterialAlertDialogBuilder(this)
                     .setTitle("采集所选手环的协议消息")
-                    .setMessage("可能包含通知和健康数据。原始消息保存在本机私有目录，用于本次协议分析。")
+                    .setMessage("消息可能包含通知和健康数据。原始内容保存在本机私有目录，用于本次协议分析。")
                     .setNegativeButton("取消", null)
                     .setPositiveButton("开始采集", (dialog, which) -> action("openCapture", null))
                     .show());
-            screen.outlined(advanced, "独立连接诊断", () -> startActivity(new Intent(this, DiagnosticActivity.class)));
-            screen.outlined(advanced, "协议测试", () -> startActivity(new Intent(this, LabActivity.class)));
         }
-        status = screen.bodyText(advanced, "正在检查小米运动健康是否可用…");
-        screen.caption(advanced, "读取所选设备的绑定信息，在本机加密保存。型号以绑定里的设备信息为准。");
-        getContentResolver().registerContentObserver(CredentialProvider.URI, false, observer);
-        getContentResolver().registerContentObserver(DeviceCardProvider.URI, false, deviceObserver);
-        getContentResolver().registerContentObserver(HealthQueueProvider.URI, false, deviceObserver);
+    }
+
+    private static void setShown(LinearLayout cardInner, boolean shown) {
+        View frame = (View) cardInner.getParent();
+        (frame == null ? cardInner : frame).setVisibility(shown ? View.VISIBLE : View.GONE);
+    }
+
+    // ---- lifecycle ----
+
+    @Override protected void onResume() {
+        super.onResume();
+        refreshNotices();
+        promptHostVersions();
+        if (!rootGranted) requestRoot();
+        else continueInit();
+    }
+
+    private void continueInit() {
+        refreshOwnership();
         refreshDevice();
-        requestRoot();
+        refreshBonded();
+        if (hostSupported) refresh();
+        else worker.execute(() -> {
+            boolean supported = HostIdentity.installed(this, HostIdentity.MI_PACKAGE);
+            main.post(() -> {
+                if (isDestroyed()) return;
+                hostSupported = supported;
+                open.setEnabled(supported && rootGranted);
+                if (supported) refresh();
+                else status.setText("安装小米运动健康并配对手环后，即可使用导入窗口。");
+            });
+        });
+        ensureCallPermissions();
+    }
+
+    @Override protected void onDestroy() {
+        getContentResolver().unregisterContentObserver(observer);
+        getContentResolver().unregisterContentObserver(deviceObserver);
+        main.removeCallbacks(expireRefresh);
+        worker.shutdown();
+        super.onDestroy();
+    }
+
+    // ---- notices ----
+
+    private void refreshNotices() {
+        if (nearbyNotice == null) return;
+        setShown(nearbyNotice, !hasBluetoothPermission());
+        setShown(notifyNotice, !getSystemService(NotificationManager.class).areNotificationsEnabled());
+        LocalPrefs prefs = LocalPrefs.open(this, BandNotificationListener.SETTINGS);
+        boolean healthAccess = prefs.getBoolean("healthSecure", false)
+                && !prefs.getBoolean("healthApproved", true)
+                && prefs.getBoolean("healthGrantFailed", false);
+        setShown(healthAccessNotice, healthAccess);
+    }
+
+    private void openAppNotificationSettings() {
+        Intent intent = new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS);
+        intent.putExtra(Settings.EXTRA_APP_PACKAGE, getPackageName());
+        try {
+            startActivity(intent);
+        } catch (RuntimeException fallback) {
+            startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    Uri.parse("package:" + getPackageName())));
+        }
+    }
+
+    private void openHealthListenerSettings() {
+        Intent detail = new Intent("android.settings.NOTIFICATION_LISTENER_DETAIL_SETTINGS");
+        detail.putExtra("android.provider.extra.NOTIFICATION_LISTENER_COMPONENT_NAME",
+                "com.heytap.health/com.heytap.health.watch.commonnotification.HeytapNotificationListenerService");
+        try {
+            startActivity(detail);
+        } catch (RuntimeException failure) {
+            try {
+                startActivity(new Intent("android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS"));
+            } catch (RuntimeException ignored) {
+                ownershipStatus.setText("在系统设置 → 通知 → 通知使用权中找到 OPPO 健康。");
+            }
+        }
+    }
+
+    // ---- help ----
+
+    private void showSetupGuide() {
+        new MaterialAlertDialogBuilder(this)
+                .setTitle("使用说明")
+                .setMessage(Copy.GUIDE)
+                .setPositiveButton("好的", null)
+                .show();
     }
 
     private void shareDebugLog() {
@@ -263,66 +391,15 @@ public final class MainActivity extends AppCompatActivity {
             } catch (Exception failure) {
                 main.post(() -> {
                     if (!isDestroyed()) android.widget.Toast.makeText(this,
-                            "调试日志未能生成", android.widget.Toast.LENGTH_SHORT).show();
+                            "调试日志生成中断，稍后再试一次", android.widget.Toast.LENGTH_SHORT).show();
                 });
             }
         });
     }
 
-    @Override protected void onResume() {
-        super.onResume();
-        refreshHealthAccessCard();
-        promptHostVersions();
-        if (!rootGranted) requestRoot();
-        else continueInit();
-    }
-
-    private void refreshHealthAccessCard() {
-        if (healthAccessCard == null) return;
-        io.github.miam1ku.mibandoplusbridge.data.LocalPrefs prefs =
-                io.github.miam1ku.mibandoplusbridge.data.LocalPrefs.open(this, BandNotificationListener.SETTINGS);
-        boolean show = prefs.getBoolean("healthSecure", false)
-                && !prefs.getBoolean("healthApproved", true)
-                && prefs.getBoolean("healthGrantFailed", false);
-        healthAccessCard.setVisibility(show ? View.VISIBLE : View.GONE);
-    }
-
-    private void openHealthListenerSettings() {
-        Intent detail = new Intent("android.settings.NOTIFICATION_LISTENER_DETAIL_SETTINGS");
-        detail.putExtra("android.provider.extra.NOTIFICATION_LISTENER_COMPONENT_NAME",
-                "com.heytap.health/com.heytap.health.watch.commonnotification.HeytapNotificationListenerService");
-        try {
-            startActivity(detail);
-        } catch (RuntimeException failure) {
-            try {
-                startActivity(new Intent("android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS"));
-            } catch (RuntimeException ignored) {
-                ownershipStatus.setText("打不开通知使用权设置。");
-            }
-        }
-    }
-
-    private void continueInit() {
-        refreshOwnership();
-        refreshDevice();
-        refreshBonded();
-        if (hostSupported) refresh();
-        else worker.execute(() -> {
-            boolean supported = HostIdentity.installed(this, HostIdentity.MI_PACKAGE);
-            main.post(() -> {
-                if (isDestroyed()) return;
-                hostSupported = supported;
-                open.setEnabled(supported && rootGranted);
-                if (supported) refresh();
-                else status.setText("已安装的小米运动健康版本不受支持。导入已禁用。");
-            });
-        });
-        ensureCallPermissions();
-    }
-
     private void promptHostVersions() {
         if (isDestroyed() || versionPromptShown) return;
-        java.util.ArrayList<HostVersionNotice.Installed> installed = new java.util.ArrayList<>();
+        ArrayList<HostVersionNotice.Installed> installed = new ArrayList<>();
         for (HostVersionNotice.Expectation expect : HostVersionNotice.EXPECTATIONS) {
             try {
                 var info = getPackageManager().getPackageInfo(expect.packageName(), 0);
@@ -337,16 +414,16 @@ public final class MainActivity extends AppCompatActivity {
         SharedPreferences prefs = getSharedPreferences("host-version-notice", MODE_PRIVATE);
         if (finger.equals(prefs.getString("dismissed", ""))) return;
         versionPromptShown = true;
-        String message = HostVersionNotice.message(installed);
         new MaterialAlertDialogBuilder(this)
-                .setTitle("建议对齐已验证版本")
-                .setMessage(message)
+                .setTitle("建议使用实测版本")
+                .setMessage(HostVersionNotice.message(installed))
                 .setCancelable(true)
-                .setPositiveButton("我知道了", (dialog, which) -> prefs.edit().putString("dismissed", finger).apply())
+                .setPositiveButton("好的", (dialog, which) -> prefs.edit().putString("dismissed", finger).apply())
                 .setOnCancelListener(dialog -> prefs.edit().putString("dismissed", finger).apply())
                 .show();
     }
 
+    // ---- root ----
 
     private void requestRoot() {
         if (worker.isShutdown() || probingRoot || changingOwnership) return;
@@ -358,9 +435,7 @@ public final class MainActivity extends AppCompatActivity {
                 if (isDestroyed()) return;
                 probingRoot = false;
                 rootGranted = granted;
-                ownershipStatus.setText(granted
-                        ? "KernelSU 已授权。"
-                        : "未获得 root。打开 KernelSU，为本应用打开超级用户权限，返回后点「检查 Root」。");
+                ownershipStatus.setText(granted ? "KernelSU 已授权。" : Copy.setupHint(SetupProgress.Step.ROOT));
                 updateControls();
                 refreshDevice();
                 if (granted) continueInit();
@@ -371,11 +446,13 @@ public final class MainActivity extends AppCompatActivity {
     private void openKernelSu() {
         Intent launch = getPackageManager().getLaunchIntentForPackage("me.weishu.kernelsu");
         if (launch == null) {
-            ownershipStatus.setText("未找到 KernelSU。请安装管理器后为本应用打开超级用户权限。");
+            ownershipStatus.setText("安装 KernelSU 管理器后，为本应用打开超级用户。");
             return;
         }
         startActivity(launch);
     }
+
+    // ---- ownership ----
 
     private void refreshOwnership() {
         if (worker.isShutdown() || changingOwnership || !rootGranted) return;
@@ -398,14 +475,16 @@ public final class MainActivity extends AppCompatActivity {
                     BandLiveService.start(this);
                 }
                 message = !registered
-                        ? (needsOfficialRestore() ? "尚未登记，官方应用仍处于暂停状态。可添加设备或恢复官方管理。" : "尚未添加设备。")
+                        ? (needsOfficialRestore()
+                                ? "小米运动健康仍在暂停。可以添加设备，或在「管理」中恢复小米运动健康。"
+                                : "")
                         : "NATIVE".equals(owner.mode())
-                                ? "已由桥接管理。连接状态以设备实际响应为准。"
-                                : "当前由小米运动健康管理。可点击连接重新接管。";
+                                ? "由桥接管理，连接状态以手环实际响应为准。"
+                                : "当前由小米运动健康管理，点「立即同步」重新接管。";
             } catch (Exception failure) {
                 message = repository.isRegistered()
-                        ? "设备登记已保留。连接恢复未完成，请重试或恢复官方管理。"
-                        : "设备未登记，官方恢复未完成，请重试恢复官方管理。";
+                        ? "设备登记已保留。点「立即同步」再连接一次，或恢复官方管理。"
+                        : "点「恢复小米运动健康」再试一次。";
             }
             String idle = message;
             main.post(() -> {
@@ -423,7 +502,7 @@ public final class MainActivity extends AppCompatActivity {
             return;
         }
         if (!isUnlocked()) {
-            ownershipStatus.setText("请先解锁手机，再管理设备。");
+            ownershipStatus.setText("解锁手机后再管理设备。");
             return;
         }
         changingOwnership = true;
@@ -467,18 +546,19 @@ public final class MainActivity extends AppCompatActivity {
                     owner.restoreOfficial();
                     officialRestored = change == Change.RESTORE;
                     message = change == Change.REMOVE
-                            ? "已移除并恢复官方管理。绑定和健康历史已保留。"
-                            : "已恢复官方管理。绑定和健康历史已保留。";
+                            ? "已移除，小米运动健康已恢复。绑定和健康历史都已保留。"
+                            : "小米运动健康已恢复。绑定和健康历史都已保留。";
                 }
             } catch (Exception failure) {
+                String hint = Copy.ownershipFailure(failureCode(failure));
                 if (removalSaved || (change == Change.RESTORE && !repository.isRegistered())) {
-                    message = "已移除，官方恢复待重试。" + failureHint(failure);
+                    message = "已移除，小米运动健康待恢复。" + hint;
                 } else if (change == Change.REMOVE) {
-                    message = "移除未能保存，设备仍保持登记。请重试。";
+                    message = "设备仍在登记中，再点一次「从健康移除」。";
                 } else if (registrationSaved || (change == Change.RECONNECT && repository.isRegistered())) {
-                    message = "设备登记已保留，连接未完成。" + failureHint(failure);
+                    message = "设备登记已保留，连接稍后继续。" + hint;
                 } else {
-                    message = failureHint(failure);
+                    message = hint;
                 }
             }
             String visible = message;
@@ -497,6 +577,11 @@ public final class MainActivity extends AppCompatActivity {
         });
     }
 
+    private static String failureCode(Exception failure) {
+        return failure instanceof OwnershipController.Failure
+                ? ((OwnershipController.Failure) failure).code : failure.getMessage();
+    }
+
     private void requestNative(Change change) {
         if (changingOwnership) return;
         if (!rootGranted) {
@@ -504,7 +589,7 @@ public final class MainActivity extends AppCompatActivity {
             return;
         }
         if (!isUnlocked()) {
-            ownershipStatus.setText("请先解锁手机，再管理设备。");
+            ownershipStatus.setText("解锁手机后再管理设备。");
             return;
         }
         if (!hasBluetoothPermission()) {
@@ -512,13 +597,16 @@ public final class MainActivity extends AppCompatActivity {
             requestPermissions(new String[]{Manifest.permission.BLUETOOTH_CONNECT}, BLUETOOTH_PERMISSION);
             return;
         }
+        if (change == Change.RECONNECT) {
+            changeOwnership(change);
+            return;
+        }
         new MaterialAlertDialogBuilder(this)
-                .setTitle(change == Change.ADD ? "添加到健康并接管？" : "连接这只手环？")
-                .setMessage(change == Change.ADD
-                        ? "将暂停小米运动健康，由本应用接管手环。请先导入绑定，结束表盘、OTA 和 NFC，并完成 KernelSU 授权。绑定和健康历史会保留。"
-                        : "请先结束小米运动健康的表盘、OTA 和 NFC。接管需要 KernelSU 授权。绑定和健康历史会保留。")
+                .setTitle("添加到健康并接管？")
+                .setMessage("小米运动健康会暂停，由桥接接管手环。开始前请结束表盘安装、OTA 升级和 NFC 操作。"
+                        + "绑定和健康历史都会保留。")
                 .setNegativeButton("取消", null)
-                .setPositiveButton(change == Change.ADD ? "添加并接管" : "连接", (dialog, which) -> changeOwnership(change))
+                .setPositiveButton("添加并接管", (dialog, which) -> changeOwnership(change))
                 .show();
     }
 
@@ -531,9 +619,15 @@ public final class MainActivity extends AppCompatActivity {
         if (requestCode != BLUETOOTH_PERMISSION) return;
         Change requested = pendingPermission;
         pendingPermission = null;
+        refreshNotices();
         refreshDevice();
-        if (hasBluetoothPermission() && requested != null) requestNative(requested);
-        else ownershipStatus.setText("添加或连接需要附近设备权限。请在权限设置中授权。已有登记会保留。");
+        refreshBonded();
+        if (hasBluetoothPermission()) {
+            if (requested != null) requestNative(requested);
+            else refreshOwnership();
+        } else {
+            ownershipStatus.setText("授权附近设备后即可添加和连接，已有登记保持原样。");
+        }
     }
 
     private void ensureCallPermissions() {
@@ -562,15 +656,17 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     private boolean needsOfficialRestore() {
-        var ownership = io.github.miam1ku.mibandoplusbridge.data.LocalPrefs.open(this, "ownership");
+        var ownership = LocalPrefs.open(this, "ownership");
         return ownership.getBoolean("ownsDisable", false) || ownership.getBoolean("transitionPending", false);
     }
+
+    // ---- controls ----
 
     private void updateControls() {
         boolean registered = new BandStateRepository(this).isRegistered();
         SetupProgress progress = readProgress();
         if (setupCard != null) {
-            setupCard.setVisibility(progress.showChecklist() ? View.VISIBLE : View.GONE);
+            setShown(setupCard, progress.showChecklist());
             if (progress.showChecklist()) bindChecklist(progress);
         }
         if (homePrimary != null) {
@@ -581,10 +677,13 @@ public final class MainActivity extends AppCompatActivity {
             openKsu.setVisibility(rootGranted ? View.GONE : View.VISIBLE);
             openKsu.setEnabled(!probingRoot);
         }
-        remove.setVisibility(registered && rootGranted ? View.VISIBLE : View.GONE);
+        boolean officialPaused = needsOfficialRestore();
+        boolean manage = rootGranted && (registered || officialPaused);
+        manageHeading.setVisibility(manage ? View.VISIBLE : View.GONE);
+        setShown(manageCard, manage);
+        remove.setVisibility(registered ? View.VISIBLE : View.GONE);
         remove.setEnabled(!changingOwnership);
-        restore.setVisibility(rootGranted && needsOfficialRestore() ? View.VISIBLE : View.GONE);
-        restore.setText(registered ? "恢复小米运动健康" : "重试恢复小米运动健康");
+        restore.setVisibility(officialPaused ? View.VISIBLE : View.GONE);
         restore.setEnabled(!changingOwnership);
         advancedRestore.setEnabled(!changingOwnership && rootGranted);
     }
@@ -610,32 +709,21 @@ public final class MainActivity extends AppCompatActivity {
         } catch (Exception ignored) { }
         return new SetupProgress(rootGranted, hasBinding, hasProfile, registered, nativeOwned, accountConfirmed);
     }
+
     private void bindChecklist(SetupProgress progress) {
-        bindChecklistRow(checklistRoot, progress, SetupProgress.Step.ROOT, "KernelSU 授权");
-        bindChecklistRow(checklistImport, progress, SetupProgress.Step.IMPORT, "导入绑定");
-        bindChecklistRow(checklistProfile, progress, SetupProgress.Step.PROFILE, "采集连接参数");
-        bindChecklistRow(checklistAdd, progress, SetupProgress.Step.ADD, "添加到健康");
+        setupTitle.setText("首次设置 · 第 " + progress.visibleIndex() + "/3 步");
+        int current = progress.visibleIndex();
+        screen.setStep(stepRoot, 1, "授权 Root", stepState(1, current));
+        screen.setStep(stepImport, 2, "导入绑定", stepState(2, current));
+        screen.setStep(stepAdd, 3, "添加到健康", stepState(3, current));
         String hint = progress.primaryHint();
         primaryHint.setText(hint);
         primaryHint.setVisibility(hint.isEmpty() ? View.GONE : View.VISIBLE);
     }
 
-    private void bindChecklistRow(TextView row, SetupProgress progress, SetupProgress.Step step, String title) {
-        int variant = MaterialColors.getColor(this,
-                com.google.android.material.R.attr.colorOnSurfaceVariant, 0);
-        int primary = MaterialColors.getColor(this, com.google.android.material.R.attr.colorPrimary, 0);
-        int current = progress.current().ordinal();
-        int index = step.ordinal();
-        if (index < current) {
-            row.setText("已完成 · " + title);
-            row.setTextColor(variant);
-        } else if (index == current) {
-            row.setText("正在进行 · " + title);
-            row.setTextColor(primary);
-        } else {
-            row.setText("未完成 · " + title);
-            row.setTextColor(variant);
-        }
+    private static StepState stepState(int index, int current) {
+        if (index < current) return StepState.DONE;
+        return index == current ? StepState.CURRENT : StepState.LATER;
     }
 
     private void runHomePrimary() {
@@ -649,92 +737,81 @@ public final class MainActivity extends AppCompatActivity {
         }
     }
 
+    // ---- status card ----
+
     private void refreshDevice() {
         if (isDestroyed() || worker.isShutdown()) return;
         updateControls();
-        boolean bluetooth = hasBluetoothPermission();
-        boolean notify = getSystemService(NotificationManager.class).areNotificationsEnabled();
-        publishPermissionStatus(bluetooth, notify);
+        refreshNotices();
         if (!isUnlocked()) {
-            deviceName.setText("请先解锁手机以读取绑定信息。");
-            connectionLine.setVisibility(View.GONE);
+            deviceName.setText("小米手环");
+            screen.setChip(statusChip, "解锁后显示", Tone.NEUTRAL);
+            setOptionalCaption(connectionHint, "解锁手机后显示手环信息。");
             metricsLine.setVisibility(View.GONE);
             healthLine.setVisibility(View.GONE);
             return;
         }
-        connectionLine.setVisibility(View.VISIBLE);
-        var state = io.github.miam1ku.mibandoplusbridge.data.LocalPrefs.open(this, "band-state");
+        var state = LocalPrefs.open(this, "band-state");
         if (new BandStateRepository(this).isRegistered()) {
             deviceName.setText(safeIdentity(
                     BandCatalog.displayName(state.getString("modelId", ""), state.getString("name", "")),
                     "已登记手环"));
-            connectionLine.setText(state.getBoolean("connected", false) ? "已连接" : offlineHint());
+            boolean connected = state.getBoolean("connected", false);
+            if (connected) {
+                screen.setChip(statusChip, "已连接", Tone.POSITIVE);
+                setOptionalCaption(connectionHint, "");
+            } else {
+                screen.setChip(statusChip, "等待连接", Tone.NEUTRAL);
+                setOptionalCaption(connectionHint, Copy.offlineReason(liveStatus()));
+            }
             setOptionalCaption(metricsLine, metricsText(state));
             setOptionalCaption(healthLine, healthExtras());
             return;
         }
-        deviceName.setText("未添加");
-        connectionLine.setText("未添加");
+        deviceName.setText("小米手环");
+        screen.setChip(statusChip, "待添加", Tone.NEUTRAL);
+        setOptionalCaption(connectionHint, "");
         healthLine.setVisibility(View.GONE);
         try {
             JSONObject binding = new BindingStore(this).read();
-            setOptionalCaption(metricsLine, binding == null ? "" : "已导入，待添加");
+            setOptionalCaption(metricsLine, binding == null
+                    ? "导入绑定后即可添加到健康。" : "绑定已导入，点「添加到健康」即可连接。");
         } catch (Exception unavailable) {
-            setOptionalCaption(metricsLine, "暂时无法读取绑定信息。请解锁手机后重试；已有数据未删除。");
+            setOptionalCaption(metricsLine, "解锁手机后显示绑定信息，已有数据都在。");
         }
     }
 
-    private static String metricsText(io.github.miam1ku.mibandoplusbridge.data.LocalPrefs state) {
+    private static String metricsText(LocalPrefs state) {
         int battery = state.getInt("battery", -1);
         long lastSync = state.getLong("lastSyncAtMs", 0);
         String batteryText = battery >= 0 && battery <= 100 ? "电量 " + battery + "%" : "";
         String syncText = lastSync > 0
-                ? java.text.DateFormat.getDateTimeInstance().format(new java.util.Date(lastSync))
+                ? "同步于 " + java.text.DateFormat.getDateTimeInstance(java.text.DateFormat.MEDIUM,
+                        java.text.DateFormat.SHORT).format(new java.util.Date(lastSync))
                 : "";
         if (batteryText.isEmpty()) return syncText;
         if (syncText.isEmpty()) return batteryText;
         return batteryText + " · " + syncText;
     }
 
-    private String offlineHint() {
-        String status = "";
+    private String liveStatus() {
         java.io.File file = new java.io.File(getNoBackupFilesDir(), "live-status.txt");
         if (file.isFile() && file.length() > 0 && file.length() < 256) {
             try (java.io.FileInputStream in = new java.io.FileInputStream(file)) {
                 byte[] bytes = new byte[(int) file.length()];
                 int n = in.read(bytes);
-                if (n > 0) status = new String(bytes, 0, n, java.nio.charset.StandardCharsets.UTF_8).trim();
+                if (n > 0) return new String(bytes, 0, n, java.nio.charset.StandardCharsets.UTF_8).trim();
             } catch (Exception ignored) { }
         }
-        return switch (status) {
-            case "OBSERVED_PROFILE_REQUIRED" -> "离线 · 连接参数丢失";
-            case "NATIVE_OWNERSHIP_REQUIRED" -> "离线 · 需要重新接管";
-            case "UNPROVISIONED", "BINDING_INCOMPLETE", "BINDING_ADDRESS", "BINDING_REGION",
-                    "TOKEN_ENCODING_UNSUPPORTED" -> "离线 · 绑定不完整";
-            case "CREDENTIAL_REFRESH_REQUIRED" -> "离线 · 需要重新导入绑定";
-            case "BLUETOOTH_DISABLED" -> "离线 · 蓝牙已关闭";
-            default -> "离线";
-        };
+        return "";
     }
 
     private String healthExtras() {
-        String extra = "";
-        if ("UNAVAILABLE".equals(getSharedPreferences("live-service", MODE_PRIVATE)
-                .getString("healthHostStatus", ""))) {
-            extra = "健康处理不可用，请打开 OHealth 后重试。";
-        }
-        String collection = getSharedPreferences("live-service", MODE_PRIVATE).getString("healthCollectionStatus", "");
-        String collectionText = switch (collection) {
-            case "ACCOUNT_CONFIRMATION_REQUIRED" -> "健康记录写入当前 OHealth 账号，并由 OHealth 同步到云端。";
-            case "HEALTH_OUTBOX_FULL" -> "等待健康处理，采集已暂停，记录未丢弃。";
-            case "HISTORY_FORMAT_UNSUPPORTED" -> "部分健康文件暂不支持，原始记录已保留。";
-            case "HISTORY_FILE_REJECTED" -> "健康文件未通过校验，将在下次同步重试。";
-            case "HISTORY_STORAGE_FAILED", "HEALTH_STORAGE_UNAVAILABLE" -> "存储不可用，健康同步已暂停。";
-            case "HEALTH_REPLAY_PAUSED", "HISTORY_CONFIRMATION_PENDING" -> "健康同步待重试，已保存的记录仍保留。";
-            default -> "";
-        };
-        if (collectionText.isEmpty()) return extra;
-        return extra.isEmpty() ? collectionText : extra + "\n" + collectionText;
+        var live = getSharedPreferences("live-service", MODE_PRIVATE);
+        String host = Copy.healthHost(live.getString("healthHostStatus", ""));
+        String collection = Copy.healthCollection(live.getString("healthCollectionStatus", ""));
+        if (collection.isEmpty()) return host;
+        return host.isEmpty() ? collection : host + "\n" + collection;
     }
 
     private static void setOptionalCaption(TextView view, String value) {
@@ -743,49 +820,12 @@ public final class MainActivity extends AppCompatActivity {
         view.setText(show ? value : "");
     }
 
-    private void publishPermissionStatus(boolean bluetooth, boolean notify) {
-        if (bluetooth && notify) {
-            permissionStatus.setVisibility(View.GONE);
-            permissionStatus.setOnClickListener(null);
-            return;
-        }
-        permissionStatus.setVisibility(View.VISIBLE);
-        permissionStatus.setOnClickListener(null);
-        permissionStatus.setText("附近设备权限：" + (bluetooth ? "已授权" : "未授权")
-                + "\n本应用通知：" + (notify ? "已开启" : "未开启"));
-    }
-
     private static String safeIdentity(String value, String fallback) {
         String clean = value == null ? "" : value.replaceAll("[\\p{Cntrl}\\p{Cf}]", "").trim();
         return clean.isEmpty() || clean.length() > 80 ? fallback : clean;
     }
 
-    private static String failureHint(Exception failure) {
-        String code = failure instanceof OwnershipController.Failure
-                ? ((OwnershipController.Failure) failure).code : failure.getMessage();
-        if (code == null) return "操作未完成，请重试；必要时先恢复官方管理。";
-        return switch (code) {
-            case "USER_LOCKED" -> "请先解锁手机。";
-            case "UNPROVISIONED", "BINDING_INCOMPLETE" -> "绑定信息不完整或不可用，请在高级设置中重新导入。";
-            case "BINDING_ADDRESS" -> "绑定里的蓝牙地址不是大写 MAC。请重新选择这只手环再导入。";
-            case "BINDING_REGION" -> "绑定里没有地区。请打开小米运动健康里的这只手环，等它连上后再导入一次。";
-            case "TOKEN_ENCODING_UNSUPPORTED" -> "绑定里的密钥不是 16 字节。请让手环在小米运动健康里连上一次后再导入。";
-            case "OBSERVED_PROFILE_REQUIRED" -> "连接参数丢失。请点「采集连接参数」，在小米运动健康中重连一次手环。";
-            case "FIRMWARE_OR_MODEL_UNSUPPORTED" -> "手环未返回可用的型号或固件。";
-            case "OOB_BRANCH_UNSUPPORTED" -> "这只设备使用了不受支持的配对认证。";
-            case "PROTOCOL_VERSION_UNSUPPORTED", "SESSION_CONFIGURATION_UNSUPPORTED" -> "官方连接不是可接管的 SPP 会话。蓝牙或 GATT-only 设备无法添加。";
-            case "DEVICE_IDENTITY_CHANGED" -> "导入设备与已保存的设备身份不一致，不能替换。请重新导入原手环。";
-            case "BAND_STATE_STORAGE_FAILED", "OWNERSHIP_STORAGE_FAILED" -> "设备状态未能保存，请检查可用存储空间后重试。";
-            case "ROOT_REQUIRED", "ROOT_ACTION_FAILED", "ROOT_ACTION_TIMEOUT" -> "请确认已授予桥接应用 KernelSU root 权限后重试。";
-            case "HOST_VERSION_UNSUPPORTED" -> "小米运动健康版本不受支持，请更换受支持的版本后重试。";
-            case "NEARBY_PERMISSION_REQUIRED" -> "请授予附近设备权限后重试。";
-            case "DEVICE_NOT_REGISTERED" -> "请先添加设备。";
-            case "DIAGNOSTIC_SOCKET_STILL_ACTIVE" -> "连接尚未完全停止，请稍后重试恢复官方管理。";
-            case "OWNERSHIP_RECOVERY_REQUIRED", "OFFICIAL_ALREADY_DISABLED" -> "请先恢复官方管理并确认官方应用已启用，再重试接管。";
-            case "OWNERSHIP_ROLLBACK_FAILED" -> "接管回滚没有完成，小米运动健康可能仍是停用。请再试一次恢复官方管理。";
-            default -> "操作未完成，请重试；必要时先恢复官方管理。";
-        };
-    }
+    // ---- credential provider ----
 
     private void action(String method, Bundle arguments) {
         if (isDestroyed() || worker.isShutdown()) return;
@@ -802,7 +842,7 @@ public final class MainActivity extends AppCompatActivity {
                 });
             } catch (RuntimeException rejected) {
                 main.post(() -> {
-                    if (!isDestroyed()) status.setText("操作未完成。请核对设备地址，并确认手机已解锁。");
+                    if (!isDestroyed()) status.setText("解锁手机、核对所选设备后再点一次。");
                 });
             }
         });
@@ -812,146 +852,80 @@ public final class MainActivity extends AppCompatActivity {
 
     private void show(Bundle response) {
         if (response == null) {
-            status.setText("导入服务不可用。");
+            status.setText("导入服务正在启动，稍后再点一次。");
             return;
         }
         String code = response.getString("status", "CREDENTIAL_STORAGE_FAILED");
-        String text = switch (code) {
-            case "IMPORT_WINDOW_OPEN" -> "导入窗口已开启。请在小米运动健康中打开所选设备，让官方应用重新读取绑定信息。";
-            case "IMPORT_WINDOW_CLOSED" -> "所有导入和协议采集窗口均已关闭。";
-            case "DIAGNOSTIC_WINDOW_OPEN" -> "连接参数采集已开启。仅观察已导入手环的连接类型和协议版本，不记录消息内容或密钥。请在官方应用中重连。";
-            case "PROTOCOL_CAPTURE_OPEN" -> "协议消息采集已开启，120 秒后关闭。请执行本次测试操作。";
-            case "UNPROVISIONED" -> "尚未导入绑定信息。";
-            case "BINDING_SAVED" -> "绑定已保存。型号：" + response.getString("model", "")
-                    + "\n产品：" + response.getString("productId", "")
-                    + "\n固件：" + (response.getString("firmware", "").isBlank() ? "连接后读取" : response.getString("firmware", ""));
-            case "BINDING_INCOMPLETE" -> "绑定已保存。点「添加到健康」后即可连接。\n型号："
-                    + response.getString("model", "") + "\n产品：" + response.getString("productId", "")
-                    + "\n固件：" + (response.getString("firmware", "").isBlank() ? "连接后读取" : response.getString("firmware", ""));
-            case "NO_BAND_KEY" -> "本地数据库里没有手环密钥。请先在小米运动健康中完成配对。";
-            case "MI_DATABASE_MISSING" -> "没有找到小米运动健康的设备数据库。";
-            case "MI_DATABASE_UNREADABLE" -> "设备数据库无法读取，请稍后重试。";
-            case "ROOT_ACTION_FAILED", "ROOT_ACTION_TIMEOUT" -> "root 读取数据库没有完成。";
-            case "MULTIPLE_BANDS" -> "数据库里有多只手环，请选择其中一只。";
-            case "USER_LOCKED" -> "请先解锁手机。";
-            case "CREDENTIAL_STORAGE_FAILED" -> "绑定这次没有保存。请解锁手机后再点一次「导入绑定」。";
-            default -> "操作没有完成。请再试一次。";
-        };
+        String text = Copy.importResult(code, response.getString("model", ""),
+                response.getString("productId", ""), response.getString("firmware", ""));
         String observation = response.getString("transportObservation", "");
         if (!observation.isBlank()) text += "\n连接参数（仅观察）：\n" + observation;
-        if (response.getBoolean("diagnosticOpen", false)) text += "\n连接参数采集窗口仍开启。";
-        if (response.getBoolean("captureOpen", false)) text += "\n协议消息采集窗口仍开启。";
+        if (response.getBoolean("diagnosticOpen", false)) text += "\n连接参数采集窗口开启中。";
+        if (response.getBoolean("captureOpen", false)) text += "\n协议消息采集窗口开启中。";
         String captureFile = response.getString("captureFile", "");
         if (!captureFile.isBlank()) text += "\n采集记录：" + response.getInt("captureRecords")
                 + "，字节：" + response.getLong("captureBytes") + "\n文件：" + captureFile;
         String captureError = response.getString("captureError", "");
-        if (!captureError.isBlank()) text += "\n采集不完整：" + captureError;
+        if (!captureError.isBlank()) text += "\n采集中断：" + captureError;
         status.setText(text);
-        if (ownershipStatus != null && ("IMPORT_WINDOW_OPEN".equals(code)
-                || "DIAGNOSTIC_WINDOW_OPEN".equals(code))) {
+        if ("IMPORT_WINDOW_OPEN".equals(code) || "DIAGNOSTIC_WINDOW_OPEN".equals(code)) {
             ownershipStatus.setText(text);
             if (launchHostAfterOpen) {
                 launchHostAfterOpen = false;
-                if (hostSupported) {
-                    Intent launch = getPackageManager().getLaunchIntentForPackage(HostIdentity.MI_PACKAGE);
-                    if (launch == null) {
-                        ownershipStatus.setText("无法打开小米运动健康。请检查应用是否已安装且启用。");
-                    } else {
-                        startActivity(launch);
-                    }
-                }
+                if (hostSupported) launchMiHealth();
             }
         }
     }
+
+    private void launchMiHealth() {
+        Intent launch = getPackageManager().getLaunchIntentForPackage(HostIdentity.MI_PACKAGE);
+        if (launch == null) {
+            String text = "在桌面打开小米运动健康，确认它已安装并启用。";
+            status.setText(text);
+            ownershipStatus.setText(text);
+            return;
+        }
+        startActivity(launch);
+    }
+
+    // ---- bonded devices (advanced) ----
 
     private void refreshBonded() {
         if (bonded == null) return;
         bonded.removeAllViews();
         if (!hasBluetoothPermission()) {
-            screen.caption(bonded, "需要附近设备权限才能列出已配对设备。");
+            screen.caption(bonded, "授权附近设备后，这里会列出已配对设备。");
             return;
         }
         BluetoothAdapter adapter = getSystemService(BluetoothManager.class).getAdapter();
         if (adapter == null) {
-            screen.caption(bonded, "此设备没有蓝牙适配器。");
+            screen.caption(bonded, "这台手机需要蓝牙才能连接手环。");
             return;
         }
         java.util.Set<BluetoothDevice> devices;
         try {
             devices = adapter.getBondedDevices();
         } catch (SecurityException denied) {
-            screen.caption(bonded, "需要附近设备权限才能列出已配对设备。");
+            screen.caption(bonded, "授权附近设备后，这里会列出已配对设备。");
             return;
         }
         if (devices == null || devices.isEmpty()) {
-            screen.caption(bonded, "没有已配对设备。请先在系统蓝牙设置中配对手环。");
+            screen.caption(bonded, "在系统蓝牙设置中配对手环后，它会出现在这里。");
             return;
         }
+        screen.caption(bonded, "选择已配对设备");
         java.util.List<BluetoothDevice> listed = sortedBonded(devices);
         preferXiaomiBand(listed);
         for (BluetoothDevice device : listed) {
             String mac = device.getAddress() == null ? "" : device.getAddress().toUpperCase(java.util.Locale.ROOT);
             String name = BandCatalog.displayName(null, device.getName());
             boolean chosen = !mac.isBlank() && mac.equals(selectedAddress);
-            Button choice = screen.outlined(bonded, (chosen ? "已选择 · " : "") + name, () -> {
+            Button choice = screen.outlined(bonded, (chosen ? "✓ " : "") + name, () -> {
                 selectedAddress = mac;
                 refreshBonded();
             });
             choice.setEnabled(!chosen);
         }
-    }
-    private void showSetupGuide() {
-        new MaterialAlertDialogBuilder(this)
-                .setTitle("使用说明")
-                .setMessage("1. 打开 KernelSU，为本应用打开超级用户权限，返回后点「检查 Root」。\n"
-                        + "2. 导入绑定：用 root 读取小米运动健康本地数据库里的手环密钥。\n"
-                        + "3. 添加到健康：暂停小米运动健康并由本应用接管。\n"
-                        + "控制中心编辑里添加「手环」。下拉或点一下会拉起连接。\n\n"
-                        + SETUP_PREREQ)
-                .setPositiveButton("关闭", null)
-                .show();
-    }
-
-    private void startBindingImport() {
-        if (changingOwnership) return;
-        if (!rootGranted) {
-            requestRoot();
-            return;
-        }
-        if (!isUnlocked()) {
-            ownershipStatus.setText("请先解锁手机，再导入绑定。");
-            return;
-        }
-        confirmBindingImport();
-    }
-
-    private void pickBondedDevice() {
-        BluetoothAdapter adapter = getSystemService(BluetoothManager.class).getAdapter();
-        java.util.Set<BluetoothDevice> devices = adapter == null ? null : adapter.getBondedDevices();
-        if (devices == null || devices.isEmpty()) {
-            new MaterialAlertDialogBuilder(this)
-                    .setTitle("请先在系统蓝牙中配对手环")
-                    .setPositiveButton("知道了", null)
-                    .show();
-            return;
-        }
-        java.util.List<BluetoothDevice> listed = sortedBonded(devices);
-        preferXiaomiBand(listed);
-        String[] names = new String[listed.size()];
-        String[] macs = new String[listed.size()];
-        for (int index = 0; index < listed.size(); index++) {
-            BluetoothDevice device = listed.get(index);
-            macs[index] = device.getAddress() == null ? "" : device.getAddress().toUpperCase(java.util.Locale.ROOT);
-            names[index] = BandCatalog.displayName(null, device.getName());
-        }
-        new MaterialAlertDialogBuilder(this)
-                .setTitle("选择已配对设备")
-                .setItems(names, (dialog, which) -> {
-                    selectedAddress = macs[which];
-                    refreshBonded();
-                    confirmBindingImport();
-                })
-                .show();
     }
 
     private static java.util.List<BluetoothDevice> sortedBonded(java.util.Set<BluetoothDevice> devices) {
@@ -982,10 +956,21 @@ public final class MainActivity extends AppCompatActivity {
         if (only != null) selectedAddress = only.toUpperCase(java.util.Locale.ROOT);
     }
 
-    private void confirmBindingImport() {
+    // ---- database import ----
+
+    private void startBindingImport() {
+        if (changingOwnership) return;
+        if (!rootGranted) {
+            requestRoot();
+            return;
+        }
+        if (!isUnlocked()) {
+            ownershipStatus.setText("解锁手机后再导入绑定。");
+            return;
+        }
         new MaterialAlertDialogBuilder(this)
                 .setTitle("导入绑定？")
-                .setMessage("用 root 读取小米运动健康本地数据库中的手环密钥。不会打开官方应用，也不会上传。")
+                .setMessage("用 root 读取小米运动健康本地数据库中的手环密钥。全程在本机完成，密钥加密保存在本应用里。")
                 .setNegativeButton("取消", null)
                 .setPositiveButton("读取", (dialog, which) -> importFromDatabase(selectedAddress))
                 .show();
@@ -1012,18 +997,17 @@ public final class MainActivity extends AppCompatActivity {
                     return;
                 }
                 show(shown);
-                if (ownershipStatus != null && status != null) {
-                    databaseImportNote = status.getText().toString();
-                    ownershipStatus.setText(databaseImportNote);
-                }
+                databaseImportNote = status.getText().toString();
+                ownershipStatus.setText(databaseImportNote);
                 updateControls();
+                refreshDevice();
             });
         });
     }
 
     private void chooseDatabaseBand(String[] choices) {
         if (choices == null || choices.length == 0) {
-            ownershipStatus.setText("本地数据库里没有手环密钥。请先在小米运动健康中完成配对。");
+            ownershipStatus.setText(Copy.importResult("NO_BAND_KEY", "", "", ""));
             return;
         }
         String[] labels = new String[choices.length];
@@ -1036,10 +1020,12 @@ public final class MainActivity extends AppCompatActivity {
             labels[index] = BandCatalog.displayName(model, name);
         }
         new MaterialAlertDialogBuilder(this)
-                .setTitle("选择手环")
+                .setTitle("选择要导入的手环")
                 .setItems(labels, (dialog, which) -> importFromDatabase(addresses[which]))
                 .show();
     }
+
+    // ---- connection profile capture (debug) ----
 
     private void startProfileCapture() {
         if (changingOwnership) return;
@@ -1048,17 +1034,17 @@ public final class MainActivity extends AppCompatActivity {
             return;
         }
         if (!isUnlocked()) {
-            ownershipStatus.setText("请先解锁手机，再采集连接参数。");
+            ownershipStatus.setText("解锁手机后再采集连接参数。");
             return;
         }
         if (!hostSupported) {
-            ownershipStatus.setText("已安装的小米运动健康版本不受支持。采集已禁用。");
+            ownershipStatus.setText("安装小米运动健康并配对手环后，即可采集连接参数。");
             return;
         }
         if (needsOfficialRestore()) {
             new MaterialAlertDialogBuilder(this)
                     .setTitle("先恢复官方管理")
-                    .setMessage("采集连接参数需要小米运动健康可用。请先恢复官方管理，再打开手环连接。")
+                    .setMessage("采集连接参数时要用到小米运动健康。先恢复官方管理，随后会打开采集窗口。")
                     .setNegativeButton("取消", null)
                     .setPositiveButton("恢复", (dialog, which) -> {
                         profileAfterRestore = true;
@@ -1069,7 +1055,7 @@ public final class MainActivity extends AppCompatActivity {
         }
         new MaterialAlertDialogBuilder(this)
                 .setTitle("采集连接参数？")
-                .setMessage("将开启 120 秒采集窗口。立刻打开小米运动健康并点开这只手环，让它重新连上。")
+                .setMessage("将开启 120 秒采集窗口，随后打开小米运动健康。点开这只手环，让它重新连上。")
                 .setNegativeButton("取消", null)
                 .setPositiveButton("开始采集", (dialog, which) -> startProfileWindow())
                 .show();
@@ -1078,46 +1064,5 @@ public final class MainActivity extends AppCompatActivity {
     private void startProfileWindow() {
         launchHostAfterOpen = true;
         action("openDiagnostics", null);
-    }
-
-    private void sendDebugCall() {
-        sendDebugCommand("测试来电", BandNotificationCommand.incomingCall(
-                "测试来电", Instant.now(), ZoneId.systemDefault()));
-    }
-
-    private void endDebugCall() {
-        sendDebugCommand("来电结束", BandNotificationCommand.endCall());
-    }
-
-    private void sendDebugCommand(String label,
-            nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto.Command command) {
-        if (ownershipStatus == null) return;
-        if (!BandLiveService.notificationSessionReady(this)) {
-            try { BandLiveService.start(this); } catch (RuntimeException ignored) { }
-            String message = "会话未就绪，无法发送" + label + "。请先点「立即同步」，等手环连上后再试。";
-            ownershipStatus.setText(message);
-            if (status != null) status.setText(message);
-            return;
-        }
-        ownershipStatus.setText("正在发送" + label + "…");
-        if (status != null) status.setText("正在发送" + label + "…");
-        BandLiveService.forwardHostNotification(this, command).whenComplete((ignored, error) -> main.post(() -> {
-            if (isDestroyed()) return;
-            String detail = error == null ? "已确认送达手环。"
-                    : ("发送失败：" + (error.getMessage() == null ? error.getClass().getSimpleName() : error.getMessage()));
-            String message = label + detail;
-            android.util.Log.i("OplusBandBridge", "DEBUG_NOTIFY " + message);
-            ownershipStatus.setText(message);
-            if (status != null) status.setText(message);
-        }));
-    }
-
-
-    @Override protected void onDestroy() {
-        getContentResolver().unregisterContentObserver(observer);
-        getContentResolver().unregisterContentObserver(deviceObserver);
-        main.removeCallbacks(expireRefresh);
-        worker.shutdown();
-        super.onDestroy();
     }
 }
