@@ -125,7 +125,108 @@ public final class OHealthDeviceHook {
         installDevicePages(loader);
         installNativePanel(loader);
         installEmptyCloudCleanup(loader);
+        installDeviceImage(loader);
         observeSnapshots(loader);
+    }
+
+    /** Replaces the OPPO body and detail picture with the Mi Fitness server image. The face layer stays hidden. */
+    private static void installDeviceImage(ClassLoader loader) {
+        try {
+            Class<?> model = XposedHelpers.findClass(
+                    "com.heytap.health.linkage.ui.DeviceDetailsViewModel", loader);
+            XposedBridge.hookAllMethods(model, "parseImage", new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam param) {
+                    if (param.args == null || param.args.length != 4) return;
+                    String uri = imageUri();
+                    if (uri.isEmpty()) return;
+                    Object mac = XposedHelpers.getObjectField(param.thisObject, "mMac");
+                    Object deviceId = XposedHelpers.getObjectField(param.thisObject, "mDeviceId");
+                    if (!ourBand(mac, deviceId)) return;
+                    Class<?> beanClass = XposedHelpers.findClass(
+                            "com.heytap.health.linkage.ui.ImageBean", loader);
+                    Object bean = XposedHelpers.newInstance(beanClass, false);
+                    XposedHelpers.callMethod(bean, "setIcon2DUrl", uri);
+                    Object live = XposedHelpers.getObjectField(param.thisObject, "mImageLiveData");
+                    if (Looper.myLooper() == Looper.getMainLooper()) {
+                        XposedHelpers.callMethod(live, "setValue", bean);
+                    } else {
+                        XposedHelpers.callMethod(live, "postValue", bean);
+                    }
+                    param.setResult(null);
+                }
+            });
+            HookRuntime.log("OHEALTH_DEVICE_IMAGE_HOOK parseImage");
+        } catch (Throwable failure) {
+            HookRuntime.log("OHEALTH_DEVICE_IMAGE_HOOK_UNAVAILABLE parseImage "
+                    + failure.getClass().getSimpleName());
+        }
+        try {
+            Class<?> watch = XposedHelpers.findClass(
+                    "com.heytap.health.watchpair.view.WatchView", loader);
+            XC_MethodHook paint = new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam param) {
+                    applyBody(param.thisObject);
+                }
+            };
+            XposedHelpers.findAndHookMethod(watch, "updateId", boolean.class, paint);
+            XposedHelpers.findAndHookMethod(watch, "setBlackFaceView", paint);
+            XposedHelpers.findAndHookMethod(watch, "runOrPostponeUntilResReady", Runnable.class,
+                    new XC_MethodHook() {
+                        @Override protected void beforeHookedMethod(MethodHookParam param) {
+                            if (!(param.args[0] instanceof Runnable host)) return;
+                            Object view = param.thisObject;
+                            param.args[0] = (Runnable) () -> {
+                                host.run();
+                                applyBody(view);
+                            };
+                        }
+                    });
+            HookRuntime.log("OHEALTH_DEVICE_IMAGE_HOOK watch");
+        } catch (Throwable failure) {
+            HookRuntime.log("OHEALTH_DEVICE_IMAGE_HOOK_UNAVAILABLE watch "
+                    + failure.getClass().getSimpleName());
+        }
+    }
+
+    private static String imageUri() {
+        Bundle shown = display();
+        if (shown == null) return "";
+        String uri = shown.getString("imageUri", "");
+        return uri == null ? "" : uri;
+    }
+
+    private static void applyBody(Object watch) {
+        try {
+            String uri = imageUri();
+            if (uri.isEmpty() || watch == null) return;
+            Bundle shown = display();
+            if (shown == null) return;
+            Object mac = XposedHelpers.getObjectField(watch, "mDeviceMac");
+            if (!io.github.miam1ku.mibandoplusbridge.data.MacIds.same(
+                    shown.getString("mac", ""), String.valueOf(mac))) return;
+            Object shell = XposedHelpers.callMethod(watch, "getShellView");
+            if (!(shell instanceof android.widget.ImageView image)) return;
+            image.setScaleType(android.widget.ImageView.ScaleType.FIT_CENTER);
+            ClassLoader loader = watch.getClass().getClassLoader();
+            Class<?> glide = Class.forName("com.bumptech.glide.Glide", false, loader);
+            Object request = glide.getMethod("with", android.view.View.class).invoke(null, image);
+            Object builder;
+            try {
+                builder = request.getClass().getMethod("load", String.class).invoke(request, uri);
+            } catch (NoSuchMethodException missing) {
+                builder = request.getClass().getMethod("load", Object.class).invoke(request, uri);
+            }
+            builder.getClass().getMethod("into", android.widget.ImageView.class).invoke(builder, image);
+            try {
+                XposedHelpers.callMethod(watch, "setFaceViewVisibility", android.view.View.GONE);
+            } catch (Throwable ignored) { }
+            try {
+                Object video = XposedHelpers.getObjectField(watch, "mFlVideoLayout");
+                if (video instanceof android.view.View view) view.setVisibility(android.view.View.GONE);
+            } catch (Throwable ignored) { }
+        } catch (Throwable failure) {
+            HookRuntime.log("OHEALTH_DEVICE_IMAGE_FAILED " + failure.getClass().getSimpleName());
+        }
     }
 
     /**
@@ -1012,6 +1113,7 @@ public final class OHealthDeviceHook {
     private static volatile Boolean yielded;
     private static int pushedBattery = Integer.MIN_VALUE;
     private static boolean pushedConnected;
+    private static String pushedImage = "";
 
     /** A missing Health row must stay missing this long before the bridge card comes back. */
     private static final long YIELD_SETTLE_MS = 30_000L;
@@ -1029,7 +1131,10 @@ public final class OHealthDeviceHook {
         boolean registered = shown.getBoolean("registered", false);
         String mac = shown.getString("mac", "");
         Boolean found = registered && !mac.isBlank() ? healthCardPresent(mac) : Boolean.FALSE;
-        if (found == null) return;
+        if (found == null) {
+            if (registered && !mac.isBlank()) refreshHealthCard(loader, mac, shown);
+            return;
+        }
         boolean present = found;
         if (present) {
             absentSinceMs = 0;
@@ -1049,12 +1154,15 @@ public final class OHealthDeviceHook {
             }
         }
         if (yielded != null && yielded == present) return;
+        // The device-space home shows the bridge card, not Health's row. Hiding the bridge card
+        // removes the band. Keep the card and only refresh Health's copy above.
+        yielded = present;
+        if (!present) return;
         try {
             Bundle extras = new Bundle();
-            extras.putBoolean("yield", present);
+            extras.putBoolean("yield", false);
             hostContext.getContentResolver().call(DeviceCardProvider.URI, "spaceYield", null, extras);
-            yielded = present;
-            HookRuntime.log("DEVICE_SPACE_YIELD " + present);
+            HookRuntime.log("DEVICE_SPACE_KEEP");
         } catch (Throwable failure) {
             HookRuntime.log("DEVICE_SPACE_YIELD_UNAVAILABLE "
                     + failure.getClass().getSimpleName());
@@ -1089,7 +1197,9 @@ public final class OHealthDeviceHook {
     private static void refreshHealthCard(ClassLoader loader, String mac, Bundle shown) {
         boolean connected = shown.getBoolean("connected");
         int battery = shown.getInt("battery", -1);
-        if (pushedBattery == battery && pushedConnected == connected) return;
+        String image = shown.getString("imageUri", "");
+        if (image == null) image = "";
+        if (pushedBattery == battery && pushedConnected == connected && image.equals(pushedImage)) return;
         try {
             Class<?> managerType = XposedHelpers.findClass(
                     "com.oplus.mydevices.sdk.DeviceInfoManager", loader);
@@ -1100,6 +1210,7 @@ public final class OHealthDeviceHook {
             XposedHelpers.callMethod(manager, "update", info);
             pushedBattery = battery;
             pushedConnected = connected;
+            pushedImage = image;
         } catch (Throwable failure) {
             HookRuntime.log("DEVICE_SPACE_REFRESH_UNAVAILABLE "
                     + failure.getClass().getSimpleName());
@@ -1149,6 +1260,16 @@ public final class OHealthDeviceHook {
                         connected ? now : 0L, connected ? 0L : now);
                 XposedHelpers.callMethod(info, "setConnection", connection);
             } catch (Throwable ignored) { }
+            String image = shown.getString("imageUri", "");
+            if (image != null && !image.isEmpty()) {
+                try {
+                    XposedHelpers.callMethod(info, "setIconUrl", image);
+                } catch (Throwable ignored) { }
+                try {
+                    XposedHelpers.callMethod(info, "setMIconUrl", image);
+                } catch (Throwable ignored) { }
+                HookRuntime.log("DEVICE_SPACE_IMAGE");
+            }
             int battery = shown.getInt("battery", -1);
             if (battery < 0 || battery > 100) return;
             Class<?> batteryInfo = XposedHelpers.findClass(

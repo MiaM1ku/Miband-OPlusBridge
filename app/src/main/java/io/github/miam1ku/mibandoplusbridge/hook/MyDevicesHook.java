@@ -52,6 +52,8 @@ public final class MyDevicesHook {
         hookDetailJump(context);
         hookIconPackage(hostLoader);
         hookPlaceholderIcon(context, hostLoader);
+        hookCardIcon(context, hostLoader);
+        hookCardPicture(context, hostLoader);
         if (!"com.heytap.mydevices".equals(process)) return;
         Class<?> deviceApp = Class.forName("com.oplus.mydevices.domain.entities.config.DeviceApp", false, hostLoader);
         Class<?> deletion = Class.forName("com.oplus.mydevices.domain.entities.config.DelDeviceMethod", false, hostLoader);
@@ -345,6 +347,94 @@ public final class MyDevicesHook {
             }
         }
         HookRuntime.log(hooked == 0 ? "ICON_PLACEHOLDER_HOOK_UNAVAILABLE" : "ICON_PLACEHOLDER_HOOK " + hooked);
+    }
+
+    /**
+     * Device space rewrites a picture URL to its own file provider, using the last path segment.
+     * The picture is copied into that cache file. Returning another app's file descriptor here
+     * takes down the whole device-space process.
+     */
+    private static void hookCardIcon(Context context, ClassLoader loader) {
+        try {
+            Class<?> provider = Class.forName(
+                    "com.oplus.mydevices.quickapp.provider.DeviceQuickAppCardWidgetProvider", false, loader);
+            XposedHelpers.findAndHookMethod(provider, "openFile", android.net.Uri.class, String.class,
+                    new XC_MethodHook() {
+                        @Override protected void beforeHookedMethod(MethodHookParam param) {
+                            android.net.Uri uri = (android.net.Uri) param.args[0];
+                            java.util.List<String> segments = uri == null ? java.util.List.of() : uri.getPathSegments();
+                            if (segments.isEmpty() || !segments.get(0).matches("miband-body-\\d+\\.png")) return;
+                            try {
+                                android.os.Bundle display = context.getContentResolver().call(
+                                        DeviceCardProvider.URI, "bandDisplay", null, null);
+                                if (display == null) return;
+                                String image = display.getString("imageUri", "");
+                                if (image == null || !image.startsWith("content://" + DeviceCardProvider.AUTHORITY + "/")) return;
+                                java.io.File dir = new java.io.File(context.getCacheDir(), "device_image");
+                                java.io.File dest = new java.io.File(dir, segments.get(0));
+                                if (dest.isFile() && dest.length() > 0) return;
+                                if (!dir.isDirectory() && !dir.mkdirs()) return;
+                                try (java.io.InputStream in = context.getContentResolver().openInputStream(
+                                        android.net.Uri.parse(image));
+                                     java.io.OutputStream out = new java.io.FileOutputStream(dest)) {
+                                    if (in == null) return;
+                                    byte[] buffer = new byte[8192];
+                                    int read;
+                                    while ((read = in.read(buffer)) >= 0) out.write(buffer, 0, read);
+                                }
+                            } catch (Throwable failure) {
+                                HookRuntime.log("SPACE_IMAGE_UNAVAILABLE " + failure.getClass().getSimpleName());
+                            }
+                        }
+                    });
+            HookRuntime.log("SPACE_IMAGE_HOOK openFile");
+        } catch (Throwable failure) {
+            HookRuntime.log("SPACE_IMAGE_HOOK_UNAVAILABLE " + failure.getClass().getSimpleName());
+        }
+    }
+
+    /** The card the user sees belongs to Health. Its picture URL is replaced with the preview. */
+    private static void hookCardPicture(Context context, ClassLoader loader) {
+        try {
+            Class<?> info = Class.forName(
+                    "com.oplus.mydevices.domain.entities.device.DeviceInfo", false, loader);
+            XposedHelpers.findAndHookMethod(info, "getDevicePictureUrl", new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam param) {
+                    String image = pictureFor(context, param.thisObject);
+                    if (!image.isEmpty()) param.setResult(image);
+                }
+            });
+            HookRuntime.log("SPACE_PICTURE_HOOK getDevicePictureUrl");
+        } catch (Throwable failure) {
+            HookRuntime.log("SPACE_PICTURE_HOOK_UNAVAILABLE " + failure.getClass().getSimpleName());
+        }
+    }
+
+    private static volatile String pictureMac = "";
+    private static volatile String pictureUri = "";
+    private static volatile long pictureAt;
+
+    private static String pictureFor(Context context, Object device) {
+        try {
+            long now = android.os.SystemClock.elapsedRealtime();
+            if (now - pictureAt > 2_000) {
+                pictureAt = now;
+                android.os.Bundle display = context.getContentResolver().call(
+                        DeviceCardProvider.URI, "bandDisplay", null, null);
+                if (display != null) {
+                    String mac = display.getString("mac", "");
+                    String image = display.getString("imageUri", "");
+                    pictureMac = mac == null ? "" : mac;
+                    pictureUri = image == null ? "" : image;
+                }
+            }
+            if (pictureUri.isEmpty() || pictureMac.isEmpty()) return "";
+            String mac = String.valueOf(XposedHelpers.callMethod(device, "getMac"));
+            if (!io.github.miam1ku.mibandoplusbridge.data.MacIds.same(pictureMac, mac)) return "";
+            return pictureUri;
+        } catch (Throwable failure) {
+            return "";
+        }
     }
 
     private static int placeholderIcon(Object[] args, int watch, int band) {

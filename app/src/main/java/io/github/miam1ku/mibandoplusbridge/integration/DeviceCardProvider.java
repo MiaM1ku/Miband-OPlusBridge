@@ -10,8 +10,11 @@ import android.database.MatrixCursor;
 import android.net.Uri;
 import android.os.Binder;
 import android.os.Bundle;
+import android.os.ParcelFileDescriptor;
 import android.os.Process;
 import android.os.UserManager;
+import java.io.File;
+import java.io.FileNotFoundException;
 import io.github.miam1ku.mibandoplusbridge.HostIdentity;
 import io.github.miam1ku.mibandoplusbridge.data.BandCatalog;
 import io.github.miam1ku.mibandoplusbridge.service.BandLiveService;
@@ -102,7 +105,7 @@ public final class DeviceCardProvider extends ContentProvider {
             if (!actual.equals(selectionArgs[0])) return result;
         }
         try {
-            JSONObject data = deviceData(state, deviceId, mac);
+            JSONObject data = deviceData(state, deviceId, mac, bodyIcon(state));
             MatrixCursor.RowBuilder row = result.newRow();
             for (String column : requested) {
                 row.add(switch (column) {
@@ -125,7 +128,7 @@ public final class DeviceCardProvider extends ContentProvider {
     }
 
     private static JSONObject deviceData(io.github.miam1ku.mibandoplusbridge.data.LocalPrefs state,
-            String deviceId, String mac) throws JSONException {
+            String deviceId, String mac, String icon) throws JSONException {
         boolean connected = state.getBoolean("registered", false) && state.getBoolean("connected", false);
         String connectState = connected ? "CONNECTED" : "DISCONNECTED";
         int battery = state.getInt("battery", -1);
@@ -149,8 +152,8 @@ public final class DeviceCardProvider extends ContentProvider {
                 // An empty picture URL makes device space use icon_default_device, which looks like a phone.
                 // A band uses the system wristband picture; a watch shape uses the watch picture.
                 .put("mDeviceType", BandCatalog.spaceType(state.getString("modelId", "")))
-                .put("iconUrl", spaceIcon(state))
-                .put("mIconUrl", spaceIcon(state))
+                .put("iconUrl", icon)
+                .put("mIconUrl", icon)
                 .put("mBatteryInfoList", batteries)
                 .put("mBatteryList", levels)
                 .put("connection", connection)
@@ -183,8 +186,31 @@ public final class DeviceCardProvider extends ContentProvider {
 
     @Override public String getType(Uri uri) {
         requireReader();
+        if (imagePath(uri)) return "image/png";
         requireUri(uri);
         return "vnd.android.cursor.dir/vnd." + AUTHORITY + ".device_info";
+    }
+
+    @Override public ParcelFileDescriptor openFile(Uri uri, String mode) throws FileNotFoundException {
+        if (!imagePath(uri)) throw new FileNotFoundException("UNSUPPORTED_DEVICE_CARD_URI");
+        if (mode != null && !mode.startsWith("r")) throw new FileNotFoundException("DEVICE_IMAGE_READ_ONLY");
+        requireReader();
+        File file = io.github.miam1ku.mibandoplusbridge.data.DeviceImageStore.file(getContext());
+        if (file == null) throw new FileNotFoundException("DEVICE_IMAGE_MISSING");
+        return ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY);
+    }
+
+    private static boolean imagePath(Uri uri) {
+        if (uri == null || !AUTHORITY.equals(uri.getAuthority())) return false;
+        java.util.List<String> segments = uri.getPathSegments();
+        if (segments.size() == 1 && "device_image".equals(segments.get(0))) return true;
+        return segments.size() == 2 && "device_image".equals(segments.get(0))
+                && segments.get(1).matches("miband-body-\\d+\\.png");
+    }
+
+    private String bodyIcon(io.github.miam1ku.mibandoplusbridge.data.LocalPrefs state) {
+        String body = io.github.miam1ku.mibandoplusbridge.data.DeviceImageStore.uri(getContext());
+        return body.isEmpty() ? spaceIcon(state) : body;
     }
 
     @Override public Uri insert(Uri uri, ContentValues values) {
@@ -255,6 +281,7 @@ public final class DeviceCardProvider extends ContentProvider {
         display.putLong("stepsAtMs", state.getLong("stepsAtMs", 0));
         display.putLong("lastUpdateMs", state.getLong("lastUpdateMs", 0));
         display.putLong("revision", state.getLong("revision", 0));
+        display.putString("imageUri", io.github.miam1ku.mibandoplusbridge.data.DeviceImageStore.uri(getContext()));
         return display;
     }
 }

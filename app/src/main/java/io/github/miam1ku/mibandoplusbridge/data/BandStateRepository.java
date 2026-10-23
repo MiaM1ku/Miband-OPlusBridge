@@ -94,7 +94,7 @@ public final class BandStateRepository {
     }
 
     public void recordVerifiedDevice(int battery, Integer chargerState, boolean connected,
-                                     String firmware, String hardware) throws Exception {
+                                     String firmware, String hardware, String sku) throws Exception {
         if (!isRegistered()) return;
         boolean nativeReady = new OwnershipController(context).nativeReady();
         synchronized (STATE_LOCK) {
@@ -116,13 +116,26 @@ public final class BandStateRepository {
             if (firmware == null || firmware.isBlank() || hardware == null || hardware.isBlank()) {
                 throw new IllegalStateException("FIRMWARE_OR_MODEL_UNSUPPORTED");
             }
-            if (!state.edit().putBoolean("connected", connected).putInt("battery", battery)
+            var editor = state.edit().putBoolean("connected", connected).putInt("battery", battery)
                     .putBoolean("charging", chargerState == 1)
                     .putString("verifiedFirmware", firmware).putString("verifiedHardware", hardware)
                     .putLong("lastUpdateMs", System.currentTimeMillis())
-                    .putLong("revision", state.getLong("revision", 0) + 1).commit()) {
+                    .putLong("revision", state.getLong("revision", 0) + 1);
+            if (sku != null && !sku.isBlank()) editor.putString("sku", sku);
+            if (!editor.commit()) {
                 throw new IllegalStateException("BAND_STATE_STORAGE_FAILED");
             }
+            context.getContentResolver().notifyChange(DeviceCardProvider.URI, null);
+        }
+    }
+
+    /** The body picture changed. Bump the card revision so device space reads the new URI. */
+    public void noteDeviceImage() {
+        synchronized (STATE_LOCK) {
+            if (!isUnlocked() || !state().getBoolean("registered", false)) return;
+            LocalPrefs state = state();
+            if (!state.edit().putLong("revision", state.getLong("revision", 0) + 1)
+                    .putLong("lastUpdateMs", System.currentTimeMillis()).commit()) return;
             context.getContentResolver().notifyChange(DeviceCardProvider.URI, null);
         }
     }

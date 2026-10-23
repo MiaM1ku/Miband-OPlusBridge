@@ -40,6 +40,33 @@ public final class MiFitnessDatabase {
 
     private MiFitnessDatabase() {}
 
+    /** Locale product cache written by Mi Fitness, or the newest {@code product_*.json}. */
+    public static String productConfig(Context context) throws Failure {
+        File dir = new File(context.getNoBackupFilesDir(), "mihealth-product");
+        if (!dir.isDirectory() && !dir.mkdirs()) throw new Failure("MI_PRODUCT_CONFIG_MISSING");
+        File copy = new File(dir, "product.json");
+        try {
+            File script = new File(dir, "product.sh");
+            writeProductScript(script, dir.getAbsolutePath());
+            try {
+                execute(script.getAbsolutePath());
+            } catch (Failure failure) {
+                if ("ROOT_ACTION_TIMEOUT".equals(failure.code)) throw failure;
+                throw new Failure("MI_PRODUCT_CONFIG_MISSING");
+            }
+            if (!copy.isFile() || copy.length() == 0 || copy.length() > 16L * 1024 * 1024) {
+                throw new Failure("MI_PRODUCT_CONFIG_MISSING");
+            }
+            byte[] bytes = java.nio.file.Files.readAllBytes(copy.toPath());
+            return new String(bytes, StandardCharsets.UTF_8);
+        } catch (java.io.IOException failure) {
+            throw new Failure("MI_PRODUCT_CONFIG_MISSING");
+        } finally {
+            File[] files = dir.listFiles();
+            if (files != null) for (File file : files) file.delete();
+        }
+    }
+
     public static Snapshot read(Context context) throws Failure {
         File dir = new File(context.getNoBackupFilesDir(), "mihealth-read");
         if (!dir.isDirectory() && !dir.mkdirs()) throw new Failure("MI_DATABASE_UNREADABLE");
@@ -102,6 +129,41 @@ public final class MiFitnessDatabase {
             if (trimmed.matches("[0-9]{5,}")) return trimmed;
         }
         return "";
+    }
+
+    private static void writeProductScript(File script, String dest) throws Failure {
+        if (!dest.matches("[A-Za-z0-9_./-]+")) throw new Failure("MI_PRODUCT_CONFIG_MISSING");
+        String language = localeToken(java.util.Locale.getDefault().toLanguageTag());
+        String underscored = localeToken(language.replace('-', '_'));
+        String names = "";
+        if (!language.isEmpty()) names += " product_" + language + ".json";
+        if (!underscored.isEmpty() && !underscored.equals(language)) names += " product_" + underscored + ".json";
+        String body = "set -eu\n"
+                + "cfg=/data/data/com.mi.health/files/config\n"
+                + "test -d \"$cfg\"\n"
+                + "pick=\n"
+                + "for name in" + names + "; do\n"
+                + "  if [ -f \"$cfg/$name\" ]; then pick=\"$cfg/$name\"; break; fi\n"
+                + "done\n"
+                + "if [ -z \"$pick\" ]; then pick=$(ls -1t \"$cfg\"/product_*.json | head -n 1); fi\n"
+                + "test -n \"$pick\"\n"
+                + "rm -f " + dest + "/product.json\n"
+                + "cp -a \"$pick\" " + dest + "/product.json\n"
+                + "owner=$(stat -c %u " + dest + ")\n"
+                + "group=$(stat -c %g " + dest + ")\n"
+                + "chown \"$owner:$group\" " + dest + "/product.json\n"
+                + "chmod 600 " + dest + "/product.json\n";
+        try (FileOutputStream out = new FileOutputStream(script)) {
+            out.write(body.getBytes(StandardCharsets.UTF_8));
+        } catch (IOException failure) {
+            throw new Failure("MI_PRODUCT_CONFIG_MISSING");
+        }
+    }
+
+    private static String localeToken(String raw) {
+        if (raw == null) return "";
+        String clean = raw.trim();
+        return clean.matches("[A-Za-z0-9_-]{1,32}") ? clean : "";
     }
 
     private static void writeScript(File script, String dest) throws Failure {

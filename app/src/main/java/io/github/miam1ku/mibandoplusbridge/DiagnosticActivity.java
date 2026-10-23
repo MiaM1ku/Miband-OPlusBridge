@@ -93,7 +93,8 @@ public final class DiagnosticActivity extends AppCompatActivity {
                 try {
                     new io.github.miam1ku.mibandoplusbridge.data.BandStateRepository(this)
                             .recordVerifiedDevice(result.batteryPercent(), result.batteryState(), false,
-                                    result.firmware(), result.hardware());
+                                    result.firmware(), result.hardware(), result.sku());
+                    io.github.miam1ku.mibandoplusbridge.data.DeviceImageStore.requestRefresh(this);
                     card = "设备卡片已记录电量，诊断连接已关闭。";
                 } catch (Exception failure) {
                     card = "设备卡片稍后更新：" + failure.getMessage();

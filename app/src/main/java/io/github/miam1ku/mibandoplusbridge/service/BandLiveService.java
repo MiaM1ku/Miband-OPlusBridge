@@ -615,6 +615,7 @@ public final class BandLiveService extends Service {
         super.onCreate();
         io.github.miam1ku.mibandoplusbridge.data.SessionLog.start(this);
         io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this, "module start");
+        io.github.miam1ku.mibandoplusbridge.data.DeviceImageStore.requestRefresh(this);
         weatherSync = new WeatherSync(this, () -> commands, coordinator);
         healthReplay = new HealthReplay(this, this::healthCollectionStatus, () -> {
             try {
@@ -765,7 +766,8 @@ public final class BandLiveService extends Service {
                         authenticated.set(true);
                         try {
                             repository.recordVerifiedDevice(result.batteryPercent(), result.batteryState(), true,
-                                    result.firmware(), result.hardware());
+                                    result.firmware(), result.hardware(), result.sku());
+                            io.github.miam1ku.mibandoplusbridge.data.DeviceImageStore.requestRefresh(this);
                         } catch (Exception failure) {
                             throw new IllegalStateException(failure.getMessage(), failure);
                         }

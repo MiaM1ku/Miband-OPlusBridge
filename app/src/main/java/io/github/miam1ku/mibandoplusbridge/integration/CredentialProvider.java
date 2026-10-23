@@ -380,6 +380,7 @@ public final class CredentialProvider extends ContentProvider {
         closeCapture();
         window.close();
         getContext().getContentResolver().notifyChange(URI, null);
+        io.github.miam1ku.mibandoplusbridge.data.DeviceImageStore.requestRefresh(getContext());
         boolean ready = record.optString("missing").isBlank()
                 && TransportObservation.supportsLive(observation, record.optString("model", ""));
         Bundle saved = result(ready ? "BINDING_SAVED" : "BINDING_INCOMPLETE");

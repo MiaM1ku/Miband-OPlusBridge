@@ -11,6 +11,7 @@ import android.content.pm.PackageManager;
 import android.os.Build;
 import android.text.format.DateFormat;
 import com.google.protobuf.ByteString;
+import io.github.miam1ku.mibandoplusbridge.data.MiProductImage;
 import io.github.miam1ku.mibandoplusbridge.data.SessionLog;
 import io.github.miam1ku.mibandoplusbridge.data.BindingStore;
 import io.github.miam1ku.mibandoplusbridge.data.TransportObservation;
@@ -99,7 +100,7 @@ public final class SppDiagnosticClient implements AutoCloseable {
         });
     }
 
-    public record Result(int batteryPercent, Integer batteryState, String firmware, String hardware) {}
+    public record Result(int batteryPercent, Integer batteryState, String firmware, String hardware, String sku) {}
     public static final class Failure extends Exception {
         public final String code;
         public Failure(String code) { super(code); this.code = code; }
@@ -321,7 +322,7 @@ public final class SppDiagnosticClient implements AutoCloseable {
                 }
             }
             Result result = new Result(battery.getLevel(), battery.hasState() ? battery.getState() : null,
-                    info.getFirmware(), info.getModel());
+                    info.getFirmware(), info.getModel(), MiProductImage.sku(info.getSerialNumber()));
             verifiedDevice = result;
             if (onState != null) {
                 onState.accept(result);
@@ -1050,7 +1051,7 @@ public final class SppDiagnosticClient implements AutoCloseable {
             throw new Failure("BATTERY_VALUE_INVALID");
         }
         onState.accept(new Result(battery.getLevel(), battery.getState(),
-                verifiedDevice.firmware(), verifiedDevice.hardware()));
+                verifiedDevice.firmware(), verifiedDevice.hardware(), verifiedDevice.sku()));
     }
 
     @Override public void close() {
