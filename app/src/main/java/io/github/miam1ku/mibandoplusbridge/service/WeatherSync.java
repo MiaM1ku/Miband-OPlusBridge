@@ -37,6 +37,9 @@ public final class WeatherSync implements AutoCloseable {
     };
     private volatile boolean closed;
     private volatile boolean awaitingCities;
+    /** History sync owns the radio until {@link #releaseForecast(int)} for this epoch. */
+    private volatile boolean deferForecast;
+    private int forecastEpoch;
     private boolean observing;
     private boolean waitingSnapshot;
     private CompletableFuture<Void> active;
@@ -62,7 +65,28 @@ public final class WeatherSync implements AutoCloseable {
         });
     }
 
-    public CompletionStage<Void> refreshAndSend() { return submit(Operation.REFRESH, null); }
+    public CompletionStage<Void> refreshAndSend() {
+        if (deferForecast) return CompletableFuture.completedFuture(null);
+        return submit(Operation.REFRESH, null);
+    }
+
+    /**
+     * The connect burst also lists and pulls activity files. This firmware drops the GATT
+     * link when a weather forecast (10/0) is written while that transfer is still open,
+     * and the service then reconnects three seconds later. Hold forecasts off the radio
+     * until the history round finishes. Returns the epoch {@link #releaseForecast(int)} must pass.
+     */
+    public synchronized int deferForecast() {
+        deferForecast = true;
+        return ++forecastEpoch;
+    }
+
+    /** One forecast after the matching history round. A stale epoch is a session that already ended. */
+    public synchronized void releaseForecast(int epoch) {
+        if (!deferForecast || epoch != forecastEpoch) return;
+        deferForecast = false;
+        refreshAndSend();
+    }
     /** Idle poll. The watch's own weather request still uses {@link #refreshAndSend()}. */
     public CompletionStage<Void> sendIfChanged() { return submit(Operation.IF_CHANGED, null); }
     public CompletionStage<Void> inspectCities(BandWeatherEncoder.Sample sample) {
@@ -75,6 +99,7 @@ public final class WeatherSync implements AutoCloseable {
         try {
             coordinator.execute(() -> {
                 if (closed) { result.completeExceptionally(new Failure("WEATHER_CLOSED")); return; }
+                if (deferForecast) { result.complete(null); return; }
                 if (active != null) {
                     if (operation == requested) relay(active, result);
                     else result.completeExceptionally(new Failure("WEATHER_BUSY"));
@@ -170,10 +195,13 @@ public final class WeatherSync implements AutoCloseable {
         queryCities(sample);
     }
 
-    /** Band 8 answers the city-list query with status 1 and no locations. The current city is sent alone. */
+    /**
+     * Status 1: this band has no city list. Status 2: weather was never primed, so the list
+     * is empty. Either way the phone city is added and the forecast still goes out.
+     */
     static boolean unsupportedCityList(XiaomiProto.Command command) {
         return command != null && command.getType() == 10 && command.getSubtype() == 5
-                && command.hasStatus() && command.getStatus() == 1;
+                && command.hasStatus() && (command.getStatus() == 1 || command.getStatus() == 2);
     }
 
     /** A watch request always transmits. An idle poll keeps the same forecast off the radio. */
@@ -232,42 +260,52 @@ public final class WeatherSync implements AutoCloseable {
         if (!edit.putInt("bandCount", count).commit()) throw new Failure("WEATHER_CITY_STORAGE_FAILED");
 
     }
-    /** 10/5 status 1 has no list to edit. 10/7 writes this one city; 1 and 3 still allow the forecast. */
+    /** 10/5 status 1 or 2 has no list to edit. 10/7 writes this one city; 1 and 3 still allow the forecast. */
     private void sendCurrentCity(CompletableFuture<Void> transaction, BandWeatherEncoder.Sample fresh) {
-        SessionLog.line(context, "WEATHER_SET_CURRENT_CITY");
-        transactionQueue.request(BandWeatherEncoder.addCurrentLocation(fresh), 10, 7)
-                .whenComplete((set, setFailure) -> dispatch(() -> {
-                    if (active != transaction) return;
-                    if (setFailure != null) { finish("WEATHER_TRANSPORT_FAILED"); return; }
-                    int status = set != null && set.hasStatus() ? set.getStatus() : 0;
-                    if (status != 0 && status != 1 && status != 3) {
-                        finish("WEATHER_BAND_REJECTED");
-                        return;
-                    }
-                    if (status != 0) SessionLog.line(context, "WEATHER_CURRENT_CITY status=" + status);
-                    sendFrame(transaction, fresh, BandWeatherEncoder.encode(fresh), 0);
-                }));
+        writeCity(transaction, fresh, BandWeatherEncoder.addCurrentLocation(fresh));
     }
 
     private void publish(CompletableFuture<Void> transaction, BandWeatherEncoder.Sample fresh,
                          XiaomiProto.WeatherLocations cities) {
         var review = context.getSharedPreferences("weather-city-review", 0);
-        XiaomiProto.Command city;
+        BandWeatherEncoder.CityUpdate plan;
         try {
-            city = BandWeatherEncoder.replaceCurrentLocation(fresh, cities,
-                    review.getString("currentLocationKey", ""));
+            plan = BandWeatherEncoder.planTakeover(fresh, cities, review.getString("currentLocationKey", ""));
         } catch (IllegalArgumentException invalid) {
             finish(code(invalid));
             return;
         }
+        if (plan.remove() == null) {
+            writeCity(transaction, fresh, plan.write());
+            return;
+        }
+        SessionLog.line(context, "WEATHER_REMOVE_CITY");
+        transactionQueue.request(plan.remove(), 10, 8).whenComplete((removed, failure) -> dispatch(() -> {
+            if (active != transaction) return;
+            if (failure != null) { finish("WEATHER_TRANSPORT_FAILED"); return; }
+            int status = removed != null && removed.hasStatus() ? removed.getStatus() : 0;
+            // 1: this band has no remove command. The add below still installs the phone city.
+            if (status != 0 && status != 1) { finish("WEATHER_BAND_REJECTED"); return; }
+            if (status != 0) SessionLog.line(context, "WEATHER_REMOVE_CITY status=" + status);
+            writeCity(transaction, fresh, plan.write());
+        }));
+    }
+
+    private void writeCity(CompletableFuture<Void> transaction, BandWeatherEncoder.Sample fresh,
+                           XiaomiProto.Command write) {
+        if (write == null) {
+            sendFrame(transaction, fresh, BandWeatherEncoder.encode(fresh), 0);
+            return;
+        }
         SessionLog.line(context, "WEATHER_SET_CURRENT_CITY");
-        transactionQueue.request(city, 10, 6).whenComplete((set, setFailure) -> dispatch(() -> {
+        int subtype = write.getSubtype();
+        transactionQueue.request(write, 10, subtype).whenComplete((set, setFailure) -> dispatch(() -> {
             if (active != transaction) return;
             if (setFailure != null) { finish("WEATHER_TRANSPORT_FAILED"); return; }
-            if (set != null && set.hasStatus() && set.getStatus() != 0) {
-                finish("WEATHER_BAND_REJECTED");
-                return;
-            }
+            int status = set != null && set.hasStatus() ? set.getStatus() : 0;
+            boolean added = subtype == 7 && (status == 1 || status == 3);
+            if (status != 0 && !added) { finish("WEATHER_BAND_REJECTED"); return; }
+            if (status != 0) SessionLog.line(context, "WEATHER_CURRENT_CITY status=" + status);
             sendFrame(transaction, fresh, BandWeatherEncoder.encode(fresh), 0);
         }));
     }
@@ -299,10 +337,12 @@ public final class WeatherSync implements AutoCloseable {
         dispatch(() -> {
             if (closed) return;
             if (command.hasStatus() && command.getStatus() != 0) {
-                // 10/5 status 1: this band has no city list. The request handler sends the current city.
+                // 10/5 status 1 or 2: no city list. The request handler adds the phone city.
                 // 10/7: 1 means this device has no single-city add; 3 means the city is already there.
+                // 10/8 status 1: remove is unsupported. The following add still runs.
                 if (unsupportedCityList(command) && awaitingCities) return;
                 if (command.getSubtype() == 7 && (command.getStatus() == 1 || command.getStatus() == 3)) return;
+                if (command.getSubtype() == 8 && command.getStatus() == 1) return;
                 if (active != null) finish("WEATHER_BAND_REJECTED");
                 else record("WEATHER_BAND_REJECTED");
                 return;
@@ -319,7 +359,13 @@ public final class WeatherSync implements AutoCloseable {
         });
     }
 
-    public void onDisconnected() { dispatch(() -> finish("WEATHER_DISCONNECTED")); }
+    public void onDisconnected() {
+        synchronized (this) {
+            forecastEpoch++;
+            deferForecast = false;
+        }
+        dispatch(() -> finish("WEATHER_DISCONNECTED"));
+    }
 
     @Override public void close() {
         closed = true;

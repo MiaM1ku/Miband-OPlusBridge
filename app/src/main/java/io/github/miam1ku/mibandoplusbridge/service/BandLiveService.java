@@ -773,9 +773,14 @@ public final class BandLiveService extends Service {
                         }
                         if (!repository.isRegistered() || stopRequested) return;
                         show("手环已连接");
-                    }, queue -> coordinator.execute(() -> {
+                    }, queue -> {
+                        // Before the reader accepts a band weather request. A late history
+                        // callback from the previous link carries an older epoch and does not fire.
+                        int weatherEpoch = weatherSync.deferForecast();
+                        coordinator.execute(() -> {
                         if (client != active || stopRequested) {
                             queue.close(new IllegalStateException("SESSION_CLOSED"));
+                            weatherSync.releaseForecast(weatherEpoch);
                             return;
                         }
                         commands = queue;
@@ -791,13 +796,16 @@ public final class BandLiveService extends Service {
                             } catch (RuntimeException unavailable) {
                                 healthCollectionStatus("HEALTH_STORAGE_UNAVAILABLE");
                             }
-                        }, this::healthCollectionStatus, healthReplay::hasCapacity);
+                            weatherSync.releaseForecast(weatherEpoch);
+                        }, reason -> {
+                            healthCollectionStatus(reason);
+                            weatherSync.releaseForecast(weatherEpoch);
+                        }, healthReplay::hasCapacity);
                         long now = System.nanoTime();
                         nextBatteryAt = now + TimeUnit.MINUTES.toNanos(IDLE_POLL_MINUTES);
                         nextHealthAt = now + TimeUnit.MINUTES.toNanos(IDLE_POLL_MINUTES);
                         nextSleepFileAt = now + TimeUnit.MINUTES.toNanos(10);
                         nextWeatherAt = now + TimeUnit.MINUTES.toNanos(30);
-                        weatherSync.refreshAndSend();
                         syncRequested = false;
                         healthReplay.request();
                         queue.send(realtimeStats(REALTIME_STATS_START));
@@ -808,7 +816,8 @@ public final class BandLiveService extends Service {
                         historySync.request(true);
                         syncDnd();
                         requestSleepState();
-                    }), fileId -> coordinator.execute(() -> {
+                        });
+                    }, fileId -> coordinator.execute(() -> {
                         if (client == active && !stopRequested && historySync != null) historySync.saved(fileId);
                     }), command -> {
                         if (command.getType() == 2) {

@@ -127,7 +127,12 @@ final class BleGattClient implements AutoCloseable {
         String error = failure.get();
         if (error != null) throw new SppDiagnosticClient.Failure(error);
         Rx payload = incoming.poll(timeoutMs, TimeUnit.MILLISECONDS);
-        if (payload != null) return payload;
+        if (payload != null) {
+            // close() and a dead link both enqueue an empty wake-up. The failure is the reason.
+            error = failure.get();
+            if (error != null && payload.payload.length == 0) throw new SppDiagnosticClient.Failure(error);
+            return payload;
+        }
         if (closed) throw new SppDiagnosticClient.Failure("CANCELLED");
         error = failure.get();
         if (error != null) throw new SppDiagnosticClient.Failure(error);
@@ -443,7 +448,22 @@ final class BleGattClient implements AutoCloseable {
         int index = queue.start();
         if (index < 0) {
             if (queue.complete()) {
-                link.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_LOW_POWER);
+                // Low power intervals were dropping this firmware's link during the connect
+                // burst. Stay fast through activity sync, then let the interval relax.
+                link.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH);
+                BluetoothGatt current = link;
+                Thread idle = new Thread(() -> {
+                    try {
+                        Thread.sleep(60_000);
+                    } catch (InterruptedException interrupted) {
+                        return;
+                    }
+                    if (!closed && gatt == current) {
+                        current.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_LOW_POWER);
+                    }
+                }, "ble-idle-priority");
+                idle.setDaemon(true);
+                idle.start();
                 ready.countDown();
             }
             return;

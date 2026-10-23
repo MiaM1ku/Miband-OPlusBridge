@@ -19,7 +19,7 @@ public final class OHealthSleepPlanTest {
         HealthRecord morning = interval("morning", at(2026, 9, 25, 3, 41), at(2026, 9, 25, 11, 45));
         HealthRecord nap = interval("nap", at(2026, 9, 25, 13, 18), at(2026, 9, 25, 15, 23));
         HealthRecord late = interval("late", at(2026, 9, 25, 21, 0), at(2026, 9, 25, 22, 0));
-        List<OHealthSleepPlan.Night> nights = OHealthSleepPlan.nights(List.of(nap, late, morning));
+        List<OHealthSleepPlan.Night> nights = nights(List.of(nap, late, morning));
         assertEquals(3, nights.size());
         OHealthSleepPlan.Night day = nights.get(0);
         assertEquals(20260925, day.date());
@@ -52,7 +52,7 @@ public final class OHealthSleepPlanTest {
         HealthRecord deep = stage("deep", start, start + 3_600_000, 2);
         HealthRecord light = stage("light", start + 3_600_000, wake, 3);
         HealthRecord nap = interval("nap", at(2026, 9, 28, 15, 33), at(2026, 9, 28, 16, 34));
-        List<OHealthSleepPlan.Night> nights = OHealthSleepPlan.nights(List.of(nap, night, light, deep));
+        List<OHealthSleepPlan.Night> nights = nights(List.of(nap, night, light, deep));
         assertEquals(2, nights.size());
         OHealthSleepPlan.Night chosen = nights.get(0);
         assertEquals(start, chosen.fallAsleepMs());
@@ -74,7 +74,7 @@ public final class OHealthSleepPlanTest {
     @Test public void sessionStartingBeforeTwentyExtendsTheClearWindow() {
         HealthRecord early = interval("early", at(2026, 9, 24, 19, 30), at(2026, 9, 25, 2, 0));
         HealthRecord nap = interval("nap", at(2026, 9, 25, 14, 0), at(2026, 9, 25, 15, 0));
-        List<OHealthSleepPlan.Night> nights = OHealthSleepPlan.nights(List.of(nap, early));
+        List<OHealthSleepPlan.Night> nights = nights(List.of(nap, early));
         assertEquals(2, nights.size());
         assertEquals(early.startMs, nights.get(0).fallAsleepMs());
         assertEquals(early.startMs, nights.get(0).dayStartMs());
@@ -91,7 +91,7 @@ public final class OHealthSleepPlanTest {
         HealthRecord light = stage("light", start + 3_600_000, start + 7_200_000, 3);
         HealthRecord rem = stage("rem", start + 7_200_000, start + 10_800_000, 4);
         HealthRecord awake = stage("awake", start + 10_800_000, start + 14_400_000, 5);
-        List<OHealthSleepPlan.Night> nights = OHealthSleepPlan.nights(
+        List<OHealthSleepPlan.Night> nights = nights(
                 List.of(interval, awake, rem, light, deep));
         assertEquals(1, nights.size());
         OHealthSleepPlan.Night night = nights.get(0);
@@ -115,7 +115,7 @@ public final class OHealthSleepPlanTest {
         long two = at(2026, 10, 2, 2, 0);
         long end = at(2026, 10, 2, 3, 0);
         HealthRecord interval = interval("night", start, end);
-        List<OHealthSleepPlan.Night> nights = OHealthSleepPlan.nights(List.of(
+        List<OHealthSleepPlan.Night> nights = nights(List.of(
                 interval,
                 stage("deep", start, two, 2),
                 stage("light", lightStart, end, 3)));
@@ -134,7 +134,7 @@ public final class OHealthSleepPlanTest {
 
         // Shorter than the light that starts at the same minute, and it runs past the first deep.
         HealthRecord shorter = stage("deep-short", lightStart, at(2026, 10, 2, 2, 30), 2);
-        nights = OHealthSleepPlan.nights(List.of(
+        nights = nights(List.of(
                 interval, stage("deep", start, two, 2), stage("light", lightStart, end, 3), shorter));
         assertEquals(1, nights.size());
         night = nights.get(0);
@@ -153,7 +153,7 @@ public final class OHealthSleepPlanTest {
         long lightEnd = lightStart + 15 * 60_000L;
         long remStart = lightEnd + 2 * 60_000L;
         long remEnd = remStart + 10 * 60_000L;
-        List<OHealthSleepPlan.Night> nights = OHealthSleepPlan.nights(List.of(
+        List<OHealthSleepPlan.Night> nights = nights(List.of(
                 interval("nap", start, remEnd),
                 stage("deep", start, deepEnd, 2),
                 stage("light", lightStart, lightEnd, 3),
@@ -186,7 +186,7 @@ public final class OHealthSleepPlanTest {
 
         HealthRecord mainInterval = interval("main", mainStart, mainEnd);
         HealthRecord napInterval = interval("nap", napStart, napEnd);
-        List<OHealthSleepPlan.Night> nights = OHealthSleepPlan.nights(List.of(
+        List<OHealthSleepPlan.Night> nights = nights(List.of(
                 mainInterval,
                 stage("deep", mainStart, mainStart + 120 * 60_000L, 2),
                 stage("light", mainStart + 120 * 60_000L, mainEnd, 3),
@@ -214,7 +214,7 @@ public final class OHealthSleepPlanTest {
         long nap2Start = at(2026, 10, 8, 16, 0);
         long nap2End = at(2026, 10, 8, 16, 45); // 45 min
 
-        List<OHealthSleepPlan.Night> nights = OHealthSleepPlan.nights(List.of(
+        List<OHealthSleepPlan.Night> nights = nights(List.of(
                 interval("nap1", nap1Start, nap1End),
                 stage("nap1-light", nap1Start, nap1End, 3),
                 interval("nap2", nap2Start, nap2End),
@@ -237,7 +237,7 @@ public final class OHealthSleepPlanTest {
         long d2Start = at(2026, 10, 8, 2, 0);
         long d2End = at(2026, 10, 8, 6, 0); // 240 min
 
-        List<OHealthSleepPlan.Night> nights = OHealthSleepPlan.nights(List.of(
+        List<OHealthSleepPlan.Night> nights = nights(List.of(
                 interval("d1", d1Start, d1End),
                 stage("d1-light", d1Start, d1End, 3),
                 interval("d2", d2Start, d2End),
@@ -271,7 +271,7 @@ public final class OHealthSleepPlanTest {
         // Stage for nap: light from 07:13 to 09:35 = 142m
         HealthRecord napLight = stage("nap_light", napStart, napWake, 3);
 
-        List<OHealthSleepPlan.Night> nights = OHealthSleepPlan.nights(
+        List<OHealthSleepPlan.Night> nights = nights(
                 List.of(interval, deep, rem, light, awake, napLight));
         assertEquals(2, nights.size());
         OHealthSleepPlan.Night main = nights.get(0);
@@ -293,6 +293,27 @@ public final class OHealthSleepPlanTest {
         OHealthSleepPlan.Day day = days.get(0);
         assertEquals(371, day.sleepMinutes());
         assertEquals(main, day.mainSession());
+    }
+
+    @Test public void summaryClockFollowsTheGivenZoneNotTheFileOffset() {
+        ZoneId tokyo = ZoneId.of("+09:00");
+        long fall = ZonedDateTime.of(2026, 10, 22, 23, 30, 0, 0, tokyo).toInstant().toEpochMilli();
+        long wake = ZonedDateTime.of(2026, 10, 23, 7, 15, 0, 0, tokyo).toInstant().toEpochMilli();
+        List<OHealthSleepPlan.Night> nights = nights(List.of(interval("tokyo", fall, wake)), tokyo);
+        assertEquals(1, nights.size());
+        assertEquals(20261023, nights.get(0).date());
+        assertEquals(tokyo, nights.get(0).zone());
+        assertEquals(1410, OHealthSleepPlan.sleepDayMinutes(fall, nights.get(0).zone()));
+        assertEquals(1875, OHealthSleepPlan.sleepDayMinutes(wake, nights.get(0).zone()));
+        assertEquals(1350, OHealthSleepPlan.sleepDayMinutes(fall, ZONE));
+    }
+
+    private static List<OHealthSleepPlan.Night> nights(List<HealthRecord> records) {
+        return OHealthSleepPlan.nights(records, ZONE);
+    }
+
+    private static List<OHealthSleepPlan.Night> nights(List<HealthRecord> records, ZoneId zone) {
+        return OHealthSleepPlan.nights(records, zone);
     }
 
     private static HealthRecord interval(String id, long start, long end) {

@@ -11,7 +11,11 @@ import io.github.miam1ku.mibandoplusbridge.data.HealthRecord;
 import io.github.miam1ku.mibandoplusbridge.integration.HealthQueueProvider;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Locale;
 import java.util.Comparator;
 import java.util.List;
 import org.json.JSONObject;
@@ -33,8 +37,8 @@ final class OHealthSleepWriter {
     private final Constructor<?> breathNew;
     private final Method sleepAccount, sleepDevice, sleepStart, sleepEnd, sleepState, sleepDisplay, sleepVersion;
     private final Method sleepGetDevice, sleepGetStart, sleepGetEnd, sleepGetState, sleepGetVersion;
-    private final Method statAccount, statDevice, statDate, statFall, statWake, statSleep, statDeep, statLight,
-            statRem, statAwake;
+    private final Method statAccount, statDevice, statDate, statZone, statFall, statWake, statSleep, statDeep,
+            statLight, statRem, statAwake;
     private final Method statGetDevice, statGetDate, statGetFall, statGetWake, statGetSleep,
             statGetDeep, statGetLight, statGetRem, statGetAwake;
     private final Method breathAccount, breathDevice, breathDeviceType, breathTime, breathValue, breathConfig;
@@ -69,6 +73,7 @@ final class OHealthSleepWriter {
         statAccount = statClass.getMethod("setSsoid", String.class);
         statDevice = statClass.getMethod("setDeviceUniqueId", String.class);
         statDate = statClass.getMethod("setDate", int.class);
+        statZone = optional(statClass, "setTimezone", String.class);
         statFall = statClass.getMethod("setFallAsleep", long.class);
         statWake = statClass.getMethod("setSleepOut", long.class);
         statSleep = statClass.getMethod("setTotalSleepTime", long.class);
@@ -130,7 +135,9 @@ final class OHealthSleepWriter {
         String queued = band.getString("deviceId", "");
         String device = OHealthDeviceHook.healthId(queued);
         List<HealthRecord> records = history(context, account, queued);
-        List<OHealthSleepPlan.Night> nights = OHealthSleepPlan.nights(records);
+        ZoneId zone = ZoneId.systemDefault();
+        HookRuntime.log("OHEALTH_SLEEP_ZONE " + zone.getId());
+        List<OHealthSleepPlan.Night> nights = OHealthSleepPlan.nights(records, zone);
         if (nights.isEmpty()) return;
         List<OHealthSleepPlan.Day> days = OHealthSleepPlan.days(nights);
         if (days.isEmpty()) return;
@@ -500,6 +507,8 @@ final class OHealthSleepWriter {
         statAccount.invoke(row, account);
         statDevice.invoke(row, device);
         statDate.invoke(row, day.date());
+        // Same offset Health stores from DateUtil.getTimeZone: "+0900", not a zone id.
+        if (statZone != null) statZone.invoke(row, hostOffset(day.zone(), day.wakeMs()));
         // The host stores the summary clock as sleep-day minutes, not the raw timestamps.
         statFall.invoke(row, OHealthSleepPlan.sleepDayMinutes(day.fallAsleepMs(), day.zone()));
         statWake.invoke(row, OHealthSleepPlan.sleepDayMinutes(day.wakeMs(), day.zone()));
@@ -595,6 +604,12 @@ final class OHealthSleepWriter {
                     && day.wakeMinutes() == (Long) statGetAwake.invoke(row);
         }
         return false;
+    }
+
+    /** RFC 822 offset, matching {@code SimpleDateFormat("Z")} in DateUtil.getTimeZone. */
+    private static String hostOffset(ZoneId zone, long epochMs) {
+        return DateTimeFormatter.ofPattern("Z", Locale.ROOT).withZone(zone)
+                .format(Instant.ofEpochMilli(epochMs));
     }
 
     /** The queue id used before rows were stored under the Bluetooth MAC. */

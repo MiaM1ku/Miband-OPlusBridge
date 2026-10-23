@@ -58,8 +58,10 @@ public final class OHealthSleepPlan {
 
     /**
      * Health stores the sleep-summary clock as minutes of the sleep day, the same conversion as
-     * StoreUtil.changeMillisToCurrentDayMinutes: 20:00 is 1200 and 01:39 is 1539. The public insert
-     * path stores that number as given, so the bridge converts it before writing.
+     * StoreUtil.changeMillisToCurrentDayMinutes: 20:00 is 1200 and 01:39 is 1539. That method
+     * formats the instant with the phone's default zone, and the public insert path stores the
+     * number as given, so the bridge converts with the same zone before writing. The offset
+     * stamped on a band history file is not that zone.
      */
     public static long sleepDayMinutes(long epochMs, ZoneId zone) {
         var local = Instant.ofEpochMilli(epochMs).atZone(zone).toLocalDateTime();
@@ -80,13 +82,21 @@ public final class OHealthSleepPlan {
         };
     }
 
+    /** The phone zone. Health's own 20:00 boundary and summary clock use this, not the band file. */
+    public static List<Night> nights(List<HealthRecord> records) {
+        return nights(records, ZoneId.systemDefault());
+    }
+
     /**
      * A session that starts before 20:00 pulls its own clear window back to that start.
      * Another session on the same date stays put. An interval with no stages keeps its duration
      * and is not labeled light, deep, or REM. Stages that share a minute are cut into one partition,
      * so deep and light are not stacked.
+     * {@code zone} decides which sleep-day a wake belongs to. A history file can keep an older
+     * offset after the phone zone changes, and Health does not use that offset.
      */
-    public static List<Night> nights(List<HealthRecord> records) {
+    public static List<Night> nights(List<HealthRecord> records, ZoneId zone) {
+        if (zone == null) throw new IllegalArgumentException("SLEEP_ZONE_MISSING");
         List<HealthRecord> intervals = new ArrayList<>();
         List<HealthRecord> stages = new ArrayList<>();
         for (HealthRecord record : records) {
@@ -110,7 +120,6 @@ public final class OHealthSleepPlan {
                 segments.add(new Segment(interval.startMs, interval.endMs, UNSTAGED));
             }
             segments = flatten(segments);
-            ZoneId zone = interval.timezone == null ? ZoneId.systemDefault() : ZoneId.of(interval.timezone);
             List<List<Segment>> clusters = new ArrayList<>();
             List<Segment> currentCluster = new ArrayList<>();
             currentCluster.add(segments.get(0));

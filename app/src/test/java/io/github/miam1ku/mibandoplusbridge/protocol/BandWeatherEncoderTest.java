@@ -213,6 +213,15 @@ public final class BandWeatherEncoderTest {
         var same = BandWeatherEncoder.replaceCurrentLocation(source, city(BAND_CODE, "Band city"), "");
         assertEquals(List.of(BAND_CODE), same.getWeather().getLocations().getLocationList().stream()
                 .map(XiaomiProto.WeatherLocation::getCode).toList());
+        var sole = BandWeatherEncoder.planTakeover(here, stuck, "");
+        assertEquals(8, sole.remove().getSubtype());
+        assertEquals("phone-beijing", sole.remove().getWeather().getLocations().getLocation(0).getCode());
+        assertEquals(7, sole.write().getSubtype());
+        assertEquals("phone-shanghai", sole.write().getWeather().getLocation().getCode());
+        assertEquals(null, BandWeatherEncoder.planTakeover(here, city("phone-shanghai", "徐汇"), "phone-shanghai").write());
+        var keptPlan = BandWeatherEncoder.planTakeover(here, manual, "phone-beijing");
+        assertEquals(null, keptPlan.remove());
+        assertEquals(6, keptPlan.write().getSubtype());
         var current = frame(BandWeatherEncoder.encode(here), 0).getWeather().getCurrent().getMetadata();
         assertEquals("phone-shanghai", current.getLocationKey());
         assertEquals("徐汇", current.getLocationName());

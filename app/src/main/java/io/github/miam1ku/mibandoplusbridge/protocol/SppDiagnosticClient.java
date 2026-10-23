@@ -614,9 +614,7 @@ public final class SppDiagnosticClient implements AutoCloseable {
             // commands during that wait; closing here is the Band 8 notification disconnect.
             if (failure instanceof Failure typed && "ICON_CHUNK_TIMEOUT".equals(typed.code)) throw failure;
             linkStop = failure instanceof Failure typed ? typed.code : failure.getClass().getSimpleName();
-            if (!(failure instanceof Failure)) {
-                SessionLog.line(context, "link stop " + failureText(failure));
-            }
+            SessionLog.line(context, "link stop " + linkStop);
             close();
             throw failure;
         }
@@ -1031,6 +1029,9 @@ public final class SppDiagnosticClient implements AutoCloseable {
                     }
                 }
             }
+            // close() wakes the reader with an empty packet, so a failed write used to
+            // leave this loop without a trace and the supervisor treated it as a clean end.
+            if (linkStop != null) throw new Failure(linkStop);
         } catch (Exception error) {
             if (linkStop != null) throw new Failure(linkStop);
             if (!closed) throw error;

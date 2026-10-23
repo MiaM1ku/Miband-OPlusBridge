@@ -21,6 +21,8 @@ public final class WeatherSyncTest {
         assertTrue(WeatherSync.unsupportedCityList(unsupported));
         assertFalse(WeatherSync.unsupportedCityList(unsupported.toBuilder().setStatus(0).build()));
         assertFalse(WeatherSync.unsupportedCityList(unsupported.toBuilder().setSubtype(6).build()));
+        assertTrue(WeatherSync.unsupportedCityList(unsupported.toBuilder().setStatus(2).build()));
+        assertFalse(WeatherSync.unsupportedCityList(unsupported.toBuilder().setStatus(3).build()));
     }
 
     private static BandWeatherEncoder.Sample sample(long publishedAtMs) {

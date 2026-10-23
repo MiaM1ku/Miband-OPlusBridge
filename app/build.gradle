@@ -11,8 +11,8 @@ android {
         applicationId 'io.github.miam1ku.mibandoplusbridge'
         minSdk 36
         targetSdk 36
-        versionCode 106
-        versionName '1.8.3'
+        versionCode 107
+        versionName '1.8.4'
         // LSPosed auto hot reload only fires when the installed versionCode changes.
         // For a dev loop: ./gradlew :app:assembleDebug -PhotReloadVersionCode=<higher number>
         if (project.hasProperty('hotReloadVersionCode')) {

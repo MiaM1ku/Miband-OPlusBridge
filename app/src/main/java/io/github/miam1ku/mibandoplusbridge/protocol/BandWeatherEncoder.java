@@ -167,6 +167,38 @@ public final class BandWeatherEncoder {
     }
 
     /**
+     * One city slot cannot be swapped in place. Band 8 keeps the old weather row until
+     * 10/8 frees it; a forecast for the new key then finds no free row and the link drops.
+     * Several slots still use one 10/6 list, with the phone city first.
+     */
+    public record CityUpdate(XiaomiProto.Command remove, XiaomiProto.Command write) {
+        public static CityUpdate none() { return new CityUpdate(null, null); }
+    }
+
+    public static CityUpdate planTakeover(Sample sample, XiaomiProto.WeatherLocations configured,
+                                          String previousKey) {
+        validateForecast(sample);
+        var existing = validCities(configured);
+        if (!existing.isEmpty() && existing.get(0).getCode().equals(sample.locationKey())) {
+            return CityUpdate.none();
+        }
+        if (existing.isEmpty()) return new CityUpdate(null, addCurrentLocation(sample));
+        if (existing.size() == 1) {
+            return new CityUpdate(removeLocation(existing.get(0)), addCurrentLocation(sample));
+        }
+        return new CityUpdate(null, replaceCurrentLocation(sample, configured, previousKey));
+    }
+
+    public static XiaomiProto.Command removeLocation(XiaomiProto.WeatherLocation city) {
+        if (city == null || !acceptableCityCode(city.getCode())) {
+            throw new IllegalArgumentException("WEATHER_CITY_SETUP_REQUIRED");
+        }
+        return XiaomiProto.Command.newBuilder().setType(10).setSubtype(8)
+                .setWeather(XiaomiProto.Weather.newBuilder().setLocations(
+                        XiaomiProto.WeatherLocations.newBuilder().addLocation(city))).build();
+    }
+
+    /**
      * Xiaomi Sports writes the current city first, drops the previous automatic city,
      * and keeps any other cities. A single city with no saved key is that previous city.
      */
@@ -186,6 +218,7 @@ public final class BandWeatherEncoder {
             if (dropSole) continue;
             ordered.add(city);
         }
+        while (ordered.size() > 5) ordered.remove(ordered.size() - 1);
         var copy = XiaomiProto.WeatherLocations.newBuilder();
         for (var city : ordered) copy.addLocation(city);
         return XiaomiProto.Command.newBuilder().setType(10).setSubtype(6)
