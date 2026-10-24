@@ -191,6 +191,14 @@ public final class CredentialProvider extends ContentProvider {
         } catch (SecurityException | IllegalArgumentException rejected) {
             throw rejected;
         } catch (Exception unavailable) {
+            if (unavailable instanceof IllegalStateException && "USER_LOCKED".equals(unavailable.getMessage())) {
+                window.close();
+                diagnosticWindow.close();
+                pendingToken = "";
+                if (captureOpen) captureError = "CAPTURE_STORAGE_FAILED";
+                closeCapture();
+                return result("USER_LOCKED");
+            }
             String kind = unavailable.getClass().getSimpleName();
             io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(getContext(),
                     "bridge STORAGE_FAIL " + kind);
