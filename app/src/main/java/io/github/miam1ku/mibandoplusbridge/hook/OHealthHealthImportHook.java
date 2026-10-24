@@ -955,6 +955,34 @@ public final class OHealthHealthImportHook {
             if (!reportedSuccess) throw new IllegalStateException("HEALTH_DELETE_UNCONFIRMED");
         }
 
+        /**
+         * Hide one ride. The sport table matches start, end and mode exactly, and a hidden row
+         * still occupies that key, so a replacement has to use a different end.
+         */
+        void deleteSport(Object api, String account, String device, long start, long end, int mode)
+                throws Exception {
+            if (device == null || device.isBlank() || end <= start || mode == 0) {
+                throw new IllegalArgumentException("HEALTH_DELETE_WINDOW");
+            }
+            Class<?> type = Class.forName("com.heytap.databaseengine.option.DataDeleteOption", false, loader);
+            Object option = type.getConstructor().newInstance();
+            type.getMethod("setSsoid", String.class).invoke(option, account);
+            type.getMethod("setDeviceUniqueId", String.class).invoke(option, device);
+            type.getMethod("setDataTable", int.class).invoke(option, OHealthSportWriter.TABLE);
+            type.getMethod("setSportMode", int.class).invoke(option, mode);
+            type.getMethod("setStartTime", long.class).invoke(option, start);
+            type.getMethod("setEndTime", long.class).invoke(option, end);
+            Object observer = observerConstructor.newInstance();
+            boolean reportedSuccess = false;
+            try {
+                subscribe.invoke(api.getClass().getMethod("deleteSportHealthData", type).invoke(api, option), observer);
+                reportedSuccess = Boolean.TRUE.equals(observerResult.invoke(observer));
+            } finally {
+                try { observerDispose.invoke(observer); } catch (ReflectiveOperationException ignored) { }
+            }
+            if (!reportedSuccess) throw new IllegalStateException("HEALTH_DELETE_UNCONFIRMED");
+        }
+
         /** Detail deletes use the same inclusive host end as the read, so an empty read confirms one. */
         private boolean minuteRowsRemain(Object api, String account, String device, long start, long end)
                 throws Exception {

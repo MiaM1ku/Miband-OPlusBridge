@@ -26,7 +26,7 @@ final class OHealthSportWriter {
     private final Constructor<?> created;
     private final Method setAccount, setDevice, setType, setStart, setEnd, setMode, setZone;
     private final Method setDisplay, setSync, setMeta, setClient, setVersion, setData;
-    private final Method getStart, getMode, getDevice;
+    private final Method getStart, getEnd, getData, getMode, getDevice;
 
     OHealthSportWriter(OHealthHealthImportHook.HostContract host) throws ReflectiveOperationException {
         this.host = host;
@@ -46,6 +46,8 @@ final class OHealthSportWriter {
         setVersion = type.getMethod("setVersion", int.class);
         setData = type.getMethod("setData", String.class);
         getStart = type.getMethod("getStartTimestamp");
+        getEnd = type.getMethod("getEndTimestamp");
+        getData = type.getMethod("getData");
         getMode = type.getMethod("getSportMode");
         getDevice = type.getMethod("getDeviceUniqueId");
     }
@@ -64,18 +66,29 @@ final class OHealthSportWriter {
         for (HealthRecord record : history(context, account, queued, "sport_session")) {
             HealthRecord track = match(record, tracks);
             String key = device + ":" + record.recordId;
-            String mark = record.revision + ":" + (track == null ? 0 : track.track.length()) + ":u6";
+            long occupied;
+            try {
+                occupied = written.getLong(key + ":end", 0);
+            } catch (ClassCastException old) {
+                occupied = 0;
+            }
             String saved;
             try {
                 saved = written.getString(key, "");
             } catch (ClassCastException old) {
                 saved = "";
             }
+            int trackLength = track == null ? 0 : track.track.length();
+            long slot = nextSlot(record.endMs, saved, occupied, record.revision, trackLength);
+            String mark = record.revision + ":" + trackLength + ":" + slot + ":u7";
             if (mark.equals(saved)) continue;
+            if (!written.edit().putLong(key + ":end", slot).commit()) {
+                throw new IllegalStateException("SPORT_IMPORT_MEMORY_FAILED");
+            }
             try {
                 if (store(api, account, queued, device,
                         OHealthStepWriter.deviceCategory(band.getString("modelId", "")),
-                        record, track)) {
+                        record, track, slot, !saved.isEmpty())) {
                     if (!written.edit().putString(key, mark).commit()) {
                         throw new IllegalStateException("SPORT_IMPORT_MEMORY_FAILED");
                     }
@@ -97,15 +110,32 @@ final class OHealthSportWriter {
         return best;
     }
 
+    /**
+     * Health keeps the first row for a start, end and mode, and a later insert does not replace
+     * its track. A hidden row still occupies that key, so a replacement ends one millisecond later.
+     */
+    static long nextSlot(long sessionEnd, String saved, long occupied, int revision, int trackLength) {
+        String prefix = revision + ":" + trackLength + ":";
+        if (saved != null && saved.startsWith(prefix) && saved.endsWith(":u7")) {
+            try {
+                long marked = Long.parseLong(saved.substring(prefix.length(), saved.length() - 3));
+                if (marked >= sessionEnd && marked - sessionEnd < 20) return marked;
+            } catch (NumberFormatException | IndexOutOfBoundsException ignored) { }
+        }
+        if (occupied >= sessionEnd && occupied - sessionEnd < 20) return Math.min(occupied + 1, sessionEnd + 19);
+        if (saved != null && !saved.isEmpty()) return sessionEnd + 1;
+        return sessionEnd;
+    }
+
     private boolean store(Object api, String account, String queued, String device, String category,
-            HealthRecord record, HealthRecord track) throws Exception {
+            HealthRecord record, HealthRecord track, long slot, boolean replacing) throws Exception {
         int mode = record.value.intValue();
         Object row = created.newInstance();
         setAccount.invoke(row, account);
         setDevice.invoke(row, device);
         setType.invoke(row, category);
         setStart.invoke(row, record.startMs);
-        setEnd.invoke(row, record.endMs);
+        setEnd.invoke(row, slot);
         setMode.invoke(row, mode);
         setDisplay.invoke(row, 1);
         setSync.invoke(row, 0);
@@ -119,27 +149,37 @@ final class OHealthSportWriter {
             if (pace != null) data.put("pace", pace);
             setData.invoke(row, data.toString());
         }
-        // An earlier import may sit under the bridge id. Delete both so the old row cannot stay on screen.
-        for (String id : queued.equals(device) ? List.of(device) : List.of(device, queued)) {
-            try {
-                host.deleteRows(api, TABLE, account, id, record.startMs, record.startMs + 1);
-            } catch (Exception ignored) {
-                // A missing previous row still lets the new summary replace the map.
+        if (replacing) {
+            for (String id : queued.equals(device) ? List.of(device) : List.of(device, queued)) {
+                hide(api, account, id, record.startMs, record.endMs, mode);
+                if (slot != record.endMs) hide(api, account, id, record.startMs, slot - 1, mode);
             }
         }
         host.insertRows(api, TABLE, List.of(row));
-        List<?> found = host.readRows(api, account, TABLE, device, record.startMs, record.endMs, 0, false);
+        List<?> found = host.readRows(api, account, TABLE, device, record.startMs, slot, 0, false);
         for (Object saved : found) {
             if (!device.equals(getDevice.invoke(saved))) continue;
             if (((Number) getStart.invoke(saved)).longValue() != record.startMs) continue;
-            if (((Number) getMode.invoke(saved)).intValue() == mode) {
-                int samples = pace == null ? 0 : Math.max(0, (pace.split(",").length - 3) / 2);
-                HookRuntime.log("OHEALTH_SPORT mode=" + mode + " pace=" + samples
-                        + " best=" + (record.bestPace == null ? 0 : record.bestPace));
-                return true;
+            if (((Number) getEnd.invoke(saved)).longValue() != slot) continue;
+            if (((Number) getMode.invoke(saved)).intValue() != mode) continue;
+            if (track != null) {
+                Object data = getData.invoke(saved);
+                if (!(data instanceof String text) || !text.contains("gps")) return false;
             }
+            int samples = pace == null ? 0 : Math.max(0, (pace.split(",").length - 3) / 2);
+            HookRuntime.log("OHEALTH_SPORT mode=" + mode + " pace=" + samples
+                    + " best=" + (record.bestPace == null ? 0 : record.bestPace));
+            return true;
         }
         return false;
+    }
+
+    private void hide(Object api, String account, String device, long start, long end, int mode) {
+        try {
+            host.deleteSport(api, account, device, start, end, mode);
+        } catch (Exception ignored) {
+            // A missing previous row still lets the new summary take its place.
+        }
     }
 
     private static String metadata(HealthRecord record, int mode, boolean tracked, String pace)
