@@ -101,7 +101,7 @@ public final class Copy {
             case "ROOT_ACTION_FAILED", "ROOT_ACTION_TIMEOUT" -> "在 KernelSU 中确认已允许本应用，再导入一次。";
             case "MULTIPLE_BANDS" -> "数据库里有多只手环，选一只导入。";
             case "USER_LOCKED" -> "解锁手机后再导入。";
-            case "CREDENTIAL_STORAGE_FAILED" -> "解锁手机后再点一次「导入绑定」。";
+            case "CREDENTIAL_STORAGE_FAILED" -> "保存中断了，再点一次「导入绑定」即可恢复。";
             default -> "这次操作中断了，再点一次。";
         };
     }

@@ -1,32 +1,36 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 package io.github.miam1ku.mibandoplusbridge.data;
 
-import android.app.KeyguardManager;
 import android.content.Context;
 import android.os.UserManager;
-import android.security.keystore.KeyGenParameterSpec;
-import android.security.keystore.KeyProperties;
 import android.util.AtomicFile;
 import java.io.File;
-import java.io.FileOutputStream;
-import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyStore;
-import java.security.UnrecoverableKeyException;
 import java.util.Arrays;
 import javax.crypto.Cipher;
-import javax.crypto.KeyGenerator;
 import javax.crypto.SecretKey;
 import javax.crypto.spec.GCMParameterSpec;
 import org.json.JSONObject;
 
-/** Credential-encrypted storage. No plaintext file, backup, or direct-boot access. */
+/**
+ * Credential-encrypted storage, no AndroidKeyStore.
+ *
+ * History: v1/v2 encrypted the binding with an AndroidKeyStore key. On ColorOS the keystore
+ * alias silently disappears (OTA, system cleanup), which permanently bricked every saved
+ * binding ("BINDING_KEY_UNAVAILABLE" loop). The binding now lives in a plaintext JSON file
+ * inside the credential-encrypted no-backup directory: not readable by other apps, not
+ * backed up, and immune to keystore loss. A legacy binding.enc is migrated when its key
+ * still works, otherwise it is discarded and the user re-imports once.
+ */
 public final class BindingStore {
-    private static final String ALIAS = "oplusband.binding.v2";
-    private static final String LEGACY_ALIAS = "oplusband.binding.v1";
-    private static final byte[] AAD = "io.github.miam1ku.mibandoplusbridge.binding.v1".getBytes(StandardCharsets.UTF_8);
+    private static final String LEGACY_ALIAS_V2 = "oplusband.binding.v2";
+    private static final String LEGACY_ALIAS_V1 = "oplusband.binding.v1";
+    private static final byte[] LEGACY_AAD =
+            "io.github.miam1ku.mibandoplusbridge.binding.v1".getBytes(StandardCharsets.UTF_8);
     private final Context context;
     private final AtomicFile file;
+    private final File legacyFile;
     public record Identity(String deviceId, String did, String address, String model) { }
     private record IdentitySnapshot(String path, long modified, long length, Identity identity) { }
     private static volatile IdentitySnapshot publicIdentity;
@@ -34,15 +38,17 @@ public final class BindingStore {
     public BindingStore(Context context) {
         this.context = context;
         if (context.isDeviceProtectedStorage()) throw new IllegalArgumentException("CE_STORAGE_REQUIRED");
-        file = new AtomicFile(new File(context.getNoBackupFilesDir(), "binding.enc"));
+        file = new AtomicFile(new File(context.getNoBackupFilesDir(), "binding.json"));
+        legacyFile = new File(context.getNoBackupFilesDir(), "binding.enc");
     }
 
     public synchronized void save(JSONObject value) throws Exception {
         requireUnlocked();
         byte[] plaintext = value.toString().getBytes(StandardCharsets.UTF_8);
         try {
-            write(key(), plaintext);
+            write(plaintext);
             publicIdentity = null;
+            discardLegacy();
         } finally {
             Arrays.fill(plaintext, (byte) 0);
         }
@@ -50,17 +56,15 @@ public final class BindingStore {
 
     public synchronized JSONObject read() throws Exception {
         requireUnlocked();
-        if (!file.getBaseFile().exists()) return null;
-        SecretKey secret = key();
-        if (!file.getBaseFile().exists()) return null;
-        byte[] plaintext = decrypt(secret);
-        try {
-            JSONObject binding = new JSONObject(new String(plaintext, StandardCharsets.UTF_8));
-            cacheIdentity(binding);
-            return binding;
-        } finally {
-            Arrays.fill(plaintext, (byte) 0);
+        if (file.getBaseFile().exists()) return parse(readFile());
+        if (!legacyFile.exists()) return null;
+        JSONObject legacy = migrateLegacy();
+        if (legacy != null) {
+            save(legacy);
+            SessionLog.line(context, "bridge BINDING_MIGRATED_PLAINTEXT");
+            return legacy;
         }
+        return null;
     }
 
     /** An established session can check public identity without decrypting its token while locked. */
@@ -95,105 +99,26 @@ public final class BindingStore {
         }
     }
 
-    private boolean screenLocked() {
-        KeyguardManager keyguard = context.getSystemService(KeyguardManager.class);
-        return keyguard != null && keyguard.isDeviceLocked();
-    }
-
-    private SecretKey key() throws Exception {
-        KeyStore store = KeyStore.getInstance("AndroidKeyStore");
-        store.load(null);
-        if (store.containsAlias(ALIAS)) {
-            SecretKey current = usable(store, ALIAS);
-            if (current != null) return current;
-            return generate();
-        }
-        if (store.containsAlias(LEGACY_ALIAS)) {
-            // v1 required an unlocked screen. That breaks pocket sync and sticks Keystore on OPlus.
-            SecretKey legacy = usable(store, LEGACY_ALIAS);
-            if (legacy == null) return generate();
-            return migrate(store, legacy);
-        }
-        if (file.getBaseFile().exists()) throw new IllegalStateException("BINDING_KEY_UNAVAILABLE");
-        return generate();
-    }
-
-    /** Usable key, or null after discard. A locked screen throws USER_LOCKED instead of discarding. */
-    private SecretKey usable(KeyStore store, String alias) throws Exception {
-        SecretKey existing;
+    private JSONObject parse(byte[] plaintext) throws Exception {
         try {
-            existing = (SecretKey) store.getKey(alias, null);
-        } catch (UnrecoverableKeyException | java.security.KeyStoreException unreadable) {
-            if (screenLocked()) throw new IllegalStateException("USER_LOCKED");
-            discard(store, alias);
-            return null;
-        }
-        if (existing == null) {
-            if (screenLocked()) throw new IllegalStateException("USER_LOCKED");
-            discard(store, alias);
-            return null;
-        }
-        try {
-            Cipher probe = Cipher.getInstance("AES/GCM/NoPadding");
-            probe.init(Cipher.ENCRYPT_MODE, existing);
-            return existing;
-        } catch (java.security.InvalidKeyException unusable) {
-            if (screenLocked()) throw new IllegalStateException("USER_LOCKED");
-            discard(store, alias);
-            return null;
-        }
-    }
-
-    private SecretKey migrate(KeyStore store, SecretKey legacy) throws Exception {
-        byte[] plaintext = file.getBaseFile().exists() ? decrypt(legacy) : null;
-        try {
-            if (file.getBaseFile().exists() && !file.getBaseFile().delete()) {
-                throw new IllegalStateException("BINDING_KEY_UNAVAILABLE");
-            }
-            publicIdentity = null;
-            store.deleteEntry(LEGACY_ALIAS);
-            SecretKey created = generate();
-            if (plaintext != null) write(created, plaintext);
-            SessionLog.line(context, "bridge BINDING_KEY_RESET");
-            return created;
+            JSONObject binding = new JSONObject(new String(plaintext, StandardCharsets.UTF_8));
+            cacheIdentity(binding);
+            return binding;
         } finally {
-            if (plaintext != null) Arrays.fill(plaintext, (byte) 0);
+            Arrays.fill(plaintext, (byte) 0);
         }
     }
 
-    private void discard(KeyStore store, String alias) throws Exception {
-        if (file.getBaseFile().exists() && !file.getBaseFile().delete()) {
-            throw new IllegalStateException("BINDING_KEY_UNAVAILABLE");
-        }
-        publicIdentity = null;
-        if (store.containsAlias(alias)) store.deleteEntry(alias);
-        SessionLog.line(context, "bridge BINDING_KEY_RESET");
+    private byte[] readFile() throws Exception {
+        if (file.getBaseFile().length() > 65536) throw new IllegalStateException("INVALID_BINDING_SIZE");
+        return file.readFully();
     }
 
-    private SecretKey generate() throws Exception {
-        if (file.getBaseFile().exists()) throw new IllegalStateException("BINDING_KEY_UNAVAILABLE");
-        KeyGenerator generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore");
-        generator.init(new KeyGenParameterSpec.Builder(ALIAS,
-                KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT)
-                .setKeySize(256).setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                .build());
-        return generator.generateKey();
-    }
-
-    private void write(SecretKey key, byte[] plaintext) throws Exception {
-        Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
-        cipher.init(Cipher.ENCRYPT_MODE, key);
-        cipher.updateAAD(AAD);
-        byte[] encrypted = cipher.doFinal(plaintext);
-        byte[] iv = cipher.getIV();
-        if (iv.length != 12) throw new IllegalStateException("INVALID_IV_LENGTH");
-        byte[] envelope = ByteBuffer.allocate(1 + iv.length + encrypted.length)
-                .put((byte) 1).put(iv).put(encrypted).array();
-        FileOutputStream output = null;
+    private void write(byte[] plaintext) throws Exception {
+        java.io.FileOutputStream output = null;
         try {
             output = file.startWrite();
-            output.write(envelope);
+            output.write(plaintext);
             file.finishWrite(output);
         } catch (Exception failure) {
             if (output != null) file.failWrite(output);
@@ -201,13 +126,45 @@ public final class BindingStore {
         }
     }
 
-    private byte[] decrypt(SecretKey key) throws Exception {
-        if (file.getBaseFile().length() > 65536) throw new IllegalStateException("INVALID_BINDING_SIZE");
-        byte[] envelope = file.readFully();
-        if (envelope.length < 29 || envelope[0] != 1) throw new IllegalStateException("INVALID_ENVELOPE");
-        Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
-        cipher.init(Cipher.DECRYPT_MODE, key, new GCMParameterSpec(128, envelope, 1, 12));
-        cipher.updateAAD(AAD);
-        return cipher.doFinal(envelope, 13, envelope.length - 13);
+    private void discardLegacy() {
+        if (legacyFile.exists() && legacyFile.delete()) {
+            SessionLog.line(context, "bridge BINDING_KEY_RESET");
+        }
+    }
+
+    /** Best-effort one-shot migration of the old keystore-encrypted binding. */
+    private JSONObject migrateLegacy() {
+        try {
+            byte[] plaintext = legacyDecrypt();
+            if (plaintext == null) return null;
+            return new JSONObject(new String(plaintext, StandardCharsets.UTF_8));
+        } catch (Exception failed) {
+            SessionLog.line(context, "bridge BINDING_MIGRATE_FAILED "
+                    + failed.getClass().getSimpleName());
+            return null;
+        } finally {
+            // Key is unreadable or envelope broken: the binding is unrecoverable by design.
+            discardLegacy();
+        }
+    }
+
+    private byte[] legacyDecrypt() throws Exception {
+        if (legacyFile.length() > 65536) return null;
+        byte[] envelope = new AtomicFile(legacyFile).readFully();
+        if (envelope.length < 29 || envelope[0] != 1) return null;
+        KeyStore store = KeyStore.getInstance("AndroidKeyStore");
+        store.load(null);
+        for (String alias : new String[]{LEGACY_ALIAS_V2, LEGACY_ALIAS_V1}) {
+            if (!store.containsAlias(alias)) continue;
+            SecretKey key = (SecretKey) store.getKey(alias, null);
+            if (key == null) continue;
+            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+            cipher.init(Cipher.DECRYPT_MODE, key, new GCMParameterSpec(128, envelope, 1, 12));
+            cipher.updateAAD(LEGACY_AAD);
+            byte[] plaintext = cipher.doFinal(envelope, 13, envelope.length - 13);
+            store.deleteEntry(alias);
+            return plaintext;
+        }
+        return null;
     }
 }

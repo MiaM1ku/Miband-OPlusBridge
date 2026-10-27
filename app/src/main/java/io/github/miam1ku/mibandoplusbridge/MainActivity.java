@@ -970,7 +970,7 @@ public final class MainActivity extends AppCompatActivity {
         }
         new MaterialAlertDialogBuilder(this)
                 .setTitle("导入绑定？")
-                .setMessage("用 root 读取小米运动健康本地数据库中的手环密钥。全程在本机完成，密钥加密保存在本应用里。")
+                .setMessage("用 root 读取小米运动健康本地数据库中的手环密钥。全程在本机完成，密钥保存在本应用的私有目录里。")
                 .setNegativeButton("取消", null)
                 .setPositiveButton("读取", (dialog, which) -> importFromDatabase(selectedAddress))
                 .show();

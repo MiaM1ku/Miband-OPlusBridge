@@ -200,6 +200,8 @@ public final class CredentialProvider extends ContentProvider {
                 return result("USER_LOCKED");
             }
             String kind = unavailable.getClass().getSimpleName();
+            String detail = unavailable.getMessage();
+            if (detail != null && !detail.isBlank()) kind = kind + " " + detail;
             io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(getContext(),
                     "bridge STORAGE_FAIL " + kind);
             window.close();
