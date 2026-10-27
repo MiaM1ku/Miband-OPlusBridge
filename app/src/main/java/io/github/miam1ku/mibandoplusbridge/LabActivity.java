@@ -82,9 +82,10 @@ public final class LabActivity extends AppCompatActivity {
                 50, "测试音乐", "桥接", 12, 180, true), true));
 
         LinearLayout dnd = screen.section("免打扰");
-        screen.caption(dnd, "依次发送同步开关和手机当前的免打扰状态，共两包。");
+        screen.caption(dnd, "依次发送同步开关和手机当前的免打扰状态。手环侧的同步开关关着时只读回来，开关仍留在手环上。");
         screen.filled(dnd, "同步免打扰", () -> sendAll("免打扰",
-                BandDndCommand.mirror(PhoneDnd.currentFilter(this))));
+                BandDndCommand.mirror(PhoneDnd.currentFilter(this),
+                        BandLiveService.bandSyncEnabled(this))));
 
         LinearLayout alarm = screen.section("闹钟");
         screen.caption(alarm, "测试响铃、关闭和稍后响。");

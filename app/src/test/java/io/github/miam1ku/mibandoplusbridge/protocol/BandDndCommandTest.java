@@ -24,6 +24,33 @@ public final class BandDndCommandTest {
         assertFalse(command.getSystem().hasDndStatus());
     }
 
+    @Test public void syncWithPhoneCanCarryTheBandsOwnOffPosition() {
+        var off = BandDndCommand.syncWithPhone(false);
+        assertEquals(2, off.getType());
+        assertEquals(15, off.getSubtype());
+        assertEquals(0, off.getSystem().getMiscSettingSet().getDndSync().getEnabled());
+    }
+
+    @Test public void querySyncAsksForTheDndSwitch() {
+        var command = BandDndCommand.querySync();
+        assertEquals(2, command.getType());
+        assertEquals(14, command.getSubtype());
+        assertEquals(2, command.getSystem().getMiscSettingGet().getSetting());
+        assertFalse(command.getSystem().hasMiscSettingSet());
+    }
+
+    @Test public void syncEnabledReadsOnlyPacketsThatCarryTheSwitch() {
+        assertEquals(Boolean.TRUE, BandDndCommand.syncEnabled(BandDndCommand.syncWithPhone(true)));
+        assertEquals(Boolean.FALSE, BandDndCommand.syncEnabled(BandDndCommand.syncWithPhone(false)));
+        // The band pushes the same body when the user moves the switch; the subtype is not the tell.
+        assertEquals(Boolean.FALSE, BandDndCommand.syncEnabled(
+                BandDndCommand.syncWithPhone(false).toBuilder().setSubtype(14).build()));
+        assertNull(BandDndCommand.syncEnabled(BandDndCommand.querySync()));
+        assertNull(BandDndCommand.syncEnabled(BandDndCommand.state(true)));
+        assertNull(BandDndCommand.syncEnabled(BandDndCommand.phoneRules(true, 1)));
+        assertNull(BandDndCommand.syncEnabled(null));
+    }
+
     @Test public void phoneRulesCarryTheManualZenRule() {
         var on = BandDndCommand.phoneRules(true, 1_700_000_000);
         var off = BandDndCommand.phoneRules(false, 1_700_000_100);
@@ -63,6 +90,14 @@ public final class BandDndCommandTest {
         assertEquals(Boolean.FALSE, BandDndCommand.pushedManualState(stored.toBuilder().setSubtype(110).build()));
         assertEquals(Boolean.TRUE, BandDndCommand.pushedManualState(BandDndCommand.phoneRules(true, 1)));
         assertNull(BandDndCommand.pushedManualState(null));
+    }
+
+    @Test public void mirrorWithSyncOffOnlyReadsTheSwitchBack() {
+        var packets = BandDndCommand.mirror(PhoneDnd.NONE, false);
+        assertEquals(1, packets.size());
+        assertEquals(14, packets.get(0).getSubtype());
+        assertEquals(2, packets.get(0).getSystem().getMiscSettingGet().getSetting());
+        assertEquals(4, BandDndCommand.mirror(PhoneDnd.NONE, true).size());
     }
 
     @Test public void mirrorAlwaysSendsTheSwitchThenTheLiveStatus() {

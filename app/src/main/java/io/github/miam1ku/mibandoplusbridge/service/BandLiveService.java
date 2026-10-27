@@ -104,6 +104,14 @@ public final class BandLiveService extends Service {
     private volatile boolean dndBandKnown;
     private volatile boolean dndBandOn;
     private final java.util.concurrent.atomic.AtomicBoolean dndAdopted = new java.util.concurrent.atomic.AtomicBoolean();
+    /** The band's own 同步手机勿扰 switch. Off is the user's choice there, and it outlives a link. */
+    private final io.github.miam1ku.mibandoplusbridge.notify.BandDndSync dndSync =
+            new io.github.miam1ku.mibandoplusbridge.notify.BandDndSync();
+    private final Runnable dndAskFallback = this::dndAskTimedOut;
+    private static final String FEATURES = "features";
+    private static final String DND_SYNC_OFF_KEY = "dndSyncOff";
+    /** A band that does not answer subtype 14 still gets the mirror, just this much later. */
+    private static final long DND_ASK_FALLBACK_MS = 1_500;
     private static volatile nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto.Command lastMusic;
     private final io.github.miam1ku.mibandoplusbridge.notify.SleepMusic sleepMusic =
             new io.github.miam1ku.mibandoplusbridge.notify.SleepMusic();
@@ -616,6 +624,7 @@ public final class BandLiveService extends Service {
         io.github.miam1ku.mibandoplusbridge.data.SessionLog.start(this);
         io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this, "module start");
         io.github.miam1ku.mibandoplusbridge.data.DeviceImageStore.requestRefresh(this);
+        dndSync.seed(bandSyncEnabled(this));
         weatherSync = new WeatherSync(this, () -> commands, coordinator);
         healthReplay = new HealthReplay(this, this::healthCollectionStatus, () -> {
             try {
@@ -808,6 +817,8 @@ public final class BandLiveService extends Service {
                         nextWeatherAt = now + TimeUnit.MINUTES.toNanos(30);
                         syncRequested = false;
                         healthReplay.request();
+                        dndSync.newLink();
+                        main.removeCallbacks(dndAskFallback);
                         queue.send(realtimeStats(REALTIME_STATS_START));
                         realtimeStatsStopPending = true;
                         coordinator.schedule(() -> {
@@ -824,6 +835,7 @@ public final class BandLiveService extends Service {
                             io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(BandLiveService.this,
                                     describeSystem(command));
                             noteBandRules(command);
+                            noteBandDndSync(command);
                             if (command.getSubtype() == 109) adoptStoredBand();
                             applyBandManual(command);
                             noteSleep(command);
@@ -1151,6 +1163,38 @@ public final class BandLiveService extends Service {
         String detail = io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.describe(this);
         android.util.Log.i("OplusBandBridge", "DND_SYNC " + detail);
         io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this, "DND_SYNC " + detail);
+        switch (dndSync.before()) {
+            case ASK -> askDndSync(queue);
+            case MIRROR -> mirrorDnd(queue);
+            case HOLD -> {
+                io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this, "DND_SYNC_HOLD bandSync=off");
+                android.util.Log.i("OplusBandBridge", "DND_SYNC_HOLD bandSync=off");
+            }
+        }
+    }
+
+    /**
+     * A session starts by reading the band's own 同步手机勿扰 switch. Subtype 15 with enabled 1 is
+     * this phone turning that switch on, so it must not go out before the answer is known: the
+     * user turned it off on the band, and a plain reconnect used to switch it back on.
+     */
+    private void askDndSync(io.github.miam1ku.mibandoplusbridge.protocol.LiveCommandQueue queue) {
+        sendQuietly(queue, io.github.miam1ku.mibandoplusbridge.protocol.BandDndCommand.querySync());
+        main.removeCallbacks(dndAskFallback);
+        main.postDelayed(dndAskFallback, DND_ASK_FALLBACK_MS);
+    }
+
+    /** Firmware that ignores subtype 14 keeps the stored switch value and gets the mirror anyway. */
+    private void dndAskTimedOut() {
+        if (!dndSync.waiting()) return;
+        io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this, "DND_SYNC_SWITCH quiet");
+        var queue = commands;
+        if (dndSync.answered(null) && queue != null && !stopRequested) mirrorDnd(queue);
+    }
+
+    /** Subtype 15 with enabled 1 both keeps the phone rule and leaves the switch on. */
+    private void mirrorDnd(io.github.miam1ku.mibandoplusbridge.protocol.LiveCommandQueue queue) {
+        if (!dndSync.on() || stopRequested) return;
         // The band drops a rule list that arrives before sync_with_phone is on.
         // Transport ACK is earlier than that; wait for the subtype 15 body.
         queue.request(io.github.miam1ku.mibandoplusbridge.protocol.BandDndCommand.syncWithPhone(), 2, 15)
@@ -1162,6 +1206,39 @@ public final class BandLiveService extends Service {
                 });
     }
 
+    /** The band's switch, either answering subtype 14 or pushed after the user moved it on the band. */
+    private void noteBandDndSync(nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto.Command command) {
+        Boolean enabled = io.github.miam1ku.mibandoplusbridge.protocol.BandDndCommand.syncEnabled(command);
+        if (enabled == null) return;
+        boolean mirror = dndSync.answered(enabled);
+        rememberDndSync(dndSync.on());
+        main.removeCallbacks(dndAskFallback);
+        io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this, "DND_SYNC_SWITCH bandSync="
+                + (dndSync.on() ? "on" : "off") + " mirror=" + mirror);
+        if (!dndSync.on()) {
+            // Nothing may reach the band again until the switch is back on there.
+            main.removeCallbacks(dndRulesAgain);
+            return;
+        }
+        if (!mirror) return;
+        var queue = commands;
+        if (queue == null || stopRequested) return;
+        main.post(() -> { if (!stopRequested && commands == queue) mirrorDnd(queue); });
+    }
+
+    /** The band's 同步手机勿扰 switch as this app last recorded it. Lab screens read it too. */
+    public static boolean bandSyncEnabled(Context context) {
+        return !io.github.miam1ku.mibandoplusbridge.data.LocalPrefs.open(context, FEATURES)
+                .getBoolean(DND_SYNC_OFF_KEY, false);
+    }
+
+    private void rememberDndSync(boolean enabled) {
+        try {
+            io.github.miam1ku.mibandoplusbridge.data.LocalPrefs.open(this, FEATURES)
+                    .edit().putBoolean(DND_SYNC_OFF_KEY, !enabled).commit();
+        } catch (RuntimeException ignored) { }
+    }
+
     private void sendDndFollowup() {
         pushDndState(false);
     }
@@ -1169,6 +1246,10 @@ public final class BandLiveService extends Service {
     private void pushDndState(boolean resend) {
         var queue = commands;
         if (stopRequested || queue == null) return;
+        if (!dndSync.on()) {
+            io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this, "DND_SYNC_HOLD bandSync=off push");
+            return;
+        }
         boolean phoneOn = io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.blocksNotifications(
                 io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.currentFilter(this));
         if (!io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.sendPhoneRule(
@@ -1224,6 +1305,8 @@ public final class BandLiveService extends Service {
 
 
     private void applyBandManual(nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto.Command command) {
+        // With the band's switch off the two sides are independent, in both directions.
+        if (!dndSync.on()) return;
         Boolean bandOn = io.github.miam1ku.mibandoplusbridge.protocol.BandDndCommand.pushedManualState(command);
         if (bandOn == null) return;
         if (!io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.acceptBandManual(
@@ -1332,7 +1415,7 @@ public final class BandLiveService extends Service {
     }
 
     private void adoptStoredBand() {
-        if (dndPushPhone || !dndBandKnown) return;
+        if (!dndSync.on() || dndPushPhone || !dndBandKnown) return;
         boolean phoneOn = io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.blocksNotifications(
                 io.github.miam1ku.mibandoplusbridge.notify.PhoneDnd.currentFilter(this));
         if (dndBandOn == phoneOn || !dndAdopted.compareAndSet(false, true)) return;

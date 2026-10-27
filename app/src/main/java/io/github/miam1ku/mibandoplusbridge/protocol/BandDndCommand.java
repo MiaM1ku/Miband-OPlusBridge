@@ -10,13 +10,34 @@ import nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto;
  public final class BandDndCommand {
      private BandDndCommand() {}
 
-     /** Subtype 15. enabled stays 1 so the band keeps the phone rule instead of deleting it. */
-     public static XiaomiProto.Command syncWithPhone() {
+     /** Subtype 15. enabled 1 keeps the phone rule, enabled 0 is what the band's own
+      * 同步手机勿扰 switch writes: sync off, delete phone rule list. */
+     public static XiaomiProto.Command syncWithPhone(boolean enabled) {
          return XiaomiProto.Command.newBuilder().setType(2).setSubtype(15)
                  .setSystem(XiaomiProto.System.newBuilder().setMiscSettingSet(
                          XiaomiProto.MiscSettingSet.newBuilder().setDndSync(
-                                 XiaomiProto.DndSync.newBuilder().setEnabled(1))))
+                                 XiaomiProto.DndSync.newBuilder().setEnabled(enabled ? 1 : 0))))
                  .build();
+     }
+
+     /** Subtype 15 with enabled 1: turn the band's switch on and keep the phone rule. */
+     public static XiaomiProto.Command syncWithPhone() { return syncWithPhone(true); }
+
+     /** Subtype 14 setting 2 asks the band where its 同步手机勿扰 switch stands. */
+     public static XiaomiProto.Command querySync() {
+         return XiaomiProto.Command.newBuilder().setType(2).setSubtype(14)
+                 .setSystem(XiaomiProto.System.newBuilder().setMiscSettingGet(
+                         XiaomiProto.MiscSettingGet.newBuilder().setSetting(2)))
+                 .build();
+     }
+
+     /** The switch value the band reports, either as the answer to {@link #querySync()} or
+      * pushed after the user moved it on the band. Null when this packet carries no switch. */
+     public static Boolean syncEnabled(XiaomiProto.Command command) {
+         if (command == null || command.getType() != 2 || !command.hasSystem()) return null;
+         var system = command.getSystem();
+         if (!system.hasMiscSettingSet() || !system.getMiscSettingSet().hasDndSync()) return null;
+         return system.getMiscSettingSet().getDndSync().getEnabled() != 0;
      }
 
      public static XiaomiProto.Command state(boolean enabled) {
@@ -88,5 +109,10 @@ import nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto;
         boolean on = PhoneDnd.blocksNotifications(filter);
         int now = activatedAt(System.currentTimeMillis());
         return List.of(syncWithPhone(), state(on), phoneRules(on, now), phoneSilent(on));
+    }
+
+    /** With the band's own switch off there is nothing to mirror: ask where it stands and stop. */
+    public static List<XiaomiProto.Command> mirror(int filter, boolean syncOn) {
+        return syncOn ? mirror(filter) : List.of(querySync());
     }
  }
