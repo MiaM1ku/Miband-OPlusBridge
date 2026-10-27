@@ -87,9 +87,12 @@ public final class HealthRecord {
         if (!(sleepStage || sleepInterval || sleepBreath || steps || heartRate || oxygen || stress || sport || trackFile)) {
             throw new IllegalArgumentException("UNSUPPORTED_HEALTH_KIND");
         }
+        // Resting and walking heart rate are one daily value each. Health only derives them from
+        // points typed 1 and 4, so they stay their own modes instead of a continuous minute.
+        boolean dailyHeart = heartRate && ("resting".equals(measurementMode) || "walking".equals(measurementMode));
         // Database v2 migrates every old source, including sleep_stage, to continuous.
         if (!("continuous".equals(measurementMode) || "manual".equals(measurementMode)
-                || "sleep".equals(measurementMode))
+                || "sleep".equals(measurementMode) || dailyHeart)
                 || steps && !"continuous".equals(measurementMode)
                 || sport && !"continuous".equals(measurementMode)
                 || trackFile && !"continuous".equals(measurementMode)

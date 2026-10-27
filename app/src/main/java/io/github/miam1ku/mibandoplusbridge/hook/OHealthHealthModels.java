@@ -44,6 +44,16 @@ final class OHealthHealthModels {
                     if (this == STRESS) throw new IllegalArgumentException("UNSUPPORTED_IMPORT_MODE");
                     yield this == HEART ? 5 : 1;
                 }
+                // Health takes the day's resting rate from points typed 1 and the walking
+                // average from points typed 4. Neither exists for oxygen or stress.
+                case "resting" -> {
+                    if (this != HEART) throw new IllegalArgumentException("UNSUPPORTED_IMPORT_MODE");
+                    yield 1;
+                }
+                case "walking" -> {
+                    if (this != HEART) throw new IllegalArgumentException("UNSUPPORTED_IMPORT_MODE");
+                    yield 4;
+                }
                 default -> throw new IllegalArgumentException("UNSUPPORTED_IMPORT_MODE");
             };
         }

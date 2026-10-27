@@ -916,6 +916,8 @@ public final class SppDiagnosticClient implements AutoCloseable {
         long heartAt = -1;
         for (BandHistoryParser.Measurement measurement : measurements) {
             if (measurement.value == null || !"heart_rate".equals(measurement.kind)
+                    || !("continuous".equals(measurement.measurementMode)
+                            || "manual".equals(measurement.measurementMode))
                     || measurement.startMs <= heartAt) continue;
             heart = measurement.value.intValue();
             heartAt = measurement.startMs;

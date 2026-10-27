@@ -77,6 +77,74 @@ public final class BandHistoryParserTest {
         assertEquals(13, saved.get(0).distance);
     }
 
+    @Test public void dailyReportCarriesTheRestingHeartRateAsItsOwnPoint() throws Exception {
+        byte[] body = reportBody(2052);
+        body[1] |= 0x10; // Validity bit 28, slot 3: the resting heart rate is present.
+        body[12] = 58;
+        var measurements = parser().parseFile(file(5, 1, body)).measurements;
+        assertEquals(2, measurements.size());
+        var steps = measurements.get(0);
+        assertEquals("steps_day", steps.kind);
+        assertEquals(2052, steps.value.intValue());
+        var resting = measurements.get(1);
+        assertEquals("heart_rate", resting.kind);
+        assertEquals("resting", resting.measurementMode);
+        assertEquals(58, resting.value.intValue());
+        assertEquals(1L, resting.endMs - resting.startMs);
+        assertEquals(steps.startMs + 43_200_000L, resting.startMs);
+        assertNotEquals(steps.recordId, resting.recordId);
+        assertTrue(resting.recordId.endsWith(":resting"));
+
+        // The same day at a different rate is a new revision of the same point.
+        byte[] changed = reportBody(2052);
+        changed[1] |= 0x10;
+        changed[12] = 61;
+        var changedResting = parser().parseFile(file(5, 1, changed)).measurements.get(1);
+        assertEquals(resting.recordId, changedResting.recordId);
+        assertNotEquals(resting.sourceFingerprint, changedResting.sourceFingerprint);
+    }
+
+    @Test public void dailyReportWithoutAUsableRestingRateKeepsOnlyTheSteps() throws Exception {
+        assertEquals(1, parser().parseFile(file(5, 1, reportBody(20))).measurements.size());
+        for (int unusable : new int[] {0, 255}) {
+            byte[] body = reportBody(20);
+            body[1] |= 0x10;
+            body[12] = (byte) unusable;
+            assertEquals(1, parser().parseFile(file(5, 1, body)).measurements.size());
+        }
+    }
+
+    @Test public void onlyATrailingDailyHeartMayGrowAnArchivedFile() throws Exception {
+        byte[] body = reportBody(20);
+        body[1] |= 0x10;
+        body[12] = 58;
+        var grown = parser().parseFile(file(5, 1, body)).measurements;
+        assertTrue(BandHistoryParser.onlyDailyHeartFrom(grown, 1));
+        assertFalse(BandHistoryParser.onlyDailyHeartFrom(grown, 0));
+        assertTrue(BandHistoryParser.onlyDailyHeartFrom(grown, 2));
+        var minutes = parser().parseFile(file(4, 0, recordBody(9, 5, 72, 0))).measurements;
+        assertFalse(BandHistoryParser.onlyDailyHeartFrom(minutes, minutes.size() - 1));
+        assertFalse(BandHistoryParser.onlyDailyHeartFrom(null, 0));
+    }
+
+    @Test public void derivedDailyHeartIsOnePointPerMode() throws Exception {
+        long noon = 1_700_000_000_000L;
+        var walking = parser().dailyHeart("walking", noon, 97, "+05:30");
+        assertEquals("heart_rate", walking.kind);
+        assertEquals("walking", walking.measurementMode);
+        assertEquals(noon, walking.startMs);
+        assertEquals(1L, walking.endMs - walking.startMs);
+        assertTrue(walking.recordId.endsWith(":walking"));
+        assertEquals(walking.recordId, parser().dailyHeart("walking", noon, 103, "+05:30").recordId);
+        assertNotEquals(walking.sourceFingerprint,
+                parser().dailyHeart("walking", noon, 103, "+05:30").sourceFingerprint);
+        assertNotEquals(walking.recordId, parser().dailyHeart("resting", noon, 97, "+05:30").recordId);
+        assertThrows(IllegalArgumentException.class,
+                () -> parser().dailyHeart("continuous", noon, 97, "+05:30"));
+        assertThrows(IllegalArgumentException.class,
+                () -> parser().dailyHeart("walking", noon, 30, "+05:30"));
+    }
+
     @Test public void minuteRecordCarriesCaloriesAndDistanceBesideSteps() throws Exception {
         byte[] body = recordBody(9, 5, 72, 0);
         body[9] = 4;

@@ -462,6 +462,8 @@ final class OHealthSleepWriter {
         int used = 0;
         for (HealthRecord record : records) {
             if (record.value == null) continue;
+            // A day's resting or walking average is not a night sample.
+            if ("resting".equals(record.measurementMode) || "walking".equals(record.measurementMode)) continue;
             int value = record.value.intValue();
             if (value < low || value > high) continue;
             values[used++] = value;

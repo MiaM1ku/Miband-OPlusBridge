@@ -363,23 +363,51 @@ public final class HealthRecordStore extends SQLiteOpenHelper {
         return measurements(requireConfirmedAccount(getReadableDatabase()), deviceId, kind, startMs, endMs, after);
     }
     public synchronized List<Measurement> storedSteps(String deviceId, long dayStart, long dayEnd) throws JSONException {
-        String account = requireConfirmedAccount(getReadableDatabase());
         ArrayList<Measurement> found = new ArrayList<>();
         for (String kind : new String[] {"steps_day", "steps_interval"}) {
-            String after = "";
-            while (found.size() <= 4_000) {
-                int count = 0;
-                try (Cursor rows = measurements(account, deviceId, kind, dayStart, dayEnd, after)) {
-                    while (rows.moveToNext()) {
-                        count++;
-                        after = rows.getString(0);
-                        found.add(Measurement.fromJson(new JSONObject(rows.getString(2))));
-                    }
-                }
-                if (count < PAGE_SIZE) break;
-            }
+            storedMeasurements(deviceId, kind, dayStart, dayEnd, found);
         }
         return found;
+    }
+
+    /**
+     * Every stored measurement of one kind in a window, as the normalized record it was written
+     * as. The {@code measurements} payload is a {@link HealthRecord}, not a parser measurement.
+     */
+    public synchronized List<HealthRecord> storedRecords(String deviceId, String kind,
+            long startMs, long endMs) throws JSONException {
+        ArrayList<HealthRecord> found = new ArrayList<>();
+        String after = "";
+        while (found.size() <= 4_000) {
+            int count = 0;
+            try (Cursor rows = measurements(requireConfirmedAccount(getReadableDatabase()), deviceId,
+                    kind, startMs, endMs, after)) {
+                while (rows.moveToNext()) {
+                    count++;
+                    after = rows.getString(0);
+                    found.add(HealthRecord.fromJson(new JSONObject(rows.getString(2))));
+                }
+            }
+            if (count < PAGE_SIZE) break;
+        }
+        return found;
+    }
+
+    private void storedMeasurements(String deviceId, String kind, long startMs, long endMs,
+            List<Measurement> found) throws JSONException {
+        String after = "";
+        while (found.size() <= 4_000) {
+            int count = 0;
+            try (Cursor rows = measurements(requireConfirmedAccount(getReadableDatabase()), deviceId,
+                    kind, startMs, endMs, after)) {
+                while (rows.moveToNext()) {
+                    count++;
+                    after = rows.getString(0);
+                    found.add(Measurement.fromJson(new JSONObject(rows.getString(2))));
+                }
+            }
+            if (count < PAGE_SIZE) break;
+        }
     }
 
 
@@ -466,6 +494,20 @@ public final class HealthRecordStore extends SQLiteOpenHelper {
         } finally {
             db.endTransaction();
         }
+    }
+
+    /**
+     * A parsed file gained a record an older parser did not produce. Only the count grows, so a
+     * replay resumes at the new index instead of restarting the whole file.
+     */
+    public synchronized boolean extendParsedRecordCount(String hash, int recordCount) {
+        requireHash(hash);
+        if (recordCount < 1) return false;
+        ContentValues values = new ContentValues(1);
+        values.put("record_count", recordCount);
+        return getWritableDatabase().update("files", values,
+                "file_hash=? AND parse_status='PARSED' AND record_count<?",
+                new String[]{hash, Integer.toString(recordCount)}) == 1;
     }
 
     /** A rejected file gained a parser. The cursor stays where it already moved. */

@@ -257,6 +257,8 @@ public final class BandDetailsActivity extends AppCompatActivity {
             text.append(switch (record.kind) { case "heart_rate" -> " 次/分"; case "spo2" -> "%"; case "stress" -> " 压力值"; default -> " 步"; });
             if ("manual".equals(record.measurementMode)) text.append(" · 手动测量");
             if ("sleep".equals(record.measurementMode)) text.append(" · 睡眠期间");
+            if ("resting".equals(record.measurementMode)) text.append(" · 当日静息");
+            if ("walking".equals(record.measurementMode)) text.append(" · 当日步行平均");
         }
         if (record.timezone != null) text.append("\n").append(record.timezone);
     }

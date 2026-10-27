@@ -25,6 +25,7 @@ public final class RawFitnessFileStore {
     private static volatile boolean sleepSummaryCurrent;
     private static volatile boolean sleepBreathMetricsCurrent;
     private static volatile boolean sportSummaryCurrent;
+    private static volatile boolean restingHeartCurrent;
     private final Context context;
     private final File directory;
 
@@ -280,6 +281,67 @@ public final class RawFitnessFileStore {
                 return 0;
             }
         }
+    }
+
+    /** One pass so daily reports indexed before the resting rate was parsed reach the queue. */
+    public int refreshRestingHeart() {
+        if (restingHeartCurrent) return 0;
+        synchronized (FILE_LOCK) {
+            if (restingHeartCurrent) return 0;
+            SharedPreferences prefs = context.getSharedPreferences("oplusband-history", Context.MODE_PRIVATE);
+            if (prefs.getBoolean("resting-heart-v1", false)) {
+                restingHeartCurrent = true;
+                return 0;
+            }
+            try {
+                int extended = rewriteRestingHeart();
+                if (!prefs.edit().putBoolean("resting-heart-v1", true).commit()) {
+                    throw new IllegalStateException("RESTING_HEART_MEMORY_FAILED");
+                }
+                restingHeartCurrent = true;
+                return extended;
+            } catch (Exception ignored) {
+                // Identity or a file can be unready. The next replay tries again.
+                return 0;
+            }
+        }
+    }
+
+    /** Only the record count grows, so the archive replay picks the new record up by index. */
+    private int rewriteRestingHeart() throws Exception {
+        var state = LocalPrefs.open(context, "band-state");
+        String deviceId = state.getString("deviceId", "");
+        String identity = requireMatchingIdentity(context, deviceId);
+        String firmware = state.getString("verifiedFirmware", "");
+        if (firmware.isBlank()) throw new IllegalStateException("HISTORY_FIRMWARE_UNCONFIRMED");
+        BandHistoryParser parser = new BandHistoryParser(firmware, deviceId, identity);
+        File[] existing = directory.listFiles((parent, name) -> name.matches("[0-9a-f]{64}\\.dat"));
+        if (existing == null) return 0;
+        int extended = 0;
+        try (HealthRecordStore store = new HealthRecordStore(context)) {
+            for (File file : existing) {
+                String hash = file.getName().substring(0, 64);
+                if (!store.isFileIndexed(hash)) continue;
+                byte[] bytes;
+                try {
+                    bytes = readFile(hash);
+                } catch (IllegalArgumentException invalid) {
+                    continue;
+                }
+                try {
+                    int descriptor = bytes.length > 6 ? bytes[6] & 0xff : 0;
+                    if (((descriptor & 0x7f) >>> 2) != 0 || (descriptor & 3) != 1) continue;
+                    BandHistoryParser.FileResult result = parser.parseFile(bytes);
+                    if (!"PARSED".equals(result.parseStatus)) continue;
+                    if (store.extendParsedRecordCount(hash, result.measurements.size())) extended++;
+                } catch (IllegalArgumentException invalid) {
+                    continue;
+                } finally {
+                    Arrays.fill(bytes, (byte) 0);
+                }
+            }
+        }
+        return extended;
     }
 
     /** One pass over sport summaries rejected before this parser existed. */

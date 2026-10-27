@@ -122,6 +122,18 @@ public final class HealthRecordTest {
         assertFalse(decoded.hostAccepts());
     }
 
+    @Test public void dailyHeartValuesAreOnePointAndOnlyExistForHeartRate() {
+        for (String mode : new String[] {"resting", "walking"}) {
+            HealthRecord daily = metric("heart_rate", 58, mode, 1);
+            assertEquals(mode, daily.measurementMode);
+            assertEquals(58, daily.value.intValue());
+            assertThrows(IllegalArgumentException.class, () -> metric("heart_rate", 58, mode, 60_000));
+            assertThrows(IllegalArgumentException.class, () -> metric("spo2", 98, mode, 1));
+            assertThrows(IllegalArgumentException.class, () -> metric("stress", 40, mode, 1));
+        }
+        assertThrows(IllegalArgumentException.class, () -> metric("heart_rate", 58, "resting ", 1));
+    }
+
     private static HealthRecord metric(String kind, Number value, String mode, long duration) {
         return new HealthRecord("metric", "stable", kind, 60_000, 60_000 + duration,
                 value, null, 1, "+05:30", mode, false);

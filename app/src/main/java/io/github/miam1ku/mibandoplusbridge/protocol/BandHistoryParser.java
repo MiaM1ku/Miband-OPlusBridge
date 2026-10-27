@@ -219,10 +219,21 @@ public final class BandHistoryParser {
         long day = Math.floorDiv(seconds + offsetSeconds, 86_400L) * DAY_MS - offsetSeconds * 1000L;
         long steps = cursor.unsigned32();
         int calories = cursor.uint(2);
-        cursor.skip(16); // Heart, stress and stand lead-in. The 53-byte body is fixed.
+        cursor.skip(1); // Reserved slot before the resting rate.
+        // Validity bit 28 is slot 3: the day's resting heart rate. Max, min and average heart
+        // rate, stress and their timestamps follow it and are not needed here.
+        int resting = cursor.uint(1);
+        cursor.skip(14);
         int moveAbout = Integer.bitCount(cursor.uint(3));
-        return List.of(measurement("steps_day", day, day + DAY_MS, steps,
+        List<Measurement> records = new ArrayList<>(2);
+        records.add(measurement("steps_day", day, day + DAY_MS, steps,
                 timezone, "continuous", false, calories, null, moveAbout));
+        // Noon keeps the value inside its own day and out of the night heart-rate window.
+        long at = day + DAY_MS / 2;
+        if (bit(validity, 28) && resting >= 40 && resting <= 220) {
+            records.add(measurement("heart_rate", at, at + 1, resting, timezone, "resting", false));
+        }
+        return records;
     }
 
     private List<Measurement> decodeManual(byte[] bytes, String timezone) {
@@ -608,6 +619,31 @@ public final class BandHistoryParser {
                 sourceFingerprint(kind, start, end, value, timezone, mode, complete, null,
                         calories, distance, moveAbout, null, null, null, null, null),
                 calories, distance, moveAbout, null, null, null, null, null);
+    }
+
+    /**
+     * One daily heart value that is not a minute sample. Resting comes from the band's daily
+     * report; walking is derived from that day's step minutes and is stored under the same
+     * identity, so a recomputed average only replaces its own row.
+     */
+    public Measurement dailyHeart(String mode, long atMs, int value, String timezone) {
+        if (!("resting".equals(mode) || "walking".equals(mode))) {
+            throw new IllegalArgumentException("UNSUPPORTED_DAILY_HEART_MODE");
+        }
+        if (value < 40 || value > 220) throw new IllegalArgumentException("UNSUPPORTED_DAILY_HEART_VALUE");
+        return measurement("heart_rate", atMs, atMs + 1, value, timezone, mode, false);
+    }
+
+    /** True when every measurement from {@code index} on is a daily heart value, never a sample. */
+    public static boolean onlyDailyHeartFrom(List<Measurement> measurements, int index) {
+        if (measurements == null) return false;
+        for (int at = Math.max(0, index); at < measurements.size(); at++) {
+            Measurement measurement = measurements.get(at);
+            if (measurement == null || !"heart_rate".equals(measurement.kind)) return false;
+            if (!"resting".equals(measurement.measurementMode)
+                    && !"walking".equals(measurement.measurementMode)) return false;
+        }
+        return true;
     }
 
     private Measurement sportMeasurement(byte[] bytes, String timezone) {
