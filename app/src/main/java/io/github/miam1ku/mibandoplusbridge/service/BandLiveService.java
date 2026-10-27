@@ -119,6 +119,9 @@ public final class BandLiveService extends Service {
     private volatile long sleepArmedAtMs = Long.MAX_VALUE;
     private long nextSleepFileAt;
     private volatile boolean retryNow;
+    /** SPP needs the system bond. This keeps the re-pair budget for one bond loss. */
+    private final BondRecovery bondRecovery = new BondRecovery();
+    private boolean bondGaveUpLogged;
     private String noticeTitle = "";
     private volatile SppDiagnosticClient client;
     private boolean receiverRegistered;
@@ -773,6 +776,7 @@ public final class BandLiveService extends Service {
                 try {
                     active.runLive(result -> {
                         authenticated.set(true);
+                        bondRecovery.connected();
                         try {
                             repository.recordVerifiedDevice(result.batteryPercent(), result.batteryState(), true,
                                     result.firmware(), result.hardware(), result.sku());
@@ -906,7 +910,8 @@ public final class BandLiveService extends Service {
                 } catch (Exception failure) {
                     status = failure instanceof SppDiagnosticClient.Failure typed
                             ? typed.code : failure.getClass().getSimpleName();
-                    show(retryable(status) ? "正在重连" : "稍后自动重连");
+                    if ("OFFICIAL_PAIRING_REQUIRED".equals(status)) repairBond();
+                    show(statusCopy(status));
                 } finally {
                     client = null;
                     commands = null;
@@ -1063,6 +1068,9 @@ public final class BandLiveService extends Service {
         return switch (code) {
             case "BLUETOOTH_DISABLED", "DIAGNOSTIC_TIMEOUT", "CANCELLED", "CONNECTION_ALREADY_ACTIVE",
                     "USER_LOCKED", "EMPTY_SOCKET_READ", "CLOSED" -> true;
+            // A missing bond fails before the socket exists, so retrying is cheap and the band
+            // comes back within seconds of whoever restores the bond.
+            case "OFFICIAL_PAIRING_REQUIRED" -> true;
             // Link loss is not a bad binding. Quiet backoff left the band down for two minutes.
             default -> code.startsWith("CLOSED") || code.startsWith("BLE_");
         };
@@ -1083,6 +1091,80 @@ public final class BandLiveService extends Service {
         io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(context, "bond changed state=" + state
                 + "/" + bondName(state) + " prev=" + previous + "/" + bondName(previous)
                 + " reason=" + reason + "/" + bondReason(reason) + " ours=" + ours);
+        if (state == BluetoothDevice.BOND_NONE && previous == BluetoothDevice.BOND_BONDED) {
+            // One greppable line: the bond a live SPP session needs went away, and this says who
+            // the stack blamed. reason 9 is a local removal; 1 and 8 are the band refusing a key.
+            io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(context, "bond lost reason="
+                    + bondReason(reason) + " ours=" + ours);
+        }
+        if (!"true".equals(ours)) return;
+        // A lost or restored bond changes what the next attempt can do. Without this the worker
+        // sat out the whole backoff after someone else re-paired the band.
+        if (bondRecovery.note(state)) {
+            synchronized (stopLock) {
+                retryNow = true;
+                stopLock.notifyAll();
+            }
+        }
+    }
+
+    /**
+     * SPP opens a secure RFCOMM socket and needs the system bond. ColourOS and Mi Fitness remove
+     * that bond while the bridge owns the band, and the quiet retry then waited for a repair that
+     * only the official app could start. Ask for the bond here instead, a bounded number of times.
+     */
+    private void repairBond() {
+        String address;
+        try {
+            address = new BandStateRepository(this).address();
+        } catch (RuntimeException locked) {
+            return;
+        }
+        if (address == null || address.isBlank()) return;
+        var adapter = getSystemService(android.bluetooth.BluetoothManager.class).getAdapter();
+        if (adapter == null || !adapter.isEnabled()) return;
+        BluetoothDevice device;
+        try {
+            device = adapter.getRemoteDevice(address);
+        } catch (IllegalArgumentException invalid) {
+            return;
+        }
+        long now = android.os.SystemClock.elapsedRealtime();
+        int state;
+        try {
+            state = device.getBondState();
+        } catch (SecurityException denied) {
+            return;
+        }
+        int action = bondRecovery.decide(state, now);
+        if (action == BondRecovery.READY) {
+            bondGaveUpLogged = false;
+            return;
+        }
+        if (action == BondRecovery.GAVE_UP) {
+            if (!bondGaveUpLogged) {
+                bondGaveUpLogged = true;
+                io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this,
+                        "bond repair gave-up asks=" + bondRecovery.asks() + " state=" + state);
+            }
+            return;
+        }
+        if (action != BondRecovery.ASK) return;
+        boolean started;
+        try {
+            started = device.createBond();
+        } catch (SecurityException denied) {
+            started = false;
+        }
+        bondRecovery.asked(now);
+        bondGaveUpLogged = false;
+        io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this,
+                "bond repair ask=" + bondRecovery.asks() + " state=" + state + " started=" + started);
+    }
+
+    private String statusCopy(String status) {
+        if ("OFFICIAL_PAIRING_REQUIRED".equals(status)) return BondRecovery.notice(bondRecovery.gaveUp());
+        return retryable(status) ? "正在重连" : "稍后自动重连";
     }
 
     private static String adapterState(int state) {

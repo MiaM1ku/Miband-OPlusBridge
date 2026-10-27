@@ -31,6 +31,14 @@ public final class BandStateRepository {
         }
     }
 
+    /** Stored band MAC, or empty while the snapshot cannot be read. Used to ask for the system bond again. */
+    public String address() {
+        synchronized (STATE_LOCK) {
+            if (!isUnlocked()) return "";
+            return state().getString("mac", "");
+        }
+    }
+
     public boolean isRegistered() {
         synchronized (STATE_LOCK) {
             // Credential-encrypted preferences and binding decryption wait until the user is unlocked.
