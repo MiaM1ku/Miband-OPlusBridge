@@ -112,6 +112,8 @@ public final class BandLiveService extends Service {
     private static final String DND_SYNC_OFF_KEY = "dndSyncOff";
     /** A band that does not answer subtype 14 still gets the mirror, just this much later. */
     private static final long DND_ASK_FALLBACK_MS = 1_500;
+    /** Last value written to prefs, so a reply from every mirror does not hit the disk. */
+    private volatile Boolean dndSyncStored;
     private static volatile nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto.Command lastMusic;
     private final io.github.miam1ku.mibandoplusbridge.notify.SleepMusic sleepMusic =
             new io.github.miam1ku.mibandoplusbridge.notify.SleepMusic();
@@ -628,6 +630,7 @@ public final class BandLiveService extends Service {
         io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this, "module start");
         io.github.miam1ku.mibandoplusbridge.data.DeviceImageStore.requestRefresh(this);
         dndSync.seed(bandSyncEnabled(this));
+        dndSyncStored = dndSync.on();
         weatherSync = new WeatherSync(this, () -> commands, coordinator);
         healthReplay = new HealthReplay(this, this::healthCollectionStatus, () -> {
             try {
@@ -1067,7 +1070,7 @@ public final class BandLiveService extends Service {
         if (code.indexOf('_') < 0) return true;
         return switch (code) {
             case "BLUETOOTH_DISABLED", "DIAGNOSTIC_TIMEOUT", "CANCELLED", "CONNECTION_ALREADY_ACTIVE",
-                    "USER_LOCKED", "EMPTY_SOCKET_READ", "CLOSED" -> true;
+                    "USER_LOCKED", "EMPTY_SOCKET_READ", "CLOSED", "CONNECT_TIMEOUT" -> true;
             // A missing bond fails before the socket exists, so retrying is cheap and the band
             // comes back within seconds of whoever restores the bond.
             case "OFFICIAL_PAIRING_REQUIRED" -> true;
@@ -1315,6 +1318,8 @@ public final class BandLiveService extends Service {
     }
 
     private void rememberDndSync(boolean enabled) {
+        if (dndSyncStored != null && dndSyncStored == enabled) return;
+        dndSyncStored = enabled;
         try {
             io.github.miam1ku.mibandoplusbridge.data.LocalPrefs.open(this, FEATURES)
                     .edit().putBoolean(DND_SYNC_OFF_KEY, !enabled).commit();

@@ -1154,15 +1154,14 @@ public final class OHealthDeviceHook {
             }
         }
         if (yielded != null && yielded == present) return;
-        // The device-space home shows the bridge card, not Health's row. Hiding the bridge card
-        // removes the band. Keep the card and only refresh Health's copy above.
+        // While Health's row is listed, the bridge card steps aside so the band shows once.
+        // When that row goes away, the bridge card comes back and keeps the band in device space.
         yielded = present;
-        if (!present) return;
         try {
             Bundle extras = new Bundle();
-            extras.putBoolean("yield", false);
+            extras.putBoolean("yield", present);
             hostContext.getContentResolver().call(DeviceCardProvider.URI, "spaceYield", null, extras);
-            HookRuntime.log("DEVICE_SPACE_KEEP");
+            HookRuntime.log(present ? "DEVICE_SPACE_YIELD" : "DEVICE_SPACE_RESTORE");
         } catch (Throwable failure) {
             HookRuntime.log("DEVICE_SPACE_YIELD_UNAVAILABLE "
                     + failure.getClass().getSimpleName());
@@ -1947,18 +1946,34 @@ public final class OHealthDeviceHook {
         trace(line);
     }
 
-    private static String lastNotifyDrop = "";
+    private static final java.util.HashMap<String, long[]> notifyDropSeen = new java.util.HashMap<>();
 
+    /** One line per reason/package/process per minute. The counts keep a repeated drop visible
+     *  without filling the session trace, which otherwise loses the connection events. */
     private static void notifyDrop(String reason, String pkg, String process) {
         String line = reason + "|" + pkg + "|" + process;
-        if (line.equals(lastNotifyDrop)) return;
-        lastNotifyDrop = line;
-        HookRuntime.log("OHEALTH_NOTIFICATION_DROP reason=" + reason
+        long now = android.os.SystemClock.elapsedRealtime();
+        int suppressed = 0;
+        synchronized (notifyDropSeen) {
+            long[] slot = notifyDropSeen.get(line);
+            if (slot == null) {
+                if (notifyDropSeen.size() > 64) notifyDropSeen.clear();
+                notifyDropSeen.put(line, new long[]{now, 0});
+            } else if (now - slot[0] < 60_000) {
+                slot[1]++;
+                return;
+            } else {
+                suppressed = (int) slot[1];
+                slot[0] = now;
+                slot[1] = 0;
+            }
+        }
+        String text = "OHEALTH_NOTIFICATION_DROP reason=" + reason
                 + " pkg=" + (pkg == null || pkg.isBlank() ? "none" : pkg)
-                + " process=" + process);
-        trace("OHEALTH_NOTIFICATION_DROP reason=" + reason
-                + " pkg=" + (pkg == null || pkg.isBlank() ? "none" : pkg)
-                + " process=" + process);
+                + " process=" + process
+                + (suppressed > 0 ? " suppressed=" + suppressed : "");
+        HookRuntime.log(text);
+        trace(text);
     }
 
     private static void trace(String line) {

@@ -101,6 +101,9 @@ public final class SppDiagnosticClient implements AutoCloseable {
     }
 
     public record Result(int batteryPercent, Integer batteryState, String firmware, String hardware, String sku) {}
+    /** RFCOMM connect budget. A band in range answers in a few seconds. */
+    private static final long CONNECT_TIMEOUT_MS = 20_000L;
+
     public static final class Failure extends Exception {
         public final String code;
         public Failure(String code) { super(code); this.code = code; }
@@ -229,7 +232,7 @@ public final class SppDiagnosticClient implements AutoCloseable {
                     if (closed) { created.close(); throw new Failure("CANCELLED"); }
                     socket = created;
                 }
-                created.connect();
+                connectWithTimeout(created);
                 input = created.getInputStream();
                 output = created.getOutputStream();
                 output.write(SppNegotiation.versionRequest(0));
@@ -1055,6 +1058,34 @@ public final class SppDiagnosticClient implements AutoCloseable {
         }
         onState.accept(new Result(battery.getLevel(), battery.getState(),
                 verifiedDevice.firmware(), verifiedDevice.hardware(), verifiedDevice.sku()));
+    }
+
+    /**
+     * An RFCOMM connect carries no timeout of its own: after the adapter cycles, the call can sit
+     * in the stack for a minute while the band is reachable again. A watchdog closes the socket
+     * instead, so the retry loop runs again right away.
+     */
+    private void connectWithTimeout(BluetoothSocket target) throws Exception {
+        java.util.concurrent.atomic.AtomicReference<Throwable> failure =
+                new java.util.concurrent.atomic.AtomicReference<>();
+        Thread connector = new Thread(() -> {
+            try {
+                target.connect();
+            } catch (Throwable error) {
+                failure.set(error);
+            }
+        }, "band-spp-connect");
+        connector.setDaemon(true);
+        connector.start();
+        connector.join(CONNECT_TIMEOUT_MS);
+        if (connector.isAlive()) {
+            try { target.close(); } catch (Throwable ignored) { }
+            SessionLog.line(context, "spp connect timeout");
+            throw new Failure("CONNECT_TIMEOUT");
+        }
+        Throwable error = failure.get();
+        if (error instanceof Exception typed) throw typed;
+        if (error != null) throw new IllegalStateException(error);
     }
 
     @Override public void close() {
