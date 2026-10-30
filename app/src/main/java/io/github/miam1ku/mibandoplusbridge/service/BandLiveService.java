@@ -659,6 +659,9 @@ public final class BandLiveService extends Service {
                 new OwnershipController(this).keepAwake();
                 io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this, "KEEP_AWAKE");
             } catch (RuntimeException ignored) { }
+            // ColourOS freezes this process through the framework cgroup freezer; root can undo
+            // that within seconds and the guard shell survives the freeze itself.
+            io.github.miam1ku.mibandoplusbridge.service.RootFreezeGuard.start(this);
         });
         instance = this;
         sleepPauseOn = io.github.miam1ku.mibandoplusbridge.notify.SleepMusic.enabled(this);
