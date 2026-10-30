@@ -71,6 +71,42 @@ public final class OHealthSleepPlanTest {
         assertFalse(OHealthSleepPlan.summary(nights, kept));
     }
 
+    @Test public void repeatedSyncSnapshotsOfOneNightStayOneSession() {
+        // The band closes the sleep file at every sync; each later file repeats the night from
+        // the same minute with a longer tail. A capture held twelve of these for a single night.
+        long start = at(2026, 10, 27, 2, 39);
+        long wake = at(2026, 10, 27, 7, 17);
+        HealthRecord first = interval("snap-1", start, at(2026, 10, 27, 3, 22));
+        HealthRecord second = interval("snap-2", start, at(2026, 10, 27, 4, 24));
+        HealthRecord widest = interval("snap-3", start, wake);
+        List<OHealthSleepPlan.Night> nights = nights(List.of(first, second, widest,
+                stage("deep", start, at(2026, 10, 27, 4, 0), 2),
+                stage("light", at(2026, 10, 27, 4, 0), wake, 3)));
+        assertEquals("one night, not one card per sync", 1, nights.size());
+        OHealthSleepPlan.Night night = nights.get(0);
+        assertEquals(start, night.fallAsleepMs());
+        assertEquals(wake, night.wakeMs());
+        assertEquals(278, night.sleepMinutes());
+        assertEquals(2, night.segments().size());
+        assertEquals(OHealthSleepPlan.DEEP, night.segments().get(0).sleepState());
+        assertEquals(OHealthSleepPlan.LIGHT, night.segments().get(1).sleepState());
+    }
+
+    @Test public void aSnapshotStartingInsideTheNightExtendsIt() {
+        long start = at(2026, 10, 24, 5, 37);
+        long end = at(2026, 10, 24, 11, 39);
+        List<OHealthSleepPlan.Night> nights = nights(List.of(
+                interval("night", start, at(2026, 10, 24, 9, 36)),
+                interval("tail", at(2026, 10, 24, 9, 36), end),
+                interval("nap", at(2026, 10, 24, 14, 10), at(2026, 10, 24, 15, 10)),
+                stage("light", start, end, 3)));
+        assertEquals(2, nights.size());
+        assertEquals(start, nights.get(0).fallAsleepMs());
+        assertEquals(end, nights.get(0).wakeMs());
+        assertEquals(362, nights.get(0).sleepMinutes());
+        assertEquals(60, nights.get(1).sleepMinutes());
+    }
+
     @Test public void sessionStartingBeforeTwentyExtendsTheClearWindow() {
         HealthRecord early = interval("early", at(2026, 9, 24, 19, 30), at(2026, 9, 25, 2, 0));
         HealthRecord nap = interval("nap", at(2026, 9, 25, 14, 0), at(2026, 9, 25, 15, 0));

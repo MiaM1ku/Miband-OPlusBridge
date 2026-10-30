@@ -66,6 +66,8 @@ public final class SppDiagnosticClient implements AutoCloseable {
     private final SppV2Codec.ReceiveCursor receive = new SppV2Codec.ReceiveCursor();
     private int frameCount;
     private boolean authenticated;
+    /** This session opened an RFCOMM socket without the system bond. See {@link #run}. */
+    private boolean insecureAttempt;
     private int peerPayloadLimit;
     private int deadlineSeconds = 30;
     private Consumer<Result> onState;
@@ -171,12 +173,22 @@ public final class SppDiagnosticClient implements AutoCloseable {
         onSleepFile = listener;
     }
 
-    public Result run(BandWeatherEncoder.Sample weather, boolean inspectCities) throws Exception {
+    private Result run(BandWeatherEncoder.Sample weather, boolean inspectCities) throws Exception {
         if (weather != null) BandWeatherEncoder.validateForecast(weather);
         OwnershipController.beginNativeSession();
         try {
             return runLocked(weather, inspectCities);
+        } catch (Failure failure) {
+            // An insecure link that dies before the handshake completes means the band wants
+            // an encrypted link; repairing the system bond is the fix, not another socket.
+            if (insecureAttempt && !authenticated && !"OFFICIAL_PAIRING_REQUIRED".equals(failure.code)
+                    && !"CANCELLED".equals(failure.code) && !"BLUETOOTH_DISABLED".equals(failure.code)) {
+                SessionLog.line(context, "insecure rfcomm died before auth " + failure.code);
+                throw new Failure("OFFICIAL_PAIRING_REQUIRED");
+            }
+            throw failure;
         } finally {
+            insecureAttempt = false;
             OwnershipController.endNativeSession();
         }
     }
@@ -206,9 +218,15 @@ public final class SppDiagnosticClient implements AutoCloseable {
             // captured key; ColorOS drops the BLE bond after 「小米运动健康」(Mi Fitness) is frozen.
             int bond = device.getBondState();
             boolean gatt = "GATT".equals(binding.transport());
-            if (!gatt && bond != BluetoothDevice.BOND_BONDED) {
-                SessionLog.line(context, "bond rejected state=" + bond + " transport=" + safe(binding.transport()));
-                throw new Failure("OFFICIAL_PAIRING_REQUIRED");
+            // A missing system bond must not cost the user a watch confirm prompt every time
+            // ColorOS drops it. Session auth is the imported binding key at the application
+            // layer, so the RFCOMM link itself can run insecure and pair exactly never.
+            // If the band refuses the insecure socket, the failure maps back to the pairing
+            // path and the service decides whether to ask for a bond.
+            boolean insecure = !gatt && bond != BluetoothDevice.BOND_BONDED;
+            if (insecure) {
+                insecureAttempt = true;
+                SessionLog.line(context, "bond missing, trying insecure rfcomm state=" + bond);
             }
             if (gatt && bond != BluetoothDevice.BOND_BONDED) {
                 SessionLog.line(context, "gatt without system bond state=" + bond);
@@ -227,12 +245,24 @@ public final class SppDiagnosticClient implements AutoCloseable {
                         + safe(binding.observation().optString("versionName"))
                         + " queue=" + safe(binding.observation().optString("queueClass")));
             } else {
-                BluetoothSocket created = device.createRfcommSocketToServiceRecord(UUID.fromString(SERVICE));
+                BluetoothSocket created = insecure
+                        ? device.createInsecureRfcommSocketToServiceRecord(UUID.fromString(SERVICE))
+                        : device.createRfcommSocketToServiceRecord(UUID.fromString(SERVICE));
                 synchronized (this) {
                     if (closed) { created.close(); throw new Failure("CANCELLED"); }
                     socket = created;
                 }
-                connectWithTimeout(created);
+                try {
+                    connectWithTimeout(created);
+                } catch (Exception refused) {
+                    if (insecure) {
+                        // The band wants an encrypted link after all. Let the service repair
+                        // the system bond instead of retrying an insecure socket forever.
+                        SessionLog.line(context, "insecure rfcomm refused " + refused);
+                        throw new Failure("OFFICIAL_PAIRING_REQUIRED");
+                    }
+                    throw refused;
+                }
                 input = created.getInputStream();
                 output = created.getOutputStream();
                 output.write(SppNegotiation.versionRequest(0));

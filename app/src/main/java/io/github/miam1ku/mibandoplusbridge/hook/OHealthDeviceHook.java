@@ -127,7 +127,77 @@ public final class OHealthDeviceHook {
         installEmptyCloudCleanup(loader);
         installDeviceImage(loader);
         observeSnapshots(loader);
+        guardBandBond(loader);
     }
+
+    /**
+     * Opening the app used to cost the system bond. Health forgets a watch by removing the bond:
+     * the panel's disconnect path reaches {@code PairManager.cancelBond(mac)} and the device
+     * manager reaches {@code DMManagerImpl.removeBond(...)}. This band belongs to the bridge, so
+     * a removal here only leaves the user a pairing prompt on the wrist and a dead SPP link.
+     * Nothing in this module wants that bond gone, so removal for this MAC is refused and logged.
+     */
+    private static void guardBandBond(ClassLoader loader) {
+        // 6.9.42 declares the removal entries as vararg arrays, but the class that owns them at
+        // runtime differs between host processes, so match by name and accept any signature.
+        HookRuntime.tryHook("OHEALTH_BOND_GUARD_PAIR_UNAVAILABLE", () -> {
+            Class<?> pair = XposedHelpers.findClass("com.heytap.accessory.pair.PairManager", loader);
+            XposedBridge.hookAllMethods(pair, "cancelBond", new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam param) {
+                    if (!bandIn(param.args.length == 0 ? null : param.args[0])) return;
+                    param.setResult(false);
+                    HookRuntime.log("OHEALTH_BOND_GUARD cancelBond");
+                }
+            });
+        });
+        HookRuntime.tryHook("OHEALTH_BOND_GUARD_NATIVE_UNAVAILABLE", () -> {
+            Class<?> nativePair = XposedHelpers.findClass(
+                    "com.heytap.accessory.pair.apiadapter.BluetoothNative", loader);
+            XC_MethodHook guard = new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam param) {
+                    if (!bandIn(param.args.length == 0 ? null : param.args[0])) return;
+                    param.setResult(false);
+                    HookRuntime.log("OHEALTH_BOND_GUARD removeBond");
+                }
+            };
+            XposedBridge.hookAllMethods(nativePair, "removeBond", guard);
+            XposedBridge.hookAllMethods(nativePair, "cancelBondProcess", guard);
+        });
+        HookRuntime.tryHook("OHEALTH_BOND_GUARD_MANAGER_UNAVAILABLE", () -> {
+            // The device-manager entry point takes the MAC as text and returns void.
+            Class<?> manager = XposedHelpers.findClass(
+                    "com.heytap.health.devicemanager.client.impl.DMManagerImpl", loader);
+            XposedBridge.hookAllMethods(manager, "removeBond", new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam param) {
+                    for (Object arg : param.args) {
+                        if (!bandIn(arg)) continue;
+                        param.setResult(null);
+                        HookRuntime.log("OHEALTH_BOND_GUARD managerRemoveBond");
+                        return;
+                    }
+                }
+            });
+        });
+    }
+
+    /** True when any MAC in a vararg array is this band. */
+    private static boolean bandIn(Object values) {
+        if (!(values instanceof Object[] items)) return ourMac(values);
+        for (Object item : items) {
+            if (item == null) continue;
+            Object mac = item;
+            if (item instanceof android.bluetooth.BluetoothDevice device) {
+                try {
+                    mac = device.getAddress();
+                } catch (SecurityException denied) {
+                    continue;
+                }
+            }
+            if (ourMac(mac)) return true;
+        }
+        return false;
+    }
+
 
     /** Replaces the OPPO body and detail picture with the Mi Fitness server image. The face layer stays hidden. */
     private static void installDeviceImage(ClassLoader loader) {

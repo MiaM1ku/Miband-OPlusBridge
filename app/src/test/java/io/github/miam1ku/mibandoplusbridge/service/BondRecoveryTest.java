@@ -15,29 +15,17 @@ public final class BondRecoveryTest {
         assertFalse("pairing in progress changes nothing yet", recovery.note(BondRecovery.BONDING));
     }
 
-    @Test public void asksForTheBondThreeTimesWithAGap() {
+    @Test public void asksForTheBondOncePerLoss() {
         BondRecovery recovery = new BondRecovery();
         long now = 1_000;
         assertEquals(BondRecovery.ASK, recovery.decide(BondRecovery.NONE, now));
         recovery.asked(now);
-        assertEquals("the same second must not ask twice", BondRecovery.WAIT,
-                recovery.decide(BondRecovery.NONE, now + 1));
-        assertEquals(BondRecovery.ASK, recovery.decide(BondRecovery.NONE, now + BondRecovery.ASK_GAP_MS));
-        recovery.asked(now + BondRecovery.ASK_GAP_MS);
-        assertEquals(BondRecovery.ASK, recovery.decide(BondRecovery.NONE, now + 2 * BondRecovery.ASK_GAP_MS));
-        recovery.asked(now + 2 * BondRecovery.ASK_GAP_MS);
-        assertEquals("three requests per loss", BondRecovery.MAX_ASKS, recovery.asks());
-        assertEquals(BondRecovery.GAVE_UP, recovery.decide(BondRecovery.NONE, now + 10 * BondRecovery.ASK_GAP_MS));
+        // The band confirm prompt lives on the user's wrist, so never nag automatically.
+        assertEquals("no second automatic ask, however long the gap",
+                BondRecovery.GAVE_UP, recovery.decide(BondRecovery.NONE, now + BondRecovery.ASK_GAP_MS));
+        assertEquals(BondRecovery.GAVE_UP, recovery.decide(BondRecovery.NONE, now + 60 * 60_000));
+        assertEquals("one request per loss", BondRecovery.MAX_ASKS, recovery.asks());
         assertTrue(recovery.gaveUp());
-    }
-
-    @Test public void theBudgetRefillsAfterTheHold() {
-        BondRecovery recovery = new BondRecovery();
-        for (int ask = 0; ask < BondRecovery.MAX_ASKS; ask++) recovery.asked(1_000L * ask);
-        long lastAsk = 1_000L * (BondRecovery.MAX_ASKS - 1);
-        assertEquals(BondRecovery.GAVE_UP, recovery.decide(BondRecovery.NONE, lastAsk + BondRecovery.HOLD_MS - 1));
-        assertEquals("a band that came back deserves another ask",
-                BondRecovery.ASK, recovery.decide(BondRecovery.NONE, lastAsk + BondRecovery.HOLD_MS));
     }
 
     @Test public void pairingInProgressAndRestoredBondSkipTheRequest() {
@@ -45,23 +33,31 @@ public final class BondRecoveryTest {
         assertEquals(BondRecovery.WAIT, recovery.decide(BondRecovery.BONDING, 5_000));
         assertEquals(BondRecovery.READY, recovery.decide(BondRecovery.BONDED, 5_000));
         assertEquals("a restored bond spends no request", 0, recovery.asks());
+        assertEquals(BondRecovery.ASK, recovery.decide(BondRecovery.NONE, 5_000));
+        recovery.asked(5_000);
+        // With a single ask the gap branch is unreachable: one request already spent the loss.
+        assertEquals(BondRecovery.GAVE_UP, recovery.decide(BondRecovery.NONE, 5_001));
     }
 
-    @Test public void authenticatedSessionAndRestoredBondRefillTheBudget() {
+    @Test public void manualRetryAuthAndRestoredBondRefillTheBudget() {
         BondRecovery recovery = new BondRecovery();
-        for (int ask = 0; ask < BondRecovery.MAX_ASKS; ask++) {
-            recovery.asked(1_000L * ask);
-        }
+        recovery.asked(1_000);
         assertEquals(BondRecovery.GAVE_UP, recovery.decide(BondRecovery.NONE, 100_000));
-        recovery.connected();
-        assertEquals(BondRecovery.ASK, recovery.decide(BondRecovery.NONE, 100_000));
+        recovery.manualRetry();
+        assertEquals("the 重新配对 tap expects the next wrist prompt", BondRecovery.ASK,
+                recovery.decide(BondRecovery.NONE, 100_000));
         recovery.asked(100_000);
+        assertEquals(BondRecovery.GAVE_UP, recovery.decide(BondRecovery.NONE, 200_000));
+        recovery.connected();
+        assertEquals("an authenticated session is a fresh start", BondRecovery.ASK,
+                recovery.decide(BondRecovery.NONE, 200_000));
+        recovery.asked(200_000);
         recovery.note(BondRecovery.BONDED);
         assertEquals("the official app re-pairing is a fresh start", 0, recovery.asks());
     }
 
-    @Test public void noticeAsksForATapOnlyAfterTheBudget() {
+    @Test public void noticeAsksForATapAfterTheOneAsk() {
         assertEquals("正在重新配对", BondRecovery.notice(false));
-        assertEquals("手环需要重新配对", BondRecovery.notice(true));
+        assertEquals("手环需要重新配对，点通知重试", BondRecovery.notice(true));
     }
 }

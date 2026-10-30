@@ -88,6 +88,36 @@ public final class OHealthSleepPlan {
     }
 
     /**
+     * The band closes the open sleep file at every sync and the next one repeats the whole night
+     * with a longer tail, so a captured night arrives as a dozen intervals starting at the same
+     * minute. Treating each snapshot as its own session wrote the same night a dozen times and
+     * made Health re-derive its awake runs from a table that changed shape on every import.
+     * One interval per overlapping stretch: the widest snapshot already covers the shorter ones.
+     */
+    private static List<HealthRecord> unionOverlapping(List<HealthRecord> intervals) {
+        if (intervals.size() < 2) return intervals;
+        List<HealthRecord> sorted = new ArrayList<>(intervals);
+        sorted.sort(Comparator.comparingLong(record -> record.startMs));
+        List<HealthRecord> merged = new ArrayList<>();
+        HealthRecord current = sorted.get(0);
+        for (int i = 1; i < sorted.size(); i++) {
+            HealthRecord next = sorted.get(i);
+            if (next.startMs <= current.endMs) {
+                if (next.endMs > current.endMs) {
+                    current = new HealthRecord(current.recordId, current.deviceId, current.kind,
+                            current.startMs, next.endMs, null, null, Math.max(1, current.revision),
+                            current.timezone, "sleep", current.complete || next.complete);
+                }
+                continue;
+            }
+            merged.add(current);
+            current = next;
+        }
+        merged.add(current);
+        return merged;
+    }
+
+    /**
      * A session that starts before 20:00 pulls its own clear window back to that start.
      * Another session on the same date stays put. An interval with no stages keeps its duration
      * and is not labeled light, deep, or REM. Stages that share a minute are cut into one partition,
@@ -103,7 +133,7 @@ public final class OHealthSleepPlan {
             if ("sleep_interval".equals(record.kind)) intervals.add(record);
             else if ("sleep_stage".equals(record.kind)) stages.add(record);
         }
-        intervals.sort(Comparator.comparingLong(record -> record.startMs));
+        intervals = unionOverlapping(intervals);
         boolean[] used = new boolean[stages.size()];
         List<Session> sessions = new ArrayList<>();
         for (HealthRecord interval : intervals) {

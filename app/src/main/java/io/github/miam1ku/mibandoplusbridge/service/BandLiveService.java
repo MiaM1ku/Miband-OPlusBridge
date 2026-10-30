@@ -27,6 +27,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 /** Keeps one authenticated SPP session for the whole NATIVE ownership period and reconnects after the link drops. */
 public final class BandLiveService extends Service {
     private static final String ACTION_SYNC = "io.github.miam1ku.mibandoplusbridge.SYNC";
+    private static final String ACTION_REPAIR = "io.github.miam1ku.mibandoplusbridge.REPAIR";
     private static volatile BandLiveService instance;
     private static volatile boolean diagnosticPaused;
     private volatile java.util.concurrent.CountDownLatch stopped = new java.util.concurrent.CountDownLatch(0);
@@ -37,11 +38,21 @@ public final class BandLiveService extends Service {
     private LiveHistorySync historySync;
     private volatile boolean syncRequested;
     private volatile boolean realtimeStatsStopPending;
+    /** Last sign of life from the supervisor. ColorOS freezing the process, or a dead worker
+     *  thread, used to leave the service foreground on 「正在连接手环」 for hours with no retry. */
+    private volatile long supervisorBeatMs;
+    private static final long SUPERVISOR_STALL_MS = 180_000L;
     private long nextBatteryAt;
     private long nextHealthAt;
     private long nextWeatherAt;
     /** While idle, ask only for the battery and today's file list. Unchanged files and weather stay off the radio so the ACL can still sniff. */
     private static final long IDLE_POLL_MINUTES = 30;
+    /**
+     * The band reports the level itself and only pushes a change when its own counter moves, so
+     * the phone copy is whatever the last request returned. The idle session is already up, and
+     * one 4-byte request costs no extra link, so ask more often than the file list.
+     */
+    private static final long BATTERY_POLL_MINUTES = 10;
     private static final long REALTIME_STATS_TIMEOUT_SECONDS = 30;
     /** 8/45 opens the band's live-stats stream. The band measures heart rate while that stream runs, so only the first snapshot is kept. */
     private static final int REALTIME_STATS_START = 45;
@@ -124,6 +135,10 @@ public final class BandLiveService extends Service {
     /** SPP needs the system bond. This keeps the re-pair budget for one bond loss. */
     private final BondRecovery bondRecovery = new BondRecovery();
     private boolean bondGaveUpLogged;
+    /** True while the notice offers the 重新配对 action after the single automatic ask. */
+    private volatile boolean bondRepairOffered;
+    /** The action on the currently posted notice, to keep the dedupe check honest. */
+    private boolean bondRepairShown;
     private String noticeTitle = "";
     private volatile SppDiagnosticClient client;
     private boolean receiverRegistered;
@@ -693,6 +708,16 @@ public final class BandLiveService extends Service {
             stopLock.notifyAll();
         }
         if (intent != null && ACTION_SYNC.equals(intent.getAction())) syncRequested = true;
+        if (intent != null && ACTION_REPAIR.equals(intent.getAction())) {
+            // The user tapped 「重新配对」, so one more pairing request is expected on the wrist.
+            io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this, "bond repair manual");
+            bondRecovery.manualRetry();
+            repairBond();
+            synchronized (stopLock) {
+                retryNow = true;
+                stopLock.notifyAll();
+            }
+        }
         if (running.compareAndSet(false, true)) {
             stopped = new java.util.concurrent.CountDownLatch(1);
             show("正在连接手环");
@@ -729,12 +754,29 @@ public final class BandLiveService extends Service {
     }
 
     private void supervise() {
+        supervisorBeatMs = android.os.SystemClock.elapsedRealtime();
+        try {
+            superviseLoop();
+        } catch (Throwable fatal) {
+            // A worker thread that dies here takes every scheduled reconnect with it, while the
+            // foreground notice still says 「正在连接手环」. Keep the service recoverable instead.
+            io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this,
+                    "supervise crashed " + fatal.getClass().getSimpleName()
+                            + (fatal.getMessage() == null ? "" : " " + fatal.getMessage()));
+            running.set(false);
+            try { stopForeground(STOP_FOREGROUND_REMOVE); } catch (RuntimeException ignored) { }
+            try { stopSelf(); } catch (RuntimeException ignored) { }
+        }
+    }
+
+    private void superviseLoop() {
         BandStateRepository repository = new BandStateRepository(this);
         long backoff = INITIAL_BACKOFF_MS;
         String status = "STARTING";
         try {
             try { repository.markSessionClosed(); } catch (RuntimeException ignored) { }
             while (!stopRequested) {
+                supervisorBeatMs = android.os.SystemClock.elapsedRealtime();
                 OwnershipController owner = new OwnershipController(this);
                 if (!repository.isRegistered() || !owner.nativeReady()) {
                     status = "REGISTERED_NATIVE_DEVICE_REQUIRED registered="
@@ -818,7 +860,7 @@ public final class BandLiveService extends Service {
                             weatherSync.releaseForecast(weatherEpoch);
                         }, healthReplay::hasCapacity);
                         long now = System.nanoTime();
-                        nextBatteryAt = now + TimeUnit.MINUTES.toNanos(IDLE_POLL_MINUTES);
+                        nextBatteryAt = now + TimeUnit.MINUTES.toNanos(BATTERY_POLL_MINUTES);
                         nextHealthAt = now + TimeUnit.MINUTES.toNanos(IDLE_POLL_MINUTES);
                         nextSleepFileAt = now + TimeUnit.MINUTES.toNanos(10);
                         nextWeatherAt = now + TimeUnit.MINUTES.toNanos(30);
@@ -936,6 +978,7 @@ public final class BandLiveService extends Service {
                 if (stopRequested) break;
                 long delay = retryable(status) ? backoff : QUIET_BACKOFF_MS;
                 if (!waitForRetry(delay)) break;
+                supervisorBeatMs = android.os.SystemClock.elapsedRealtime();
                 if (!authenticated.get() && retryable(status)) backoff = Math.min(backoff * 2, MAX_BACKOFF_MS);
             }
         } finally {
@@ -1036,8 +1079,20 @@ public final class BandLiveService extends Service {
             return;
         }
         long now = System.nanoTime();
+        long beatAge = android.os.SystemClock.elapsedRealtime() - supervisorBeatMs;
+        if (running.get() && supervisorBeatMs != 0L && beatAge > SUPERVISOR_STALL_MS) {
+            // The coordinator survives a process freeze, so it can put the worker back after the
+            // frozen supervisor thread died. Re-entry is harmless: SppDiagnosticClient admits one
+            // live session at a time and the loser reports CONNECTION_ALREADY_ACTIVE.
+            supervisorBeatMs = android.os.SystemClock.elapsedRealtime();
+            io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this,
+                    "supervise stalled " + (beatAge / 1000) + "s, restarting");
+            try {
+                worker.execute(this::supervise);
+            } catch (java.util.concurrent.RejectedExecutionException stopping) { }
+        }
         if (now >= nextBatteryAt) {
-            nextBatteryAt = now + TimeUnit.MINUTES.toNanos(IDLE_POLL_MINUTES);
+            nextBatteryAt = now + TimeUnit.MINUTES.toNanos(BATTERY_POLL_MINUTES);
             queue.request(nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto.Command
                     .newBuilder().setType(2).setSubtype(1).build(), 2, 1)
                     .whenComplete((ignored, error) -> {
@@ -1166,7 +1221,12 @@ public final class BandLiveService extends Service {
     }
 
     private String statusCopy(String status) {
-        if ("OFFICIAL_PAIRING_REQUIRED".equals(status)) return BondRecovery.notice(bondRecovery.gaveUp());
+        if ("OFFICIAL_PAIRING_REQUIRED".equals(status)) {
+            boolean gaveUp = bondRecovery.gaveUp();
+            bondRepairOffered = gaveUp;
+            return BondRecovery.notice(gaveUp);
+        }
+        bondRepairOffered = false;
         return retryable(status) ? "正在重连" : "稍后自动重连";
     }
 
@@ -1546,16 +1606,27 @@ public final class BandLiveService extends Service {
         NotificationChannel channel = new NotificationChannel(CHANNEL, "手环连接", NotificationManager.IMPORTANCE_LOW);
         channel.setShowBadge(false);
         manager.createNotificationChannel(channel);
-        Notification notice = new Notification.Builder(this, CHANNEL)
+        Notification.Builder notice = new Notification.Builder(this, CHANNEL)
                 .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
                 .setContentTitle(title)
                 .setOnlyAlertOnce(true)
-                .setOngoing(true)
-                .build();
+                .setOngoing(true);
+        // One shot: the action rides only on the notice that statusCopy just produced.
+        boolean offered = bondRepairOffered;
+        bondRepairOffered = false;
+        if (offered) {
+            Intent repair = new Intent(this, BandLiveService.class).setAction(ACTION_REPAIR);
+            notice.addAction(new Notification.Action.Builder(null, "重新配对",
+                    android.app.PendingIntent.getService(this, 0, repair,
+                            android.app.PendingIntent.FLAG_IMMUTABLE | android.app.PendingIntent.FLAG_UPDATE_CURRENT))
+                    .build());
+        }
+        Notification built = notice.build();
         synchronized (this) {
-            if (title.equals(noticeTitle)) return;
-            startForeground(NOTICE, notice, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE);
+            if (title.equals(noticeTitle) && offered == bondRepairShown) return;
+            startForeground(NOTICE, built, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE);
             noticeTitle = title;
+            bondRepairShown = offered;
         }
     }
 

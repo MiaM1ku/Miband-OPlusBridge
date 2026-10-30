@@ -25,10 +25,14 @@ final class BondRecovery {
     /** This loss already used its requests. A re-pair from another app is what restores it. */
     static final int GAVE_UP = 3;
 
-    static final int MAX_ASKS = 3;
+    static final int MAX_ASKS = 1;
     static final long ASK_GAP_MS = 20_000;
-    /** Three asks can all miss a band that is out of range. After this hold the budget refills. */
-    static final long HOLD_MS = 5 * 60_000;
+    /**
+     * One ask per loss. The ask is a pairing request and the band answers it with a confirm
+     * prompt the user must tap, so an automatic budget above one would nag on the wrist. The
+     * budget refills only on a restored bond, an authenticated session, or the notification's
+     * 「重新配对」 action — never on a timer.
+     */
 
     private int asks;
     private long lastAskMs = Long.MIN_VALUE;
@@ -51,11 +55,7 @@ final class BondRecovery {
     synchronized int decide(int state, long nowMs) {
         if (state == BONDED) return READY;
         if (state == BONDING) return WAIT;
-        if (asks >= MAX_ASKS) {
-            if (nowMs - lastAskMs < HOLD_MS) return GAVE_UP;
-            asks = 0;
-            lastAskMs = Long.MIN_VALUE;
-        }
+        if (asks >= MAX_ASKS) return GAVE_UP;
         if (lastAskMs != Long.MIN_VALUE && nowMs - lastAskMs < ASK_GAP_MS) return WAIT;
         return ASK;
     }
@@ -72,12 +72,18 @@ final class BondRecovery {
         lastAskMs = Long.MIN_VALUE;
     }
 
+    /** The user tapped 「重新配对」, so the band prompt that follows is expected. */
+    synchronized void manualRetry() {
+        asks = 0;
+        lastAskMs = Long.MIN_VALUE;
+    }
+
     synchronized int asks() { return asks; }
 
     synchronized boolean gaveUp() { return asks >= MAX_ASKS; }
 
-    /** Foreground notice while the bond is gone: keep asking, or hand the repair to the band. */
+    /** Foreground notice while the bond is gone: one automatic ask, then hand it to the user. */
     static String notice(boolean gaveUp) {
-        return gaveUp ? "手环需要重新配对" : "正在重新配对";
+        return gaveUp ? "手环需要重新配对，点通知重试" : "正在重新配对";
     }
 }

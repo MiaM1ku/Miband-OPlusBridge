@@ -124,6 +124,8 @@ public final class BandStateRepository {
             if (firmware == null || firmware.isBlank() || hardware == null || hardware.isBlank()) {
                 throw new IllegalStateException("FIRMWARE_OR_MODEL_UNSUPPORTED");
             }
+            int previousBattery = state.getInt("battery", -1);
+            boolean previousCharging = state.getBoolean("charging", false);
             var editor = state.edit().putBoolean("connected", connected).putInt("battery", battery)
                     .putBoolean("charging", chargerState == 1)
                     .putString("verifiedFirmware", firmware).putString("verifiedHardware", hardware)
@@ -132,6 +134,10 @@ public final class BandStateRepository {
             if (sku != null && !sku.isBlank()) editor.putString("sku", sku);
             if (!editor.commit()) {
                 throw new IllegalStateException("BAND_STATE_STORAGE_FAILED");
+            }
+            if (previousBattery != battery || previousCharging != (chargerState == 1)) {
+                // One line per change: the wrist value and the phone value can be compared later.
+                SessionLog.line(context, "BATTERY level=" + battery + " chargerState=" + chargerState);
             }
             context.getContentResolver().notifyChange(DeviceCardProvider.URI, null);
         }
