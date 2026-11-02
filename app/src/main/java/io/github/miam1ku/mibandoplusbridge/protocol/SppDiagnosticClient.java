@@ -339,10 +339,7 @@ public final class SppDiagnosticClient implements AutoCloseable {
             progress.accept("DEVICE_INFO_MATCHED");
             sendCommand(XiaomiProto.Command.newBuilder().setType(2).setSubtype(1).build());
             var batteryResponse = awaitCommand(2, 1);
-            if (!batteryResponse.hasSystem() || !batteryResponse.getSystem().hasPower()
-                    || !batteryResponse.getSystem().getPower().hasBattery()) throw new Failure("BATTERY_MISSING");
-            var battery = batteryResponse.getSystem().getPower().getBattery();
-            if (!battery.hasLevel() || battery.getLevel() < 0 || battery.getLevel() > 100) throw new Failure("BATTERY_VALUE_INVALID");
+            var battery = readBattery(batteryResponse);
             sendObservedClock();
             if (weather != null) {
                 if (inspectCities) {
@@ -354,7 +351,7 @@ public final class SppDiagnosticClient implements AutoCloseable {
                     progress.accept("WEATHER_TRANSPORT_ACKED");
                 }
             }
-            Result result = new Result(battery.getLevel(), battery.hasState() ? battery.getState() : null,
+            Result result = new Result(battery.level(), battery.chargerState(),
                     info.getFirmware(), info.getModel(), MiProductImage.sku(info.getSerialNumber()));
             verifiedDevice = result;
             if (onState != null) {
@@ -1079,15 +1076,17 @@ public final class SppDiagnosticClient implements AutoCloseable {
     private void publishBattery(XiaomiProto.Command command) throws Exception {
         if (!liveHold || onState == null || verifiedDevice == null || command == null || command.getType() != 2
                 || !command.hasSubtype() || command.getSubtype() != 1) return;
-        if (!command.hasSystem() || !command.getSystem().hasPower()
-                || !command.getSystem().getPower().hasBattery()) throw new Failure("BATTERY_MISSING");
-        var battery = command.getSystem().getPower().getBattery();
-        if (!battery.hasLevel() || battery.getLevel() < 0 || battery.getLevel() > 100
-                || !battery.hasState() || (battery.getState() != 1 && battery.getState() != 2 && battery.getState() != 3)) {
-            throw new Failure("BATTERY_VALUE_INVALID");
-        }
-        onState.accept(new Result(battery.getLevel(), battery.getState(),
+        var battery = readBattery(command);
+        onState.accept(new Result(battery.level(), battery.chargerState(),
                 verifiedDevice.firmware(), verifiedDevice.hardware(), verifiedDevice.sku()));
+    }
+
+    private static BandBatteryState readBattery(XiaomiProto.Command command) throws Failure {
+        try {
+            return BandBatteryState.parse(command);
+        } catch (IllegalArgumentException error) {
+            throw new Failure(error.getMessage());
+        }
     }
 
     /**

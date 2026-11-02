@@ -4,6 +4,7 @@ package io.github.miam1ku.mibandoplusbridge.data;
 import android.content.Context;
 import android.os.UserManager;
 import io.github.miam1ku.mibandoplusbridge.integration.DeviceCardProvider;
+import io.github.miam1ku.mibandoplusbridge.protocol.BandBatteryState;
 import io.github.miam1ku.mibandoplusbridge.service.OwnershipController;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -110,10 +111,7 @@ public final class BandStateRepository {
             if (!nativeReady) {
                 throw new IllegalStateException("OFFICIAL_MODE");
             }
-            if (battery < 0 || battery > 100 || chargerState == null
-                    || (chargerState != 1 && chargerState != 2 && chargerState != 3)) {
-                throw new IllegalArgumentException("BATTERY_STATE_UNCONFIRMED");
-            }
+            BandBatteryState batteryState = new BandBatteryState(battery, chargerState);
             LocalPrefs state = state();
             BindingStore.Identity binding = new BindingStore(context).readIdentity();
             if (!state.getString("deviceId", "").equals(binding.deviceId())
@@ -125,21 +123,32 @@ public final class BandStateRepository {
                 throw new IllegalStateException("FIRMWARE_OR_MODEL_UNSUPPORTED");
             }
             int previousBattery = state.getInt("battery", -1);
-            boolean previousCharging = state.getBoolean("charging", false);
-            var editor = state.edit().putBoolean("connected", connected).putInt("battery", battery)
-                    .putBoolean("charging", chargerState == 1)
+            int previousChargerState = state.getInt("chargerState", 0);
+            var editor = state.edit().putBoolean("connected", connected)
                     .putString("verifiedFirmware", firmware).putString("verifiedHardware", hardware)
                     .putLong("lastUpdateMs", System.currentTimeMillis())
                     .putLong("revision", state.getLong("revision", 0) + 1);
+            writeBattery(editor, batteryState);
             if (sku != null && !sku.isBlank()) editor.putString("sku", sku);
             if (!editor.commit()) {
                 throw new IllegalStateException("BAND_STATE_STORAGE_FAILED");
             }
-            if (previousBattery != battery || previousCharging != (chargerState == 1)) {
+            if (previousBattery != battery
+                    || previousChargerState != (batteryState.chargerState() == null ? 0 : batteryState.chargerState())) {
                 // One line per change: the wrist value and the phone value can be compared later.
                 SessionLog.line(context, "BATTERY level=" + battery + " chargerState=" + chargerState);
             }
             context.getContentResolver().notifyChange(DeviceCardProvider.URI, null);
+        }
+    }
+
+    /** Clear stale charging telemetry when the current response supplies only a percentage. */
+    static void writeBattery(LocalPrefs.Editor editor, BandBatteryState battery) {
+        editor.putInt("battery", battery.level());
+        if (battery.charging() == null) {
+            editor.remove("charging").remove("chargerState");
+        } else {
+            editor.putBoolean("charging", battery.charging()).putInt("chargerState", battery.chargerState());
         }
     }
 
