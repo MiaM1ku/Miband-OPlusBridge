@@ -833,6 +833,7 @@ public final class BandLiveService extends Service {
                             throw new IllegalStateException(failure.getMessage(), failure);
                         }
                         if (!repository.isRegistered() || stopRequested) return;
+                        writeStatus("CONNECTED");
                         show("手环已连接");
                     }, queue -> {
                         // Before the reader accepts a band weather request. A late history

@@ -253,6 +253,11 @@ public final class EntryPoint extends XposedModule {
             }
         }
         try {
+            OHealthStepAggregateHook.install(context, loader);
+        } catch (Throwable incompatible) {
+            probe("OHEALTH_STEP_AUDIT_HOOK_UNAVAILABLE " + incompatible.getClass().getSimpleName());
+        }
+        try {
             OHealthHealthImportHook.install(context, loader);
             probe("OHEALTH_IMPORT_HOOK_INSTALLED");
         } catch (Throwable incompatible) {

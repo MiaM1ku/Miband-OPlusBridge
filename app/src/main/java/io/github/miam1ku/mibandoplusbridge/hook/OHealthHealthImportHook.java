@@ -116,6 +116,15 @@ public final class OHealthHealthImportHook {
     }
 
     private void observe() {
+        HookRuntime.observe(context.getContentResolver(), HealthQueueProvider.STEP_REPAIRED_URI, false,
+                new ContentObserver(worker) {
+                    @Override public void onChange(boolean selfChange) {
+                        try { host.syncCloud(host.api(), OHealthStepWriter.TABLE_STAT); }
+                        catch (Exception unavailable) { HookRuntime.log("OHEALTH_STEP_AUDIT_CLOUD_PENDING"); }
+                        OHealthHomeMetricHook.requestReload();
+                        request();
+                    }
+                });
         HookRuntime.observe(context.getContentResolver(), HealthQueueProvider.URI, false,
                 new ContentObserver(null) {
                     @Override public void onChange(boolean selfChange) { request(); }

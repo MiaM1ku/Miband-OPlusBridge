@@ -28,19 +28,36 @@ final class LiveHistorySync {
     private boolean listing;
     private long generation;
     private java.util.concurrent.ScheduledFuture<?> batchDeadline;
+    private java.util.concurrent.ScheduledFuture<?> storageRetry;
+    private static final int MAX_STORAGE_RETRIES = 3;
+    private final long storageRetryDelayMs;
+    private int storageRetries;
 
     LiveHistorySync(LiveCommandQueue commands, ScheduledExecutorService worker, Runnable completed, Consumer<String> failed,
             java.util.function.BooleanSupplier capacity) {
+        this(commands, worker, completed, failed, capacity, 5_000);
+    }
+
+    LiveHistorySync(LiveCommandQueue commands, ScheduledExecutorService worker, Runnable completed, Consumer<String> failed,
+            java.util.function.BooleanSupplier capacity, long storageRetryDelayMs) {
         this.commands = commands;
         this.worker = worker;
         this.completed = completed;
         this.failed = failed;
         this.capacity = capacity;
+        this.storageRetryDelayMs = storageRetryDelayMs;
     }
 
     // Phone-initiated, matching the official app: 8/1 lists today, then 8/2 lists older days.
     // The band's own step total arrives separately as an unsolicited 8/47 after 8/45.
     void request(boolean history) {
+        boolean retryHistory = storageRetry != null && includeHistory;
+        cancelStorageRetry();
+        storageRetries = 0;
+        startRound(history || retryHistory);
+    }
+
+    private void startRound(boolean history) {
         includeHistory |= history;
         if (busy) return;
         busy = true;
@@ -143,7 +160,15 @@ final class LiveHistorySync {
         }
     }
 
+    private void cancelStorageRetry() {
+        if (storageRetry != null) {
+            storageRetry.cancel(false);
+            storageRetry = null;
+        }
+    }
+
     void close() {
+        cancelStorageRetry();
         cancelDeadline();
         generation++;
         busy = false;
@@ -154,12 +179,26 @@ final class LiveHistorySync {
     }
 
     private void fail(String reason) {
+        boolean retryHistory = historical || includeHistory;
         cancelDeadline();
+        cancelStorageRetry();
+        long round = ++generation;
         busy = false;
         listing = false;
         includeHistory = false;
         remaining.clear();
         pending.clear();
+        // A durable archive failure leaves its file unconfirmed on the band. Re-listing retries
+        // that file and preserves older dates as well as today's data after a transient DB lock.
+        if (("HISTORY_STORAGE_FAILED".equals(reason) || "HEALTH_STORAGE_UNAVAILABLE".equals(reason))
+                && storageRetries < MAX_STORAGE_RETRIES) {
+            includeHistory = retryHistory;
+            long delay = storageRetryDelayMs << storageRetries++;
+            storageRetry = worker.schedule(() -> {
+                storageRetry = null;
+                if (round == generation) startRound(retryHistory);
+            }, delay, java.util.concurrent.TimeUnit.MILLISECONDS);
+        }
         failed.accept(reason);
     }
 }

@@ -39,6 +39,12 @@ public final class BandDetailsActivity extends AppCompatActivity {
     private TextView history;
     private TextView saved;
     private Button next;
+    private LinearLayout stepReviews;
+    private int reviewGeneration;
+    private boolean approvingStepAudit;
+    private final ContentObserver stepReviewObserver = new ContentObserver(new Handler(Looper.getMainLooper())) {
+        @Override public void onChange(boolean selfChange) { loadStepReviews(); }
+    };
     private int kindIndex;
     private BridgeScreen screen;
     private TextView statusChip;
@@ -76,6 +82,8 @@ public final class BandDetailsActivity extends AppCompatActivity {
         LinearLayout links = screen.card();
         screen.navRow(links, "打开 OPPO 健康", () -> openPackage(OHEALTH));
         screen.navRow(links, "打开 KernelSU", () -> openPackage(KERNELSU));
+        stepReviews = screen.card();
+        stepReviews.setVisibility(View.GONE);
         screen.heading("已保存历史");
         screen.caption("当前 OHealth 账号下这只手环的记录。移除设备后记录照样保留。");
         int requested = getIntent() == null ? 0 : getIntent().getIntExtra("historyKind", 0);
@@ -115,6 +123,7 @@ public final class BandDetailsActivity extends AppCompatActivity {
         next = screen.outlined(historyCard, "加载更多", () -> loadHistory(false));
         getContentResolver().registerContentObserver(DeviceCardProvider.URI, false, observer);
         getContentResolver().registerContentObserver(HealthQueueProvider.RECORDS_URI, true, historyObserver);
+        getContentResolver().registerContentObserver(HealthQueueProvider.STEP_REVIEWS_URI, false, stepReviewObserver);
         refresh();
     }
 
@@ -127,6 +136,7 @@ public final class BandDetailsActivity extends AppCompatActivity {
             main.post(() -> { if (!isFinishing() && !isDestroyed()) refresh(); });
         });
         loadHistory(true);
+        loadStepReviews();
         Thread starter = new Thread(this::ensureLink, "OplusBandDetailsStart");
         starter.setDaemon(true);
         starter.start();
@@ -144,6 +154,8 @@ public final class BandDetailsActivity extends AppCompatActivity {
     @Override protected void onDestroy() {
         getContentResolver().unregisterContentObserver(observer);
         getContentResolver().unregisterContentObserver(historyObserver);
+        if (stepReviews != null) getContentResolver().unregisterContentObserver(stepReviewObserver);
+        reviewGeneration++;
         historyGeneration++;
         reader.shutdownNow();
         super.onDestroy();
@@ -181,6 +193,85 @@ public final class BandDetailsActivity extends AppCompatActivity {
         history.setText((steps >= 0 ? "今日 " + steps + " 步" : "今日步数等待同步")
                 + (heart > 0 && heart <= 250 ? " · 最近心率 " + heart + " 次/分" : "")
                 + (sync > 0 ? "\n同步于 " + DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(new Date(sync)) : ""));
+    }
+
+    private void loadStepReviews() {
+        if (stepReviews == null || reader.isShutdown() || isFinishing() || isDestroyed()) return;
+        int generation = ++reviewGeneration;
+        reader.execute(() -> {
+            List<io.github.miam1ku.mibandoplusbridge.data.StepAggregateAuditStore.Entry> entries = List.of();
+            try (HealthRecordStore records = new HealthRecordStore(this)) {
+                String account = records.confirmedAccountHash();
+                String device = io.github.miam1ku.mibandoplusbridge.data.LocalPrefs.open(this, "band-state")
+                        .getString("deviceId", "");
+                if (account != null && new BandStateRepository(this).isRegistered()) {
+                    entries = new io.github.miam1ku.mibandoplusbridge.data.StepAggregateAuditStore(this)
+                            .entries(account, device).stream().filter(entry -> entry.review() != null).toList();
+                }
+            } catch (Exception pending) { }
+            var reviews = entries;
+            main.post(() -> {
+                if (generation != reviewGeneration || isFinishing() || isDestroyed()) return;
+                stepReviews.removeAllViews();
+                stepReviews.setVisibility(reviews.isEmpty() ? View.GONE : View.VISIBLE);
+                if (reviews.isEmpty()) return;
+                screen.title(stepReviews, "日汇总核对");
+                screen.caption(stepReviews, "分钟记录与健康日汇总存在差异。确认当天实际步数后，按日期校正汇总。");
+                for (var entry : reviews) {
+                    var review = entry.review();
+                    String date = stepDate(review.date());
+                    screen.bodyText(stepReviews, date + " · 分钟和设备记录 " + review.expectedSteps()
+                            + " 步\n健康合并 " + review.combinedSteps() + " 步 · 手机汇总 " + review.phoneSteps() + " 步");
+                    Button action = screen.outlined(stepReviews, entry.approved() ? "已确认，等待健康校正" : "核对并校正",
+                            () -> confirmStepReview(review));
+                    action.setEnabled(!entry.approved() && !approvingStepAudit);
+                }
+            });
+        });
+    }
+
+    private void confirmStepReview(io.github.miam1ku.mibandoplusbridge.data.StepAggregateReview review) {
+        if (approvingStepAudit) return;
+        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
+                .setTitle("校正 " + stepDate(review.date()) + " 的日汇总")
+                .setMessage("分钟记录和设备日总均为 " + review.expectedSteps() + " 步。"
+                        + "本次会把该日偏大的健康合并日总和手机日总校正为这个值。"
+                        + "确认当天实际步数后继续；另有真实手机计步时可选择保留现状。"
+                        + "分钟记录、热量、距离及其他日期沿用原值。")
+                .setNegativeButton("保留现状", null)
+                .setPositiveButton("确认并校正", (dialog, which) -> approveStepReview(review))
+                .show();
+    }
+
+    private void approveStepReview(io.github.miam1ku.mibandoplusbridge.data.StepAggregateReview review) {
+        if (approvingStepAudit || reader.isShutdown()) return;
+        approvingStepAudit = true;
+        loadStepReviews();
+        reader.execute(() -> {
+            String message;
+            try {
+                Bundle extras = new Bundle();
+                extras.putString("fingerprint", review.fingerprint());
+                Bundle result = getContentResolver().call(HealthQueueProvider.URI, "approveStepAudit", null, extras);
+                if (result == null || !"STEP_AUDIT_APPROVED".equals(result.getString("status"))) {
+                    throw new IllegalStateException("STEP_AUDIT_APPROVAL_PENDING");
+                }
+                message = "已确认，健康完成校正后会刷新核对记录。重新打开健康可查看日汇总。";
+            } catch (Exception changed) {
+                message = "核对记录已更新，查看最新记录后再试。";
+            }
+            String feedback = message;
+            main.post(() -> {
+                if (isFinishing() || isDestroyed()) return;
+                approvingStepAudit = false;
+                Toast.makeText(this, feedback, Toast.LENGTH_LONG).show();
+                loadStepReviews();
+            });
+        });
+    }
+
+    private static String stepDate(int date) {
+        return String.format(java.util.Locale.ROOT, "%04d-%02d-%02d", date / 10_000, date / 100 % 100, date % 100);
     }
 
     private void loadHistory(boolean reset) {

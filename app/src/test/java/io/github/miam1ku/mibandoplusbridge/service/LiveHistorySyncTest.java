@@ -116,4 +116,124 @@ public final class LiveHistorySyncTest {
         }
     }
 
+    @Test public void archiveStorageFailureRetriesTodayAutomatically() throws Exception {
+        exerciseStorageRetry(true, false);
+    }
+
+    @Test public void archiveStorageFailureRetriesOlderDatesAutomatically() throws Exception {
+        exerciseStorageRetry(true, true);
+    }
+
+    @Test public void capacityStorageFailureRetriesTodayAutomatically() throws Exception {
+        exerciseStorageRetry(false, false);
+    }
+
+    @Test public void capacityStorageFailurePreservesHistoryScope() throws Exception {
+        exerciseStorageRetry(false, true);
+    }
+
+    private void exerciseStorageRetry(boolean archiveFailure, boolean historicalFile) throws Exception {
+        var worker = Executors.newSingleThreadScheduledExecutor();
+        var queueRef = new AtomicReference<LiveCommandQueue>();
+        var historyRef = new AtomicReference<LiveHistorySync>();
+        var downloads = new AtomicInteger();
+        var opens = new AtomicInteger();
+        var todayLists = new AtomicInteger();
+        var historyLists = new AtomicInteger();
+        byte[] id = new byte[] {1, 0, 0, 0, 0, 4, 0};
+        BlockingQueue<String> outcomes = new LinkedBlockingQueue<>();
+        try (var queue = new LiveCommandQueue(0, 5_000, (sequence, command) -> {
+            var current = queueRef.get();
+            int subtype = command.getSubtype();
+            if (subtype == 1 || subtype == 2) {
+                if (subtype == 1) todayLists.incrementAndGet();
+                else historyLists.incrementAndGet();
+                byte[] ids = (subtype == 2) == historicalFile ? id : new byte[0];
+                current.onCommand(XiaomiProto.Command.newBuilder().setType(8).setSubtype(subtype)
+                        .setHealth(XiaomiProto.Health.newBuilder()
+                                .setActivityRequestFileIds(ByteString.copyFrom(ids))).build());
+            } else if (subtype == 3) {
+                int download = downloads.incrementAndGet();
+                worker.execute(() -> {
+                    if (archiveFailure && download == 1) historyRef.get().rejected("HISTORY_STORAGE_FAILED");
+                    else historyRef.get().saved(id);
+                });
+            }
+            current.onAck(sequence);
+        })) {
+            queueRef.set(queue);
+            var history = new LiveHistorySync(queue, worker, () -> outcomes.add("complete"), outcomes::add, () -> {
+                if (!archiveFailure && opens.getAndIncrement() == 0) {
+                    throw new IllegalStateException("HEALTH_STORAGE_UNAVAILABLE");
+                }
+                return true;
+            }, 10);
+            historyRef.set(history);
+            worker.execute(() -> history.request(true));
+            assertEquals(archiveFailure ? "HISTORY_STORAGE_FAILED" : "HEALTH_STORAGE_UNAVAILABLE",
+                    outcomes.poll(5, TimeUnit.SECONDS));
+            assertEquals("complete", outcomes.poll(5, TimeUnit.SECONDS));
+            assertEquals(2, todayLists.get());
+            assertEquals(historicalFile ? 2 : 1, historyLists.get());
+            assertEquals(archiveFailure ? 2 : 1, downloads.get());
+            worker.submit(history::close).get(5, TimeUnit.SECONDS);
+        } finally {
+            worker.shutdownNow();
+        }
+    }
+
+    @Test public void persistentStorageFailureHasBoundedRetries() throws Exception {
+        exercisePendingRetry("exhaust");
+    }
+
+    @Test public void closingSessionCancelsStorageRetry() throws Exception {
+        exercisePendingRetry("close");
+    }
+
+    @Test public void manualSyncReplacesPendingStorageRetry() throws Exception {
+        exercisePendingRetry("manual");
+    }
+
+    private void exercisePendingRetry(String action) throws Exception {
+        var worker = Executors.newSingleThreadScheduledExecutor();
+        var queueRef = new AtomicReference<LiveCommandQueue>();
+        var listed = new AtomicInteger();
+        BlockingQueue<String> outcomes = new LinkedBlockingQueue<>();
+        try (var queue = new LiveCommandQueue(0, 5_000, (sequence, command) -> {
+            var current = queueRef.get();
+            if (command.getSubtype() == 1) {
+                int count = listed.incrementAndGet();
+                byte[] ids = "manual".equals(action) && count > 1
+                        ? new byte[0] : new byte[] {1, 0, 0, 0, 0, 4, 0};
+                current.onCommand(XiaomiProto.Command.newBuilder().setType(8).setSubtype(1)
+                        .setHealth(XiaomiProto.Health.newBuilder()
+                                .setActivityRequestFileIds(ByteString.copyFrom(ids))).build());
+            }
+            current.onAck(sequence);
+        })) {
+            queueRef.set(queue);
+            var history = new LiveHistorySync(queue, worker, () -> outcomes.add("complete"), outcomes::add,
+                    () -> { throw new IllegalStateException("HEALTH_STORAGE_UNAVAILABLE"); },
+                    "exhaust".equals(action) ? 10 : 100);
+            worker.execute(() -> history.request(false));
+            assertEquals("HEALTH_STORAGE_UNAVAILABLE", outcomes.poll(5, TimeUnit.SECONDS));
+            if ("exhaust".equals(action)) {
+                for (int i = 0; i < 3; i++) {
+                    assertEquals("HEALTH_STORAGE_UNAVAILABLE", outcomes.poll(5, TimeUnit.SECONDS));
+                }
+            } else if ("close".equals(action)) {
+                worker.submit(history::close).get(5, TimeUnit.SECONDS);
+            } else {
+                worker.execute(() -> history.request(false));
+                assertEquals("complete", outcomes.poll(5, TimeUnit.SECONDS));
+            }
+            worker.schedule(() -> {}, 300, TimeUnit.MILLISECONDS).get(5, TimeUnit.SECONDS);
+            assertEquals("exhaust".equals(action) ? 4 : "close".equals(action) ? 1 : 2, listed.get());
+            assertNull(outcomes.poll());
+            worker.submit(history::close).get(5, TimeUnit.SECONDS);
+        } finally {
+            worker.shutdownNow();
+        }
+    }
+
 }

@@ -57,6 +57,34 @@ public final class OHealthStepWriterTest {
         assertFalse(OHealthStepWriter.publishSteps(100, 100));
     }
 
+    @Test public void ambiguousTimezoneDateLeavesOtherHistoricalDatesEligible() {
+        long day = LocalDate.of(2026, 11, 1).atStartOfDay(ZONE).toInstant().toEpochMilli();
+        var days = io.github.miam1ku.mibandoplusbridge.protocol.BandHistoryParser.stepDays(List.of(
+                minute(day, 1, 221, 60, 117, "+08:00"),
+                minute(day, 1, 221, 60, 117, "Asia/Shanghai"),
+                minute(day - 86_400_000L, 1, 120, 10, 60)));
+        assertEquals(3, days.size());
+        var requests = OHealthStepWriter.aggregateAuditRequests("account", "device", "MAC", "Band", days,
+                day + 2 * 86_400_000L);
+        assertEquals(1, requests.size());
+        assertEquals(20261031, requests.get(0).date());
+    }
+
+    @Test public void aggregateRequestsIncludeCachedHistoryAndKeepRecentBoundedWindow() {
+        long today = LocalDate.of(2026, 11, 3).atStartOfDay(ZONE).toInstant().toEpochMilli();
+        var records = new java.util.ArrayList<HealthRecord>();
+        for (int days = -1; days <= 40; days++) records.add(minute(today - days * 86_400_000L, 1, 221, 60, 117));
+        var requests = OHealthStepWriter.aggregateAuditRequests("account", "device", "MAC", "Watch",
+                io.github.miam1ku.mibandoplusbridge.protocol.BandHistoryParser.stepDays(records), today);
+        assertEquals(31, requests.size());
+        assertEquals(20261102, requests.get(0).date());
+        for (var request : requests) {
+            assertEquals(-1, request.minuteMode());
+            assertTrue(request.startMs() <= today - 86_400_000L);
+            assertTrue(request.startMs() >= today - 32 * 86_400_000L);
+        }
+    }
+
     private static HealthRecord minute(long dayStart, int index, int steps, Integer calories, Integer distance) {
         return minute(dayStart, index, steps, calories, distance, "Asia/Shanghai");
     }

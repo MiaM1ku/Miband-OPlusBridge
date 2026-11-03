@@ -120,12 +120,50 @@ final class OHealthStepWriter {
         }
         // Rows left under the queued id stay. A table 1001 delete cannot be scoped to one device:
         // it cleared every minute of the day, this band's new rows and the phone's included.
+        scheduleAggregateAudits(context, account, queued, device, category, days);
         publishToday(context, days);
         publishSnapshot(context);
         String summary = "OHEALTH_STEP_IMPORT days=" + days.size()
                 + " inserted=" + inserted + " skipped=" + skipped + " chart=" + chart;
         HookRuntime.log(summary);
         XposedBridge.log("OplusBandBridge " + summary);
+    }
+
+    private void scheduleAggregateAudits(Context context, String account, String queued, String device,
+            String category, List<BandHistoryParser.StepDay> days) {
+        try {
+            org.json.JSONArray requests = new org.json.JSONArray();
+            for (var request : aggregateAuditRequests(account, queued, device, category, days, System.currentTimeMillis())) {
+                requests.put(request.toJson());
+            }
+            if (requests.length() == 0) return;
+            Bundle extras = new Bundle();
+            extras.putString("requests", requests.toString());
+            context.getContentResolver().call(HealthQueueProvider.URI, "scheduleStepAudits", null, extras);
+        } catch (Exception failure) {
+            HookRuntime.log("OHEALTH_STEP_AUDIT_SCHEDULE_PAUSED " + failure.getClass().getSimpleName());
+        }
+    }
+
+    static List<io.github.miam1ku.mibandoplusbridge.data.StepAggregateAuditStore.Request> aggregateAuditRequests(
+            String account, String queued, String device, String category, List<BandHistoryParser.StepDay> days, long now) {
+        java.util.Map<Integer, Integer> counts = new java.util.HashMap<>();
+        for (var day : days) counts.merge(day.date, 1, Integer::sum);
+        List<BandHistoryParser.StepDay> recent = new ArrayList<>(days);
+        recent.sort(java.util.Comparator.comparingLong((BandHistoryParser.StepDay day) -> day.startMs).reversed());
+        List<io.github.miam1ku.mibandoplusbridge.data.StepAggregateAuditStore.Request> requests = new ArrayList<>();
+        for (var day : recent) {
+            if (requests.size() == 31) break;
+            if (counts.get(day.date) != 1 || day.steps <= 0 || day.steps > Integer.MAX_VALUE
+                    || day.startMs > now - 86_400_000L || day.startMs < now - 32L * 86_400_000L) continue;
+            String zone = day.timezone == null || day.timezone.isBlank() ? ZoneId.systemDefault().getId() : day.timezone;
+            try {
+                requests.add(new io.github.miam1ku.mibandoplusbridge.data.StepAggregateAuditStore.Request(
+                        account, queued, device, day.date, day.startMs, zone, day.steps,
+                        minuteSportMode(DEVICE_WATCH.equals(category))));
+            } catch (IllegalArgumentException invalidDay) { }
+        }
+        return List.copyOf(requests);
     }
 
     private boolean writeStat(Object api, String account, String device, BandHistoryParser.StepDay day,

@@ -13,6 +13,12 @@ import android.os.UserManager;
 import io.github.miam1ku.mibandoplusbridge.HostIdentity;
 import io.github.miam1ku.mibandoplusbridge.protocol.BandHistoryParser.Measurement;
 import io.github.miam1ku.mibandoplusbridge.data.HealthRecordStore;
+import io.github.miam1ku.mibandoplusbridge.data.BandStateRepository;
+import io.github.miam1ku.mibandoplusbridge.data.LocalPrefs;
+import io.github.miam1ku.mibandoplusbridge.data.StepAggregateAuditStore;
+import io.github.miam1ku.mibandoplusbridge.data.StepAggregateAuditStore.Request;
+import io.github.miam1ku.mibandoplusbridge.data.StepAggregateReview;
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 /** Pending writes in credential-encrypted storage. Callers are checked by package name and read only the confirmed account. */
@@ -20,6 +26,9 @@ public final class HealthQueueProvider extends ContentProvider {
     public static final String AUTHORITY = "io.github.miam1ku.mibandoplusbridge.health";
     public static final Uri URI = Uri.parse("content://" + AUTHORITY + "/pending");
     public static final Uri RECORDS_URI = Uri.parse("content://" + AUTHORITY + "/records");
+    public static final Uri STEP_AUDITS_URI = Uri.parse("content://" + AUTHORITY + "/step-audits");
+    public static final Uri STEP_REVIEWS_URI = Uri.parse("content://" + AUTHORITY + "/step-reviews");
+    public static final Uri STEP_REPAIRED_URI = Uri.parse("content://" + AUTHORITY + "/step-repaired");
     private static final String HOST = "com.heytap.health";
     private static final String[] COLUMNS = {"recordId", "revision", "record"};
     private HealthRecordStore store;
@@ -104,6 +113,12 @@ public final class HealthQueueProvider extends ContentProvider {
         requireUnlocked();
         if (method == null) throw new IllegalArgumentException("UNSUPPORTED_HEALTH_OPERATION");
         switch (method) {
+            case "scheduleStepAudits":
+            case "stepAudits":
+            case "reportStepAudit":
+            case "completeStepAudit":
+            case "approveStepAudit":
+                return stepAudit(method, self, extras);
             case "adoptAccount": {
                 if (self || extras == null) throw new SecurityException("OHEALTH_CALLER_REQUIRED");
                 String account = extras.getString("account");
@@ -228,6 +243,94 @@ public final class HealthQueueProvider extends ContentProvider {
             default:
                 throw new IllegalArgumentException("UNSUPPORTED_HEALTH_OPERATION");
         }
+    }
+
+    private Bundle stepAudit(String method, boolean self, Bundle extras) {
+        if (self != "approveStepAudit".equals(method)) throw new SecurityException("STEP_AUDIT_CALLER_REQUIRED");
+        BandStateRepository band = new BandStateRepository(getContext());
+        String device = LocalPrefs.open(getContext(), "band-state").getString("deviceId", "");
+        String account = store.confirmedAccountHash();
+        if (!band.isRegistered() || device.isBlank() || account == null) {
+            throw new SecurityException("STEP_AUDIT_COLLECTION_REQUIRED");
+        }
+        StepAggregateAuditStore audits = new StepAggregateAuditStore(getContext());
+        try {
+            if ("stepAudits".equals(method)) {
+                JSONArray entries = new JSONArray();
+                for (StepAggregateAuditStore.Entry entry : audits.entries(account, device)) {
+                    requireStepRequest(entry.request());
+                    JSONObject item = new JSONObject().put("request", entry.request().toJson())
+                            .put("approved", entry.approved());
+                    if (entry.review() != null) item.put("review", entry.review().toJson());
+                    entries.put(item);
+                }
+                Bundle result = new Bundle();
+                result.putString("entries", entries.toString());
+                return result;
+            }
+            if (extras == null) throw new IllegalArgumentException("STEP_AUDIT_PAYLOAD_REQUIRED");
+            if ("approveStepAudit".equals(method)) {
+                if (!extras.keySet().equals(java.util.Set.of("fingerprint"))) {
+                    throw new IllegalArgumentException("STEP_AUDIT_PAYLOAD_REQUIRED");
+                }
+                audits.approve(account, device, extras.getString("fingerprint", ""));
+                getContext().getContentResolver().notifyChange(STEP_REVIEWS_URI, null);
+                getContext().getContentResolver().notifyChange(STEP_AUDITS_URI, null);
+                return status("STEP_AUDIT_APPROVED");
+            }
+            if ("scheduleStepAudits".equals(method)) {
+                if (!extras.keySet().equals(java.util.Set.of("requests"))) {
+                    throw new IllegalArgumentException("STEP_AUDIT_PAYLOAD_REQUIRED");
+                }
+                JSONArray encoded = new JSONArray(extras.getString("requests", "[]"));
+                if (encoded.length() > 31) throw new IllegalArgumentException("STEP_AUDIT_LIMIT");
+                java.util.List<Request> requests = new java.util.ArrayList<>();
+                for (int i = 0; i < encoded.length(); i++) {
+                    Request request = Request.fromJson(encoded.getJSONObject(i));
+                    requireStepRequest(request);
+                    requests.add(request);
+                }
+                if (audits.schedule(requests)) {
+                    getContext().getContentResolver().notifyChange(STEP_AUDITS_URI, null);
+                    getContext().getContentResolver().notifyChange(STEP_REVIEWS_URI, null);
+                }
+                return status("STEP_AUDIT_SCHEDULED");
+            }
+            java.util.Set<String> allowed = java.util.Set.of("request", "review");
+            if (!allowed.containsAll(extras.keySet()) || !extras.containsKey("request")) {
+                throw new IllegalArgumentException("STEP_AUDIT_PAYLOAD_REQUIRED");
+            }
+            Request request = Request.fromJson(new JSONObject(extras.getString("request", "")));
+            requireStepRequest(request);
+            StepAggregateReview review = extras.containsKey("review")
+                    ? StepAggregateReview.fromJson(new JSONObject(extras.getString("review", ""))) : null;
+            if ("completeStepAudit".equals(method)) {
+                if (review == null || !audits.complete(request, review)) {
+                    throw new IllegalStateException("STEP_AUDIT_CHANGED");
+                }
+                getContext().getContentResolver().notifyChange(STEP_REVIEWS_URI, null);
+                getContext().getContentResolver().notifyChange(STEP_REPAIRED_URI, null);
+                return status("STEP_AUDIT_COMPLETED");
+            }
+            StepAggregateAuditStore.ReportResult outcome = audits.report(request, review);
+            if (outcome.changed()) getContext().getContentResolver().notifyChange(STEP_REVIEWS_URI, null);
+            Bundle result = status("STEP_AUDIT_REPORTED");
+            result.putBoolean("approved", outcome.approved());
+            return result;
+        } catch (org.json.JSONException invalid) {
+            throw new IllegalArgumentException("STEP_AUDIT_PAYLOAD_INVALID", invalid);
+        }
+    }
+
+    private void requireStepRequest(Request request) {
+        String account = store.confirmedAccountHash();
+        var band = new BandStateRepository(getContext());
+        String device = LocalPrefs.open(getContext(), "band-state").getString("deviceId", "");
+        if (account == null || !account.equals(request.accountHash()) || !band.isRegistered()
+                || !device.equals(request.queuedDevice()) || !band.address().equals(request.nativeDevice())) {
+            throw new SecurityException("STEP_AUDIT_IDENTITY_CHANGED");
+        }
+        requireCollectionReady(device);
     }
 
     private void notifyRecordsChanged() {
