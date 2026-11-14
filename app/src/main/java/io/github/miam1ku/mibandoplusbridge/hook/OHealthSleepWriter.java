@@ -238,6 +238,15 @@ final class OHealthSleepWriter {
                             + " " + derivedFailure);
                 }
             }
+            int awakeShifts = 0;
+            for (OHealthSleepPlan.Segment segment : night.segments()) {
+                if (segment.sleepState() == OHealthSleepPlan.AWAKE) awakeShifts++;
+            }
+            String fragment = "SLEEP_FRAGMENT night=" + night.date()
+                    + " snapshots=" + night.snapshots() + " awakeShifts=" + awakeShifts
+                    + " syntheticAwake=" + night.syntheticAwakeMinutes();
+            HookRuntime.log(fragment);
+            OHealthDeviceHook.traceLine(context, fragment);
         }
 
         boolean sameStat = statMatches(stats, device, previous, day);
