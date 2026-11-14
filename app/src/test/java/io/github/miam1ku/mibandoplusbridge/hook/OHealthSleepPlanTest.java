@@ -86,10 +86,25 @@ public final class OHealthSleepPlanTest {
         OHealthSleepPlan.Night night = nights.get(0);
         assertEquals(start, night.fallAsleepMs());
         assertEquals(wake, night.wakeMs());
+        assertEquals(3, night.snapshots());
         assertEquals(278, night.sleepMinutes());
         assertEquals(2, night.segments().size());
         assertEquals(OHealthSleepPlan.DEEP, night.segments().get(0).sleepState());
         assertEquals(OHealthSleepPlan.LIGHT, night.segments().get(1).sleepState());
+    }
+
+    @Test public void overlappingTailsAreNotCountedAsRepeatedSnapshots() {
+        long start = at(2026, 11, 13, 2, 0);
+        long firstEnd = at(2026, 11, 13, 5, 0);
+        long secondStart = at(2026, 11, 13, 4, 0);
+        long wake = at(2026, 11, 13, 7, 0);
+        List<OHealthSleepPlan.Night> nights = nights(List.of(
+                interval("night", start, firstEnd),
+                interval("tail", secondStart, wake)));
+        assertEquals(1, nights.size());
+        assertEquals(1, nights.get(0).snapshots());
+        assertEquals(start, nights.get(0).fallAsleepMs());
+        assertEquals(wake, nights.get(0).wakeMs());
     }
 
     @Test public void aSnapshotStartingInsideTheNightExtendsIt() {
@@ -197,10 +212,28 @@ public final class OHealthSleepPlanTest {
         assertEquals(1, nights.size());
         List<OHealthSleepPlan.Segment> segments = nights.get(0).segments();
         assertEquals(4, segments.size());
-        assertEquals(lightStart, segments.get(0).endMs());
+        assertEquals(deepEnd, segments.get(0).endMs());
         assertEquals(OHealthSleepPlan.AWAKE, segments.get(2).sleepState());
+        assertTrue(segments.get(2).syntheticAwake());
+        assertEquals(2, nights.get(0).syntheticAwakeMinutes());
         assertEquals(segments.get(2).endMs(), segments.get(3).startMs());
         assertFalse(OHealthSleepPlan.summary(nights, nights.get(0)));
+    }
+
+    @Test public void shortGapIsNotSilentlyStretched() {
+        long start = at(2026, 11, 13, 2, 0);
+        long deepEnd = start + 20 * 60_000L;
+        long lightStart = deepEnd + 20_000L;
+        long lightEnd = lightStart + 30 * 60_000L;
+        List<OHealthSleepPlan.Night> nights = nights(List.of(
+                interval("night", start, lightEnd),
+                stage("deep", start, deepEnd, 2),
+                stage("light", lightStart, lightEnd, 3)));
+        List<OHealthSleepPlan.Segment> segments = nights.get(0).segments();
+        assertEquals(2, segments.size());
+        assertEquals(deepEnd, segments.get(0).endMs());
+        assertEquals(lightStart, segments.get(1).startMs());
+        assertEquals(0, nights.get(0).syntheticAwakeMinutes());
     }
 
     @Test public void summaryClockUsesSleepDayMinutes() {

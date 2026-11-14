@@ -74,36 +74,35 @@ public final class OHealthSleepHook {
         Context app = supplied.getApplicationContext();
         context = app == null ? supplied : app;
         loader = hostLoader;
-        dateUtils = singleton("com.heytap.health.healthbase.util.HealthDateUtils", "INSTANCE");
-        manager = singleton("com.heytap.health.devicemanager.client.DMHeytap", "managerApi");
-        allRole = singleton("com.heytap.health.devicemanager.client.role.DeviceBasegetRole$All", "INSTANCE");
-        accountCompanion = singleton("com.heytap.device.data.storage.DataRepositoryHelper", "Companion");
+        dateUtils = singletonOrNull("com.heytap.health.healthbase.util.HealthDateUtils", "INSTANCE");
+        manager = singletonOrNull("com.heytap.health.devicemanager.client.DMHeytap", "managerApi");
+        allRole = singletonOrNull(
+                "com.heytap.health.devicemanager.client.role.DeviceBasegetRole$All", "INSTANCE");
+        accountCompanion = accountOwner(hostLoader);
         HandlerThread thread = HookRuntime.thread("OplusBandSleepRead");
         worker = new Handler(thread.getLooper());
-        hookHome();
-        hookDay();
-        hookNavigation();
-        hookToolbar();
-        XposedBridge.hookAllMethods(accountCompanion.getClass(), "getSsoId", new XC_MethodHook() {
-            @Override protected void afterHookedMethod(MethodHookParam p) {
-                String account = p.getResult() instanceof String ? (String) p.getResult() : "";
-                if (account.isBlank() || "com.heytap.health".equals(account)) return;
-                if (!account.equals(observedAccount)) {
-                    observedAccount = account;
-                    cache = Cache.empty();
-                    MAIN.post(OHealthSleepHook::renderAll);
-                    requestLoad();
+        HookRuntime.tryHook("OHEALTH_SLEEP_HOME_UNAVAILABLE", OHealthSleepHook::hookHome);
+        HookRuntime.tryHook("OHEALTH_SLEEP_DAY_UNAVAILABLE", OHealthSleepHook::hookDay);
+        HookRuntime.tryHook("OHEALTH_SLEEP_NAVIGATION_UNAVAILABLE", OHealthSleepHook::hookNavigation);
+        HookRuntime.tryHook("OHEALTH_SLEEP_TOOLBAR_UNAVAILABLE", OHealthSleepHook::hookToolbar);
+        if (accountCompanion != null) {
+            XposedBridge.hookAllMethods(accountCompanion.getClass(), "getSsoid", new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam p) {
+                    updateAccount(p.getResult());
                 }
-            }
-        });
+            });
+        }
         XC_MethodHook selection = new XC_MethodHook() {
             @Override protected void afterHookedMethod(MethodHookParam p) {
                 MAIN.post(OHealthSleepHook::renderAll);
             }
         };
-        for (Method method : manager.getClass().getMethods()) {
-            if (method.getName().equals("setThirdpartySelectMac") || method.getName().equals("setCurrActiveMac")) {
-                XposedBridge.hookMethod(method, selection);
+        if (manager != null) {
+            for (Method method : manager.getClass().getMethods()) {
+                if (method.getName().equals("setThirdpartySelectMac")
+                        || method.getName().equals("setCurrActiveMac")) {
+                    XposedBridge.hookMethod(method, selection);
+                }
             }
         }
         ContentObserver observer = new ContentObserver(worker) {
@@ -121,6 +120,46 @@ public final class OHealthSleepHook {
 
     private static Object singleton(String name, String field) throws Exception {
         return Class.forName(name, false, loader).getField(field).get(null);
+    }
+
+    private static Object singletonOrNull(String name, String field) {
+        try {
+            return singleton(name, field);
+        } catch (Throwable unavailable) {
+            return null;
+        }
+    }
+
+    private static Object accountOwner(ClassLoader hostLoader) {
+        Object old = singletonOrNull("com.heytap.device.data.storage.DataRepositoryHelper", "Companion");
+        if (old != null) return old;
+        try {
+            Class<?> internal = Class.forName(
+                    "com.heytap.health.account.impl.InternalImpl", false, hostLoader);
+            Object instance = internal.getConstructor().newInstance();
+            return internal.getMethod("getAccount").invoke(instance);
+        } catch (Throwable unavailable) {
+            try {
+                Class<?> manager = Class.forName(
+                        "com.heytap.health.account.impl.manager.o", false, hostLoader);
+                return manager.getConstructor().newInstance();
+            } catch (Throwable missing) {
+                HookRuntime.log("OHEALTH_SLEEP_ACCOUNT_UNAVAILABLE "
+                        + missing.getClass().getSimpleName());
+                return null;
+            }
+        }
+    }
+
+    private static void updateAccount(Object value) {
+        String account = value instanceof String text ? text : "";
+        if (account.isBlank() || "com.heytap.health".equals(account)) return;
+        if (!account.equals(observedAccount)) {
+            observedAccount = account;
+            cache = Cache.empty();
+            MAIN.post(OHealthSleepHook::renderAll);
+            requestLoad();
+        }
     }
 
     private static void requestLoad() {

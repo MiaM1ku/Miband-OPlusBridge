@@ -104,6 +104,7 @@ public final class MainActivity extends AppCompatActivity {
     private boolean profileAfterRestore;
     private boolean rootGranted;
     private boolean probingRoot;
+    private boolean sleepPauseWriting;
     private Change pendingPermission;
 
     /** Open the profile window when this restore task succeeded and the user came in from the capture entry. */
@@ -195,22 +196,34 @@ public final class MainActivity extends AppCompatActivity {
         screen.caption(links, "在控制中心添加「手环」磁贴，下拉或点按即可连接。");
 
         LinearLayout sleepCard = screen.card();
+        boolean sleepStateUnsupported = BandLiveService.sleepStateUnsupportedForCurrentDevice(this);
+        if (sleepStateUnsupported) {
+            screen.bodyText(sleepCard, "当前手环会在下次同步时更新睡眠状态。");
+            return;
+        }
         MaterialSwitch sleepPause = screen.switchRow(sleepCard, "入睡后暂停音乐",
-                "手环报告入睡时暂停正在播放的音乐，醒来后保持暂停。打开开关时如果已经入睡，会在下一次入睡时生效。"
-                        + "通过睡眠记录报告入睡的手环，会在记录同步后暂停，通常需要几分钟。");
-        final boolean[] writingSleepPause = {false};
+                "手环报告入睡时暂停正在播放的音乐，醒来后保持暂停。");
         sleepPause.setChecked(SleepMusic.enabled(this));
         sleepPause.setOnCheckedChangeListener((button, checked) -> {
-            if (writingSleepPause[0]) return;
-            if (SleepMusic.setEnabled(this, checked)) {
-                BandLiveService.sleepPauseChanged(this);
-                return;
-            }
-            writingSleepPause[0] = true;
-            button.setChecked(!checked);
-            writingSleepPause[0] = false;
-            ownershipStatus.setText("开关状态保存中断，再拨一次即可。");
+            if (sleepPauseWriting) return;
+            applySleepPause(button, checked);
         });
+    }
+
+    private void applySleepPause(android.widget.CompoundButton toggle, boolean enabled) {
+        if (SleepMusic.setEnabled(this, enabled)) {
+            setSleepPauseChecked(toggle, enabled);
+            BandLiveService.sleepPauseChanged(this);
+            return;
+        }
+        setSleepPauseChecked(toggle, !enabled);
+        ownershipStatus.setText("开关状态保存中断，再拨一次即可。");
+    }
+
+    private void setSleepPauseChecked(android.widget.CompoundButton toggle, boolean checked) {
+        sleepPauseWriting = true;
+        toggle.setChecked(checked);
+        sleepPauseWriting = false;
     }
 
     private void buildHelp() {

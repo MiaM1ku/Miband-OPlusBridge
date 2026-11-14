@@ -30,16 +30,28 @@ public final class OHealthSleepPlan {
      */
     public static final int UNSTAGED = 6;
 
-    public record Segment(long startMs, long endMs, int sleepState) {}
+    public record Segment(long startMs, long endMs, int sleepState, boolean syntheticAwake) {
+        public Segment(long startMs, long endMs, int sleepState) {
+            this(startMs, endMs, sleepState, false);
+        }
+    }
 
     public record Night(int date, ZoneId zone, long fallAsleepMs, long wakeMs, long sleepMinutes,
             long deepMinutes, long lightMinutes, long remMinutes, long wakeMinutes,
-            List<Segment> segments, long dayStartMs, long dayEndMs) {
+            List<Segment> segments, long dayStartMs, long dayEndMs, int snapshots,
+            long syntheticAwakeMinutes) {
+        public Night(int date, ZoneId zone, long fallAsleepMs, long wakeMs, long sleepMinutes,
+                long deepMinutes, long lightMinutes, long remMinutes, long wakeMinutes,
+                List<Segment> segments, long dayStartMs, long dayEndMs) {
+            this(date, zone, fallAsleepMs, wakeMs, sleepMinutes, deepMinutes, lightMinutes,
+                    remMinutes, wakeMinutes, segments, dayStartMs, dayEndMs, 0, 0);
+        }
+
         public Night(int date, long fallAsleepMs, long wakeMs, long sleepMinutes, long deepMinutes,
                 long lightMinutes, long remMinutes, long wakeMinutes, List<Segment> segments,
                 long dayStartMs, long dayEndMs) {
             this(date, ZoneId.systemDefault(), fallAsleepMs, wakeMs, sleepMinutes, deepMinutes,
-                    lightMinutes, remMinutes, wakeMinutes, segments, dayStartMs, dayEndMs);
+                    lightMinutes, remMinutes, wakeMinutes, segments, dayStartMs, dayEndMs, 0, 0);
         }
     }
 
@@ -94,15 +106,25 @@ public final class OHealthSleepPlan {
      * made Health re-derive its awake runs from a table that changed shape on every import.
      * One interval per overlapping stretch: the widest snapshot already covers the shorter ones.
      */
-    private static List<HealthRecord> unionOverlapping(List<HealthRecord> intervals) {
-        if (intervals.size() < 2) return intervals;
+    private record IntervalGroup(HealthRecord record, int snapshots) {}
+
+    private static List<IntervalGroup> unionOverlapping(List<HealthRecord> intervals) {
+        if (intervals.size() < 2) {
+            return intervals.stream().map(record -> new IntervalGroup(record, 1)).toList();
+        }
         List<HealthRecord> sorted = new ArrayList<>(intervals);
         sorted.sort(Comparator.comparingLong(record -> record.startMs));
-        List<HealthRecord> merged = new ArrayList<>();
+        List<IntervalGroup> merged = new ArrayList<>();
         HealthRecord current = sorted.get(0);
+        long groupStartMs = current.startMs;
+        int snapshots = 1;
         for (int i = 1; i < sorted.size(); i++) {
             HealthRecord next = sorted.get(i);
             if (next.startMs <= current.endMs) {
+                // Every firmware sync closes and rewrites the open sleep file. Only a repeat
+                // starting at the same instant proves another snapshot of this night; a later
+                // overlapping interval is a tail, not evidence of an additional forced wake.
+                if (next.startMs == groupStartMs) snapshots++;
                 if (next.endMs > current.endMs) {
                     current = new HealthRecord(current.recordId, current.deviceId, current.kind,
                             current.startMs, next.endMs, null, null, Math.max(1, current.revision),
@@ -110,10 +132,12 @@ public final class OHealthSleepPlan {
                 }
                 continue;
             }
-            merged.add(current);
+            merged.add(new IntervalGroup(current, snapshots));
             current = next;
+            groupStartMs = current.startMs;
+            snapshots = 1;
         }
-        merged.add(current);
+        merged.add(new IntervalGroup(current, snapshots));
         return merged;
     }
 
@@ -133,10 +157,12 @@ public final class OHealthSleepPlan {
             if ("sleep_interval".equals(record.kind)) intervals.add(record);
             else if ("sleep_stage".equals(record.kind)) stages.add(record);
         }
-        intervals = unionOverlapping(intervals);
+        List<IntervalGroup> intervalGroups = unionOverlapping(intervals);
+        intervals = intervalGroups.stream().map(IntervalGroup::record).toList();
         boolean[] used = new boolean[stages.size()];
         List<Session> sessions = new ArrayList<>();
-        for (HealthRecord interval : intervals) {
+        for (IntervalGroup group : intervalGroups) {
+            HealthRecord interval = group.record();
             List<Segment> segments = new ArrayList<>();
             for (int i = 0; i < stages.size(); i++) {
                 if (used[i]) continue;
@@ -170,7 +196,8 @@ public final class OHealthSleepPlan {
                 int date = sleepDate(wake, zone);
                 Count counted = count(cluster);
                 sessions.add(new Session(date, zone, fall, wake,
-                        counted.sleep, counted.deep, counted.light, counted.rem, counted.awake, cluster));
+                        counted.sleep, counted.deep, counted.light, counted.rem, counted.awake,
+                        group.snapshots(), counted.syntheticAwake, cluster));
             }
         }
         List<Night> nights = new ArrayList<>();
@@ -182,7 +209,7 @@ public final class OHealthSleepPlan {
             Count counted = count(flat);
             nights.add(new Night(session.date, session.zone, session.fall, session.wake, counted.sleep, counted.deep,
                     counted.light, counted.rem, counted.awake, List.copyOf(flat),
-                    purgeStart, window[1]));
+                    purgeStart, window[1], session.snapshots, session.syntheticAwake));
         }
         nights.sort(Comparator.comparingInt(Night::date).thenComparingLong(Night::fallAsleepMs));
         return nights;
@@ -286,8 +313,11 @@ public final class OHealthSleepPlan {
         Segment current = sorted.get(0);
         for (int i = 1; i < sorted.size(); i++) {
             Segment next = sorted.get(i);
-            if (next.sleepState == current.sleepState && next.startMs <= current.endMs) {
-                current = new Segment(current.startMs, Math.max(current.endMs, next.endMs), current.sleepState);
+            if (next.sleepState == current.sleepState
+                    && next.syntheticAwake == current.syntheticAwake
+                    && next.startMs <= current.endMs) {
+                current = new Segment(current.startMs, Math.max(current.endMs, next.endMs),
+                        current.sleepState, current.syntheticAwake);
             } else {
                 merged.add(current);
                 current = next;
@@ -314,7 +344,8 @@ public final class OHealthSleepPlan {
             Segment next = sorted.get(i);
             if (next.startMs() < current.endMs()) {
                 if (next.endMs() <= current.endMs()) continue;
-                next = new Segment(current.endMs(), next.endMs(), next.sleepState());
+                next = new Segment(current.endMs(), next.endMs(), next.sleepState(),
+                        next.syntheticAwake());
             }
             parted.add(current);
             current = next;
@@ -335,14 +366,13 @@ public final class OHealthSleepPlan {
             Segment next = segments.get(i);
             long gap = next.startMs() - current.endMs();
             if (gap > 0 && gap <= 1_200_000L) {
-                if (gap < 60_000L) {
-                    current = new Segment(current.startMs(), next.startMs(), current.sleepState());
-                } else {
-                    stitched.add(current);
-                    current = new Segment(current.endMs(), next.startMs(), AWAKE);
+                stitched.add(current);
+                if (gap >= 60_000L) {
+                    stitched.add(new Segment(current.endMs(), next.startMs(), AWAKE, true));
                 }
+            } else {
+                stitched.add(current);
             }
-            stitched.add(current);
             current = next;
         }
         stitched.add(current);
@@ -351,7 +381,7 @@ public final class OHealthSleepPlan {
 
     /** Awake minutes stay in awake, outside {@code sleep}. */
     private static Count count(List<Segment> segments) {
-        long sleep = 0, deep = 0, light = 0, rem = 0, awake = 0;
+        long sleep = 0, deep = 0, light = 0, rem = 0, awake = 0, syntheticAwake = 0;
         for (Segment segment : segments) {
             long minutes = Math.max(0, (segment.endMs - segment.startMs) / 60_000);
             switch (segment.sleepState) {
@@ -359,23 +389,27 @@ public final class OHealthSleepPlan {
                 case LIGHT -> { light += minutes; sleep += minutes; }
                 case REM -> { rem += minutes; sleep += minutes; }
                 case UNSTAGED -> sleep += minutes;
-                case AWAKE -> awake += minutes;
+                case AWAKE -> {
+                    awake += minutes;
+                    if (segment.syntheticAwake) syntheticAwake += minutes;
+                }
                 default -> throw new IllegalStateException("SLEEP_STATE_UNMAPPED");
             }
         }
-        return new Count(sleep, deep, light, rem, awake);
+        return new Count(sleep, deep, light, rem, awake, syntheticAwake);
     }
 
-    private record Count(long sleep, long deep, long light, long rem, long awake) {}
+    private record Count(long sleep, long deep, long light, long rem, long awake, long syntheticAwake) {}
 
     private static final class Session {
         final int date;
         final ZoneId zone;
-        final long fall, wake, sleep, deep, light, rem, awake;
+        final long fall, wake, sleep, deep, light, rem, awake, syntheticAwake;
+        final int snapshots;
         final List<Segment> segments;
 
         Session(int date, ZoneId zone, long fall, long wake, long sleep, long deep, long light, long rem,
-                long awake, List<Segment> segments) {
+                long awake, int snapshots, long syntheticAwake, List<Segment> segments) {
             this.date = date;
             this.zone = zone;
             this.fall = fall;
@@ -385,6 +419,8 @@ public final class OHealthSleepPlan {
             this.light = light;
             this.rem = rem;
             this.awake = awake;
+            this.snapshots = snapshots;
+            this.syntheticAwake = syntheticAwake;
             this.segments = segments;
         }
     }
