@@ -108,11 +108,26 @@ public final class OHealthHealthImportHook {
         }
         OHealthHealthImportHook hook = new OHealthHealthImportHook(context, contract, sleepWriter, stepWriter, sportWriter);
         hook.observe();
-        hook.keepStoredAccount();
-        hook.installAccountSdk();
-        hook.installTokenFallback();
+        // The guest-mode guard, account SDK bootstrap and token fallback all name 6.9.x classes.
+        if (hook.hostHas("com.heytap.health.base.tourist.TouristHelper")) {
+            hook.keepStoredAccount();
+            hook.installAccountSdk();
+            hook.installTokenFallback();
+        } else {
+            HookRuntime.log("OHEALTH_ACCOUNT_PIPELINE_SKIPPED");
+        }
         installed = hook;
         hook.request();
+    }
+
+    /** A host class that a 6.9.x-only path names. 6.11.7 renamed most of them. */
+    private boolean hostHas(String className) {
+        try {
+            Class.forName(className, false, host.loader);
+            return true;
+        } catch (Throwable missing) {
+            return false;
+        }
     }
 
     private void observe() {
@@ -139,20 +154,16 @@ public final class OHealthHealthImportHook {
                         worker.post(OHealthHealthImportHook.this::publishCard);
                     }
                 });
-        XposedBridge.hookMethod(host.accountGetter, new XC_MethodHook() {
-            @Override protected void afterHookedMethod(MethodHookParam param) {
-                // Keep the account Health just returned. getSsoId walks the account SDK again and can come back as a different guest id. 
-                String account = param.hasThrowable() ? null : (String) param.getResult();
-                if (!usableAccount(account)) return;
-                String previous = observedAccount.getAndSet(account);
-                host.publishedAccount = account;
-                if (!Objects.equals(previous, account)) {
-                    accountEpoch.incrementAndGet();
-                    String seen = account;
-                    worker.post(() -> adoptAccount(seen));
+        if (host.legacyAccount()) {
+            XposedBridge.hookMethod(host.accountGetter, new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam param) {
+                    // Keep the account Health just returned. getSsoId walks the account SDK again and can come back as a different guest id.
+                    publishAccount(param.hasThrowable() ? null : (String) param.getResult());
                 }
-            }
-        });
+            });
+        } else {
+            observeAccountOptions();
+        }
         XposedBridge.hookMethod(host.apiGetter, new XC_MethodHook() {
             @Override protected void afterHookedMethod(MethodHookParam param) {
                 Object api = param.hasThrowable() ? null : param.getResult();
@@ -171,6 +182,58 @@ public final class OHealthHealthImportHook {
             }
         });
     }
+    /** One account learned from the host. Hooks that never see it stay read-only. */
+    private void publishAccount(String account) {
+        if (!usableAccount(account)) return;
+        String previous = observedAccount.getAndSet(account);
+        host.publishedAccount = account;
+        if (!Objects.equals(previous, account)) {
+            accountEpoch.incrementAndGet();
+            String seen = account;
+            worker.post(() -> adoptAccount(seen));
+        }
+    }
+
+    /**
+     * 6.11.7 renamed the account helper, so the account comes from the options Health itself
+     * passes to the data engine. A read, delete or insert carries the signed-in ssoid.
+     */
+    private void observeAccountOptions() {
+        XC_MethodHook watch = new XC_MethodHook() {
+            @Override protected void beforeHookedMethod(MethodHookParam param) {
+                if (param.args.length == 0) return;
+                publishAccount(HostContract.ssoidOf(param.args[0]));
+            }
+        };
+        String api = "com.heytap.databaseengine.api.SportHealthDataAPI";
+        for (Object[] site : new Object[][] {
+                {api, "readSportHealthData", host.readClass},
+                {api, "insertSportHealthData", "com.heytap.databaseengine.option.DataInsertOption"},
+                {api, "deleteSportHealthData", host.deleteClass}}) {
+            try {
+                XposedHelpers.findAndHookMethod((String) site[0], host.loader, (String) site[1], (Class<?>) site[2], watch);
+            } catch (Throwable failure) {
+                HookRuntime.log("OHEALTH_ACCOUNT_WATCH_UNAVAILABLE " + site[1]
+                        + " " + failure.getClass().getSimpleName());
+            }
+        }
+        for (String name : new String[] {"com.heytap.databaseengine.option.DataReadOption",
+                "com.heytap.databaseengine.option.DataDeleteOption"}) {
+            try {
+                XposedHelpers.findAndHookMethod(name, host.loader, "setSsoid", String.class,
+                        new XC_MethodHook() {
+                            @Override protected void afterHookedMethod(MethodHookParam param) {
+                                if (param.args.length == 1) publishAccount((String) param.args[0]);
+                            }
+                        });
+            } catch (Throwable failure) {
+                HookRuntime.log("OHEALTH_ACCOUNT_WATCH_UNAVAILABLE setSsoid "
+                        + failure.getClass().getSimpleName());
+            }
+        }
+        HookRuntime.log("OHEALTH_ACCOUNT_WATCH_INSTALLED");
+    }
+
     /**
      * The setup activity treats a missing login task as cancellation and writes tourist mode
      * on later launches too, even when the system account is still signed in. Put that account
@@ -587,6 +650,14 @@ public final class OHealthHealthImportHook {
     /** The app can already be signed in without calling getSsoId. Read it once per import pass. */
     private void ensureAccount() {
         if (usableAccount(host.account())) return;
+        if (!host.legacyAccount()) {
+            // The option watch fills the account as soon as Health reads or writes anything.
+            if (!"OHEALTH_ACCOUNT_UNAVAILABLE".equals(lastFailure)) {
+                HookRuntime.log("OHEALTH_ACCOUNT_UNAVAILABLE");
+                lastFailure = "OHEALTH_ACCOUNT_UNAVAILABLE";
+            }
+            return;
+        }
         try {
             Object value = host.accountGetter.invoke(host.companion);
             String account = value instanceof String ? (String) value : null;
@@ -843,21 +914,22 @@ public final class OHealthHealthImportHook {
         final Method readAccount, readStart, readEnd, readDevice, readTable, readType;
         final Method insertTable, insertDatas, errorCode, payload, dispose;
         final Constructor<?> readConstructor, insertConstructor, observerConstructor;
-        final Class<?> observerClass, beanClass;
+        final Class<?> observerClass, beanClass, apiClass, readClass, deleteClass;
         final ClassLoader loader;
+        /**
+         * 6.11.7 renamed the internal account/data helper classes. The public data-engine API
+         * ({@code SportHealthDataAPI.getInstance()}, the option and model classes) kept its names,
+         * so the contract goes on without {@code DataRepositoryHelper} and {@code SyncObserver}.
+         */
+        final boolean portable;
         final EnumMap<OHealthHealthModels.Kind, OHealthHealthModels> models =
                 new EnumMap<>(OHealthHealthModels.Kind.class);
 
         HostContract(ClassLoader loader) throws ReflectiveOperationException {
             this.loader = loader;
-            Class<?> owner = Class.forName("com.heytap.device.data.storage.DataRepositoryHelper", false, loader);
-            companion = owner.getField("Companion").get(null);
-            Class<?> companionClass = Class.forName(owner.getName() + "$Companion", false, loader);
-            accountGetter = companionClass.getMethod("getSsoId");
-            if (accountGetter.getReturnType() != String.class) throw new NoSuchMethodException("IMPORT_ACCOUNT_CONTRACT");
-            apiGetter = companionClass.getMethod("getDbApi");
-            Class<?> apiClass = Class.forName("com.heytap.databaseengine.api.ISportHealthDataAPI", false, loader);
-            Class<?> readClass = Class.forName("com.heytap.databaseengine.option.DataReadOption", false, loader);
+            apiClass = Class.forName("com.heytap.databaseengine.api.ISportHealthDataAPI", false, loader);
+            readClass = Class.forName("com.heytap.databaseengine.option.DataReadOption", false, loader);
+            deleteClass = Class.forName("com.heytap.databaseengine.option.DataDeleteOption", false, loader);
             Class<?> insertClass = Class.forName("com.heytap.databaseengine.option.DataInsertOption", false, loader);
             readConstructor = readClass.getConstructor();
             insertConstructor = insertClass.getConstructor();
@@ -879,16 +951,51 @@ public final class OHealthHealthImportHook {
             }
             subscribe = observableClass.getMethod("subscribe", observerClass);
             dispose = Class.forName("io.reactivex.rxjava3.disposables.Disposable", false, loader).getMethod("dispose");
-            Class<?> syncClass = Class.forName("com.heytap.device.data.storage.SyncObserver", false, loader);
-            if (!observerClass.isAssignableFrom(syncClass)) throw new NoSuchMethodException("IMPORT_OBSERVER_CONTRACT");
-            observerConstructor = syncClass.getConstructor();
-            observerResult = syncClass.getMethod("result");
-            observerDispose = syncClass.getMethod("dispose");
-            if (observerResult.getReturnType() != boolean.class) throw new NoSuchMethodException("IMPORT_RESULT_CONTRACT");
             beanClass = Class.forName("com.heytap.databaseengine.model.CommonBackBean", false, loader);
             errorCode = beanClass.getMethod("getErrorCode");
             payload = beanClass.getMethod("getObj");
             if (errorCode.getReturnType() != int.class) throw new NoSuchMethodException("IMPORT_BEAN_CONTRACT");
+
+            Object owner = null;
+            Method account = null, api = null;
+            Constructor<?> observerNew = null;
+            Method result = null, release = null;
+            boolean legacy = false;
+            try {
+                Class<?> helper = Class.forName("com.heytap.device.data.storage.DataRepositoryHelper", false, loader);
+                owner = helper.getField("Companion").get(null);
+                Class<?> companionClass = Class.forName(helper.getName() + "$Companion", false, loader);
+                account = companionClass.getMethod("getSsoId");
+                if (account.getReturnType() != String.class) throw new NoSuchMethodException("IMPORT_ACCOUNT_CONTRACT");
+                api = companionClass.getMethod("getDbApi");
+                Class<?> syncClass = Class.forName("com.heytap.device.data.storage.SyncObserver", false, loader);
+                if (!observerClass.isAssignableFrom(syncClass)) throw new NoSuchMethodException("IMPORT_OBSERVER_CONTRACT");
+                observerNew = syncClass.getConstructor();
+                result = syncClass.getMethod("result");
+                release = syncClass.getMethod("dispose");
+                if (result.getReturnType() != boolean.class) throw new NoSuchMethodException("IMPORT_RESULT_CONTRACT");
+                legacy = true;
+            } catch (ReflectiveOperationException | LinkageError renamed) {
+                // Keep the names that survived, and confirm the replacement before any write.
+                api = Class.forName("com.heytap.databaseengine.api.SportHealthDataAPI", false, loader)
+                        .getMethod("getInstance");
+                if (!apiClass.isAssignableFrom(api.getReturnType())) {
+                    throw new NoSuchMethodException("IMPORT_API_CONTRACT");
+                }
+                observerNew = null;
+                result = null;
+                release = null;
+                account = null;
+                owner = null;
+                HookRuntime.log("OHEALTH_IMPORT_PORTABLE_CONTRACT");
+            }
+            companion = owner;
+            accountGetter = account;
+            apiGetter = api;
+            observerConstructor = observerNew;
+            observerResult = result;
+            observerDispose = release;
+            portable = !legacy;
             for (OHealthHealthModels.Kind kind : OHealthHealthModels.Kind.values()) {
                 models.put(kind, new OHealthHealthModels(kind, loader));
             }
@@ -897,6 +1004,95 @@ public final class OHealthHealthImportHook {
         volatile String publishedAccount;
         String account() { return publishedAccount; }
         Object api() throws ReflectiveOperationException { return apiGetter.invoke(companion); }
+
+        /** The legacy helper supplies the account; 6.11.7 has to learn it from the option objects. */
+        boolean legacyAccount() { return accountGetter != null; }
+
+        /** The account Health itself uses, read from a read/delete option or an inserted row. */
+        static String ssoidOf(Object option) {
+            if (option == null) return null;
+            try {
+                Object value = option.getClass().getMethod("getSsoid").invoke(option);
+                if (value instanceof String ssoid && !ssoid.isBlank()) return ssoid;
+            } catch (ReflectiveOperationException | RuntimeException ignored) { }
+            try {
+                Object datas = option.getClass().getMethod("getDatas").invoke(option);
+                if (datas instanceof List<?> rows) {
+                    for (Object row : rows) {
+                        if (row == null) continue;
+                        Object value = row.getClass().getMethod("getSsoid").invoke(row);
+                        if (value instanceof String ssoid && !ssoid.isBlank()) return ssoid;
+                    }
+                }
+            } catch (ReflectiveOperationException | RuntimeException ignored) { }
+            return null;
+        }
+
+        /**
+         * One insert, delete or cloud-sync confirmation. The legacy class blocks inside
+         * {@code result()}; the proxy observer waits on its own latch.
+         */
+        final class Exchange {
+            private final Object target;
+            private final CountDownLatch done;
+            private final AtomicReference<Object> subscription;
+            private final AtomicBoolean failed;
+
+            Exchange() throws ReflectiveOperationException {
+                if (!portable) {
+                    target = observerConstructor.newInstance();
+                    done = null;
+                    subscription = null;
+                    failed = null;
+                    return;
+                }
+                done = new CountDownLatch(1);
+                subscription = new AtomicReference<>();
+                failed = new AtomicBoolean();
+                target = Proxy.newProxyInstance(loader, new Class<?>[]{observerClass}, (proxy, method, args) -> {
+                    switch (method.getName()) {
+                        case "onSubscribe" -> subscription.set(args[0]);
+                        case "onNext" -> done.countDown();
+                        case "onError" -> { failed.set(true); done.countDown(); }
+                        case "onComplete" -> done.countDown();
+                        case "equals" -> { return proxy == args[0]; }
+                        case "hashCode" -> { return System.identityHashCode(proxy); }
+                        case "toString" -> { return "OplusBandImportExchange"; }
+                        default -> throw new UnsupportedOperationException("IMPORT_EXCHANGE_METHOD");
+                    }
+                    return null;
+                });
+            }
+
+            Object target() { return target; }
+
+            boolean await() {
+                if (!portable) {
+                    try {
+                        return Boolean.TRUE.equals(observerResult.invoke(target));
+                    } catch (ReflectiveOperationException failure) {
+                        throw new IllegalStateException("IMPORT_EXCHANGE_FAILED", failure);
+                    }
+                }
+                try {
+                    return done.await(60, TimeUnit.SECONDS) && !failed.get();
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    return false;
+                }
+            }
+
+            void dispose() {
+                try {
+                    if (!portable) {
+                        if (observerDispose != null) observerDispose.invoke(target);
+                        return;
+                    }
+                    Object handle = subscription.get();
+                    if (handle != null) dispose.invoke(handle);
+                } catch (ReflectiveOperationException | RuntimeException ignored) { }
+            }
+        }
 
         Object insertOption(int table, List<Object> rows) throws ReflectiveOperationException {
             if (rows.isEmpty()) throw new IllegalArgumentException("IMPORT_EMPTY_INSERT");
@@ -907,15 +1103,15 @@ public final class OHealthHealthImportHook {
         }
 
         void insert(Object api, Object option) throws ReflectiveOperationException {
-            Object observer = observerConstructor.newInstance();
+            Exchange exchange = new Exchange();
             try {
-                subscribe.invoke(insert.invoke(api, option), observer);
-                if (!Boolean.TRUE.equals(observerResult.invoke(observer))) {
+                subscribe.invoke(insert.invoke(api, option), exchange.target());
+                if (!exchange.await()) {
                     throw new IllegalStateException("IMPORT_INSERT_UNCONFIRMED");
                 }
             } finally {
                 // SyncObserver normally auto-disposes onNext; also release a timed-out subscription.
-                try { observerDispose.invoke(observer); } catch (ReflectiveOperationException ignored) { }
+                exchange.dispose();
             }
         }
 
@@ -942,13 +1138,14 @@ public final class OHealthHealthImportHook {
             type.getMethod("setStartTime", long.class).invoke(option, Math.max(0, start));
             // end is exclusive. An inclusive host filter would take the next real sample.
             type.getMethod("setEndTime", long.class).invoke(option, end - 1);
-            Object observer = observerConstructor.newInstance();
+            Exchange exchange = new Exchange();
             boolean reportedSuccess = false;
             try {
-                subscribe.invoke(api.getClass().getMethod("deleteSportHealthData", type).invoke(api, option), observer);
-                reportedSuccess = Boolean.TRUE.equals(observerResult.invoke(observer));
+                subscribe.invoke(api.getClass().getMethod("deleteSportHealthData", type).invoke(api, option),
+                        exchange.target());
+                reportedSuccess = exchange.await();
             } finally {
-                try { observerDispose.invoke(observer); } catch (ReflectiveOperationException ignored) { }
+                exchange.dispose();
             }
             // Table 1001 store.delete returns the deleted row count on this callback, and
             // SyncObserver treats every non-zero value as failure. Wait above, then confirm
@@ -981,13 +1178,14 @@ public final class OHealthHealthImportHook {
             type.getMethod("setSportMode", int.class).invoke(option, mode);
             type.getMethod("setStartTime", long.class).invoke(option, start);
             type.getMethod("setEndTime", long.class).invoke(option, end);
-            Object observer = observerConstructor.newInstance();
+            Exchange exchange = new Exchange();
             boolean reportedSuccess = false;
             try {
-                subscribe.invoke(api.getClass().getMethod("deleteSportHealthData", type).invoke(api, option), observer);
-                reportedSuccess = Boolean.TRUE.equals(observerResult.invoke(observer));
+                subscribe.invoke(api.getClass().getMethod("deleteSportHealthData", type).invoke(api, option),
+                        exchange.target());
+                reportedSuccess = exchange.await();
             } finally {
-                try { observerDispose.invoke(observer); } catch (ReflectiveOperationException ignored) { }
+                exchange.dispose();
             }
             if (!reportedSuccess) throw new IllegalStateException("HEALTH_DELETE_UNCONFIRMED");
         }
@@ -1009,11 +1207,11 @@ public final class OHealthHealthImportHook {
                 type.getMethod("setSyncDataType", int.class).invoke(option, request[0]);
                 type.getMethod("setSyncAction", int.class).invoke(option, request[1]);
                 type.getMethod("setSyncScope", int.class).invoke(option, 1);
-                Object observer = observerConstructor.newInstance();
+                Exchange exchange = new Exchange();
                 try {
-                    subscribe.invoke(api.getClass().getMethod("synCloud", type).invoke(api, option), observer);
+                    subscribe.invoke(api.getClass().getMethod("synCloud", type).invoke(api, option), exchange.target());
                 } finally {
-                    try { observerDispose.invoke(observer); } catch (ReflectiveOperationException ignored) { }
+                    exchange.dispose();
                 }
             } catch (Throwable failure) {
                 HookRuntime.log("OHEALTH_CLOUD_SYNC_FAILED table=" + table

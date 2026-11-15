@@ -41,6 +41,39 @@ public final class BandWeatherEncoderTest {
         assertFalse(hour.hasSunriseSunset());
     }
 
+    @Test public void sppWholePacketLimitsIncludeTransportOverhead() {
+        assertTrue(SppDiagnosticClient.commandFitsPayloadLimit(1, 2048, 2048));
+        assertFalse(SppDiagnosticClient.commandFitsPayloadLimit(1, 2049, 2048));
+        assertTrue(SppDiagnosticClient.commandFitsPayloadLimit(0, 510, 512));
+        assertFalse(SppDiagnosticClient.commandFitsPayloadLimit(0, 511, 512));
+        assertFalse(SppDiagnosticClient.commandFitsPayloadLimit(0, Integer.MAX_VALUE, 512));
+    }
+
+    @Test public void fullForecastsRoundTripThroughEncryptedBleChunks() throws Exception {
+        var commands = BandWeatherEncoder.encode(sample("c", "Asia/Shanghai", 56, 21));
+        assertEquals(7, entries(commands, 1).getEntryCount());
+        assertEquals(23, entries(commands, 2).getEntryCount());
+        assertTrue(frame(commands, 1).getSerializedSize() > 512);
+        byte[] key = new byte[16];
+        byte[] nonce = new byte[12];
+        for (var command : commands) {
+            byte[] cipher = XiaomiSessionCrypto.ccmEncrypt(key, nonce, command.toByteArray());
+            assertTrue(SppDiagnosticClient.commandFitsPayloadLimit(2, cipher.length, 512));
+            var frames = BleV1Codec.encodeOutgoing(cipher, 244, true, 1);
+            var reassembler = new BleV1Codec.Reassembler();
+            byte[] assembled = null;
+            for (var part : frames) {
+                assertTrue(part.length <= 244);
+                byte[] result = reassembler.accept(part);
+                if (result != null) assembled = result;
+            }
+            int prefix = frames.size() == 1 ? 3 : 2;
+            byte[] recovered = java.util.Arrays.copyOfRange(assembled, prefix, assembled.length);
+            assertEquals(command, XiaomiProto.Command.parseFrom(
+                    XiaomiSessionCrypto.ccmDecrypt(key, nonce, recovered)));
+        }
+    }
+
     @Test public void fahrenheitConvertsExactlyOnceAcrossCurrentAndForecasts() {
         var frames = BandWeatherEncoder.encode(sample("f", "+05:30", 56, 69.8));
         assertEquals(21, frame(frames, 0).getWeather().getCurrent().getTemperature().getValue());

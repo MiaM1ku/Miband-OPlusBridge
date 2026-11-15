@@ -377,7 +377,7 @@ public final class MainActivity extends AppCompatActivity {
                 Uri uri = androidx.core.content.FileProvider.getUriForFile(this,
                         "io.github.miam1ku.mibandoplusbridge.debuglog", file);
                 Intent send = new Intent(Intent.ACTION_SEND);
-                send.setType("text/plain");
+                send.setType("application/zip");
                 send.putExtra(Intent.EXTRA_STREAM, uri);
                 send.putExtra(Intent.EXTRA_SUBJECT, "小米手环桥接调试日志");
                 send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);

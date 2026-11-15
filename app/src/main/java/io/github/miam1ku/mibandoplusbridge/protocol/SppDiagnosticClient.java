@@ -650,6 +650,11 @@ public final class SppDiagnosticClient implements AutoCloseable {
         }
     }
 
+    /** BLE validates MTU fragments in its codec; SPP limits complete packet payloads. */
+    static boolean commandFitsPayloadLimit(int framing, int payloadLength, int peerPayloadLimit) {
+        return framing == 2 || (long) payloadLength + (framing == 0 ? 2 : 0) <= peerPayloadLimit;
+    }
+
     private void writeCommand(int sequence, XiaomiProto.Command command) throws Exception {
         byte[] chunk;
         synchronized (iconChunks) { chunk = iconChunks.remove(command); }
@@ -673,7 +678,12 @@ public final class SppDiagnosticClient implements AutoCloseable {
                     counter = takeV1Counter();
                     bytes = session.encryptV1(bytes, counter);
                 }
-                if (bytes.length > peerPayloadLimit) throw new Failure("COMMAND_EXCEEDS_NEGOTIATED_SIZE");
+                // BLE V1 carries complete commands through MTU-sized chunks. The 512-byte
+                // notification budget applies to notification construction; the codec validates
+                // the chunk count for larger commands such as daily and hourly forecasts.
+                if (!commandFitsPayloadLimit(framing, bytes.length, peerPayloadLimit)) {
+                    throw new Failure("COMMAND_EXCEEDS_NEGOTIATED_SIZE");
+                }
                 SessionLog.line(context, "tx ble type=" + command.getType() + " subtype=" + command.getSubtype()
                         + " auth=" + authenticated + " counter=" + counter
                         + " plain=" + plainLength + " cipher=" + bytes.length);
@@ -690,7 +700,9 @@ public final class SppDiagnosticClient implements AutoCloseable {
                     counter = takeV1Counter();
                     bytes = SppV1Codec.sealEncrypted(counter, session.encryptV1(bytes, counter));
                 }
-                if (bytes.length > peerPayloadLimit) throw new Failure("COMMAND_EXCEEDS_NEGOTIATED_SIZE");
+                if (!commandFitsPayloadLimit(framing, bytes.length, peerPayloadLimit)) {
+                    throw new Failure("COMMAND_EXCEEDS_NEGOTIATED_SIZE");
+                }
                 SessionLog.line(context, "tx spp1 type=" + command.getType() + " subtype=" + command.getSubtype()
                         + " dataType=" + dataType + " counter=" + counter
                         + " plain=" + plainLength + " wire=" + bytes.length);
@@ -701,7 +713,9 @@ public final class SppDiagnosticClient implements AutoCloseable {
                 return;
             }
             if (authenticated) bytes = session.encryptV2(bytes);
-            if (bytes.length + 2 > peerPayloadLimit) throw new Failure("COMMAND_EXCEEDS_NEGOTIATED_SIZE");
+            if (!commandFitsPayloadLimit(framing, bytes.length, peerPayloadLimit)) {
+                throw new Failure("COMMAND_EXCEEDS_NEGOTIATED_SIZE");
+            }
             SessionLog.line(context, "tx spp2 type=" + command.getType() + " subtype=" + command.getSubtype()
                     + " auth=" + authenticated + " plain=" + plainLength + " wire=" + bytes.length);
             synchronized (writeLock) {

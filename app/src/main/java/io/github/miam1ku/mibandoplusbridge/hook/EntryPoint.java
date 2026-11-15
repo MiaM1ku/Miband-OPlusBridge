@@ -214,84 +214,90 @@ public final class EntryPoint extends XposedModule {
         HookRuntime.log(line);
     }
 
+    /** Hook status that survives into the exported debug bundle, not only the framework log. */
+    private static void probe(Context context, String line) {
+        HookRuntime.log(line);
+        io.github.miam1ku.mibandoplusbridge.hook.OHealthDeviceHook.traceLine(context, line);
+    }
+
     private static void installHealth(Context context, ClassLoader loader) {
         if (context == null || !healthInstalled.compareAndSet(false, true)) return;
-        probe("OHEALTH_HOOKS_BEGIN");
+        probe(context, "OHEALTH_HOOKS_BEGIN");
         try {
             OHealthWeatherHook.install(context, loader);
-            probe("OHEALTH_WEATHER_HOOK_INSTALLED");
+            probe(context, "OHEALTH_WEATHER_HOOK_INSTALLED");
         } catch (Throwable incompatible) {
-            probe("HOST_VERSION_UNSUPPORTED_OHEALTH");
+            probe(context, "HOST_VERSION_UNSUPPORTED_OHEALTH");
         }
         try {
             OHealthDeviceHook.install(context, loader);
-            probe("OHEALTH_DEVICE_HOOK_INSTALLED");
+            probe(context, "OHEALTH_DEVICE_HOOK_INSTALLED");
         } catch (Throwable incompatible) {
-            probe("OHEALTH_DEVICE_HOOK_UNAVAILABLE");
+            probe(context, "OHEALTH_DEVICE_HOOK_UNAVAILABLE");
         }
         try {
             OHealthFindPhoneHook.install(context, loader);
-            probe("OHEALTH_FIND_PHONE_HOOK_INSTALLED");
+            probe(context, "OHEALTH_FIND_PHONE_HOOK_INSTALLED");
         } catch (Throwable incompatible) {
-            probe("OHEALTH_FIND_PHONE_HOOK_UNAVAILABLE");
+            probe(context, "OHEALTH_FIND_PHONE_HOOK_UNAVAILABLE");
         }
         try {
             OHealthMusicHook.install(context, loader);
-            probe("OHEALTH_MUSIC_HOOK_INSTALLED");
+            probe(context, "OHEALTH_MUSIC_HOOK_INSTALLED");
         } catch (Throwable incompatible) {
-            probe("OHEALTH_MUSIC_HOOK_UNAVAILABLE");
+            probe(context, "OHEALTH_MUSIC_HOOK_UNAVAILABLE");
         }
         String process = Application.getProcessName();
         if (process != null && process.endsWith(":SportDaemonService")) {
             try {
                 installSleepRowDelete(context, loader);
                 installSleepStatReplace(loader);
-                probe("OHEALTH_SLEEP_DELETE_HOOKED");
+                probe(context, "OHEALTH_SLEEP_DELETE_HOOKED");
             } catch (Throwable incompatible) {
-                probe("OHEALTH_SLEEP_DELETE_HOOK_UNAVAILABLE "
+                probe(context, "OHEALTH_SLEEP_DELETE_HOOK_UNAVAILABLE "
                         + incompatible.getClass().getSimpleName());
             }
         }
         try {
             OHealthStepAggregateHook.install(context, loader);
         } catch (Throwable incompatible) {
-            probe("OHEALTH_STEP_AUDIT_HOOK_UNAVAILABLE " + incompatible.getClass().getSimpleName());
+            probe(context, "OHEALTH_STEP_AUDIT_HOOK_UNAVAILABLE " + incompatible.getClass().getSimpleName());
         }
         try {
             OHealthHealthImportHook.install(context, loader);
-            probe("OHEALTH_IMPORT_HOOK_INSTALLED");
+            probe(context, "OHEALTH_IMPORT_HOOK_INSTALLED");
         } catch (Throwable incompatible) {
-            probe("OHEALTH_IMPORT_HOOK_UNAVAILABLE");
+            probe(context, "OHEALTH_IMPORT_HOOK_UNAVAILABLE");
         }
         try {
             OHealthLockCardHook.install(context, loader);
-            probe("OHEALTH_LOCK_CARD_HOOK_INSTALLED");
+            probe(context, "OHEALTH_LOCK_CARD_HOOK_INSTALLED");
         } catch (Throwable incompatible) {
-            probe("OHEALTH_LOCK_CARD_HOOK_UNAVAILABLE");
+            probe(context, "OHEALTH_LOCK_CARD_HOOK_UNAVAILABLE");
         }
         try {
             OHealthSleepHook.install(context, loader);
-            probe("OHEALTH_SLEEP_HOOK_INSTALLED");
+            probe(context, "OHEALTH_SLEEP_HOOK_INSTALLED");
         } catch (Throwable incompatible) {
-            probe("OHEALTH_SLEEP_HOOK_UNAVAILABLE");
+            probe(context, "OHEALTH_SLEEP_HOOK_UNAVAILABLE");
         }
         try {
             OHealthHomeMetricHook.install(context, loader);
-            probe("OHEALTH_HOME_METRIC_HOOK_INSTALLED");
+            probe(context, "OHEALTH_HOME_METRIC_HOOK_INSTALLED");
         } catch (Throwable incompatible) {
-            probe("OHEALTH_HOME_METRIC_HOOK_UNAVAILABLE");
+            probe(context, "OHEALTH_HOME_METRIC_HOOK_UNAVAILABLE");
         }
         try {
             OHealthNotificationAccessHook.install(context, loader);
-            probe("OHEALTH_NOTIFICATION_ACCESS_HOOK_INSTALLED");
+            probe(context, "OHEALTH_NOTIFICATION_ACCESS_HOOK_INSTALLED");
         } catch (Throwable incompatible) {
-            probe("OHEALTH_NOTIFICATION_ACCESS_HOOK_UNAVAILABLE");
+            probe(context, "OHEALTH_NOTIFICATION_ACCESS_HOOK_UNAVAILABLE");
         }
         try {
             OHealthDndHook.install(context);
-            probe("OHEALTH_DND_HOOK_INSTALLED");
+            probe(context, "OHEALTH_DND_HOOK_INSTALLED");
         } catch (Throwable incompatible) {
-            probe("OHEALTH_DND_HOOK_UNAVAILABLE");
+            probe(context, "OHEALTH_DND_HOOK_UNAVAILABLE");
         }
     }
 
@@ -300,8 +306,7 @@ public final class EntryPoint extends XposedModule {
      * so drop rows by start time. The caller's end is inclusive.
      */
     private static void installSleepRowDelete(Context context, ClassLoader loader) {
-        XposedHelpers.findAndHookMethod("com.heytap.databaseengineservice.store.SportDataStore", loader,
-                "delete", "com.heytap.databaseengine.option.DataDeleteOption", new XC_MethodHook() {
+        XC_MethodHook drop = new XC_MethodHook() {
                     @Override protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                         Object option = param.args[0];
                         if (option == null) return;
@@ -315,7 +320,7 @@ public final class EntryPoint extends XposedModule {
                                 || end < start) return;
                         Class<?> dbClass = Class.forName(
                                 "com.heytap.databaseengineservice.db.AppDatabase", false, loader);
-                        Object database = dbClass.getMethod("getInstance", Context.class).invoke(null, context);
+                        Object database = appDatabase(dbClass, context);
                         Object helper = database.getClass().getMethod("getOpenHelper").invoke(database);
                         Object sqlite = helper.getClass().getMethod("getWritableDatabase").invoke(helper);
                         sqlite.getClass().getMethod("execSQL", String.class, Object[].class).invoke(sqlite,
@@ -326,7 +331,31 @@ public final class EntryPoint extends XposedModule {
                                 });
                         param.setResult(0);
                     }
-                });
+                };
+        // 6.11.7 moved the shared store implementation to store.j and renamed delete to a().
+        if (hookSleepDelete(loader, "com.heytap.databaseengineservice.store.j", "a", drop)) return;
+        hookSleepDelete(loader, "com.heytap.databaseengineservice.store.SportDataStore", "delete", drop);
+    }
+
+    private static boolean hookSleepDelete(ClassLoader loader, String owner, String method, XC_MethodHook hook) {
+        try {
+            XposedHelpers.findAndHookMethod(owner, loader, method,
+                    "com.heytap.databaseengine.option.DataDeleteOption", hook);
+            HookRuntime.log("OHEALTH_SLEEP_DELETE_ANCHOR " + owner + "." + method);
+            return true;
+        } catch (Throwable missing) {
+            HookRuntime.log("OHEALTH_SLEEP_DELETE_ANCHOR_UNAVAILABLE " + owner + "." + method);
+            return false;
+        }
+    }
+
+    /** 6.11.7 renamed {@code AppDatabase.getInstance} to {@code G}. */
+    private static Object appDatabase(Class<?> dbClass, Context context) throws Exception {
+        try {
+            return dbClass.getMethod("getInstance", Context.class).invoke(null, context);
+        } catch (NoSuchMethodException renamed) {
+            return dbClass.getMethod("G", Context.class).invoke(null, context);
+        }
     }
 
     /**

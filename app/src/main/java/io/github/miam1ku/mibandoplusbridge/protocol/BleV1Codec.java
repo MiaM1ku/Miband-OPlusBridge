@@ -46,6 +46,10 @@ public final class BleV1Codec {
             throw new IllegalArgumentException("BLE V1 counter out of range");
         }
         int chunkPayload = maxWrite - 2;
+        long bodyLength = (long) payload.length + (encrypted ? 2 : 0);
+        if ((bodyLength + chunkPayload - 1) / chunkPayload > 0xffff) {
+            throw new IllegalArgumentException("BLE payload exceeds chunk count");
+        }
         List<byte[]> frames = new ArrayList<>();
         if (encrypted && 6 + payload.length <= maxWrite) {
             byte[] single = new byte[6 + payload.length];

@@ -60,6 +60,37 @@ public final class BleV1CodecTest {
         assertEquals(0, result[1]);
     }
 
+    @Test public void payloadAbove512BytesUsesMtuSizedChunks() {
+        for (int budget : new int[]{20, 244}) {
+            byte[] payload = new byte[1200];
+            for (int i = 0; i < payload.length; i++) payload[i] = (byte) i;
+            var frames = BleV1Codec.encodeOutgoing(payload, budget, true, 0x1234);
+            int expectedChunks = (payload.length + 2 + budget - 3) / (budget - 2);
+            assertEquals(expectedChunks + 1, frames.size());
+            assertEquals(expectedChunks, (frames.get(0)[4] & 255) | ((frames.get(0)[5] & 255) << 8));
+            var reassembler = new BleV1Codec.Reassembler();
+            byte[] result = null;
+            for (byte[] frame : frames) {
+                assertTrue(frame.length <= budget);
+                byte[] part = reassembler.accept(frame);
+                if (part != null) result = part;
+            }
+            byte[] expected = new byte[payload.length + 2];
+            expected[0] = 0x34;
+            expected[1] = 0x12;
+            System.arraycopy(payload, 0, expected, 2, payload.length);
+            assertArrayEquals(expected, result);
+        }
+    }
+
+    @Test public void chunkCountOverflowIsRejectedBeforeEncoding() {
+        int capacity = 6 * 0xffff;
+        org.junit.Assert.assertThrows(IllegalArgumentException.class,
+                () -> BleV1Codec.encodeOutgoing(new byte[capacity + 1], 8, false));
+        org.junit.Assert.assertThrows(IllegalArgumentException.class,
+                () -> BleV1Codec.encodeOutgoing(new byte[capacity - 1], 8, true, 1));
+    }
+
     @Test public void payloadAckIsIgnored() {
         BleV1Codec.Reassembler reassembler = new BleV1Codec.Reassembler();
         assertNull(reassembler.accept(BleV1Codec.PAYLOAD_ACK));

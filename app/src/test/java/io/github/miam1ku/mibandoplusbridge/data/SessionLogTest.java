@@ -35,6 +35,35 @@ public final class SessionLogTest {
         assertEquals("gone mac", SessionLog.redact("gone aa-bb-cc-dd-ee-ff"));
     }
 
+    @Test public void captureBundleKeepsNewestFilesWithinBothLimits() throws Exception {
+        java.nio.file.Path dir = java.nio.file.Files.createTempDirectory("captures");
+        try {
+            java.io.File older = write(dir, "capture-old.jsonl", 40, 1_000L);
+            java.io.File newer = write(dir, "capture-new.jsonl", 40, 3_000L);
+            java.io.File huge = write(dir, "capture-huge.jsonl", 400, 2_000L);
+            java.io.File empty = write(dir, "capture-empty.jsonl", 0, 4_000L);
+            // Newest first; a zero-byte capture and one that would overflow the budget are skipped.
+            assertEquals(java.util.List.of(newer, older),
+                    SessionLog.pickCaptures(new java.io.File[]{older, newer, huge, empty}, 3, 100));
+            assertEquals(java.util.List.of(newer),
+                    SessionLog.pickCaptures(new java.io.File[]{older, newer, huge, empty}, 3, 50));
+            assertEquals(2, SessionLog.pickCaptures(new java.io.File[]{older, newer, huge}, 2, 1_000).size());
+            assertTrue(SessionLog.pickCaptures(new java.io.File[]{huge}, 3, 100).isEmpty());
+            assertTrue(SessionLog.pickCaptures(null, 3, 100).isEmpty());
+        } finally {
+            for (java.io.File file : dir.toFile().listFiles()) file.delete();
+            java.nio.file.Files.deleteIfExists(dir);
+        }
+    }
+
+    private static java.io.File write(java.nio.file.Path dir, String name, int bytes, long modified)
+            throws java.io.IOException {
+        java.io.File file = dir.resolve(name).toFile();
+        java.nio.file.Files.write(file.toPath(), new byte[bytes]);
+        assertTrue(file.setLastModified(modified));
+        return file;
+    }
+
     @Test public void fewerThanThreeStartsAreLeftIntact() {
         String log = "--- module start 1 ---\nonly\n";
         assertEquals(log, SessionLog.keepLastStarts(log, 3));
