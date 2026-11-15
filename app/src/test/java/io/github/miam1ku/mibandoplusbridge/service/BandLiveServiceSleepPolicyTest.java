@@ -73,7 +73,8 @@ public final class BandLiveServiceSleepPolicyTest {
         assertTrue(BandLiveService.nightStillSuppressed(8, false));
         assertFalse(BandLiveService.nightStillSuppressed(8, true));
         assertTrue(BandLiveService.nightStillSuppressed(11, false));
-        assertFalse(BandLiveService.nightStillSuppressed(12, false));
+        assertTrue(BandLiveService.nightStillSuppressed(13, false));
+        assertFalse(BandLiveService.nightStillSuppressed(14, false));
         assertFalse(BandLiveService.nightStillSuppressed(15, false));
     }
 

@@ -50,7 +50,7 @@ public final class BandLiveService extends Service {
     private static final long NIGHT_POLL_MINUTES = 120;
     private static final int NIGHT_START_HOUR = 22;
     private static final int NIGHT_END_HOUR = 8;
-    private static final int NIGHT_HARD_END_HOUR = 12;
+    private static final int NIGHT_HARD_END_HOUR = 14;
     private static final long QUIET_STEPS_MINUTES = 60;
     private static final long QUIET_SAMPLE_MAX_AGE_MINUTES = 90;
     private static final long QUIET_WAKE_STEPS = 30;
