@@ -175,7 +175,7 @@ public final class BandLiveService extends Service {
     private long quietSampleAtMs;
     private volatile boolean quietSignalStale;
     private volatile boolean nightQuietResult;
-    private boolean wakeEvidenceObserved;
+    private final NightWakeEvidence wakeEvidence = new NightWakeEvidence();
     private long wakeEvidenceCheckedAtMs;
     private volatile boolean retryNow;
     /** SPP needs the system bond. This keeps the re-pair budget for one bond loss. */
@@ -882,13 +882,9 @@ public final class BandLiveService extends Service {
                         writeStatus("CONNECTED");
                         show("手环已连接");
                     }, queue -> {
-                        // Before the reader accepts a band weather request. A late history
-                        // callback from the previous link carries an older epoch and does not fire.
-                        int weatherEpoch = weatherSync.deferForecast();
                         coordinator.execute(() -> {
                         if (client != active || stopRequested) {
                             queue.close(new IllegalStateException("SESSION_CLOSED"));
-                            weatherSync.releaseForecast(weatherEpoch);
                             return;
                         }
                         commands = queue;
@@ -897,17 +893,19 @@ public final class BandLiveService extends Service {
                         logFeatures();
                         io.github.miam1ku.mibandoplusbridge.notify.BandNotificationListener.connectionChanged();
                         io.github.miam1ku.mibandoplusbridge.notify.NativeMusic.requestRefresh(this);
-                        historySync = new LiveHistorySync(queue, coordinator, () -> {
+                        int[] weatherEpoch = {0};
+                        historySync = new LiveHistorySync(queue, coordinator,
+                                () -> weatherEpoch[0] = weatherSync.deferForecast(), () -> {
                             try {
                                 repository.recordSyncCompleted();
                                 clearStoragePause();
                             } catch (RuntimeException unavailable) {
                                 healthCollectionStatus("HEALTH_STORAGE_UNAVAILABLE");
                             }
-                            weatherSync.releaseForecast(weatherEpoch);
+                            weatherSync.releaseForecast(weatherEpoch[0]);
                         }, reason -> {
                             healthCollectionStatus(reason);
-                            weatherSync.releaseForecast(weatherEpoch);
+                            weatherSync.releaseForecast(weatherEpoch[0]);
                         }, healthReplay::hasCapacity);
                         long now = System.nanoTime();
                         sessionStartAtMs = System.currentTimeMillis();
@@ -924,7 +922,7 @@ public final class BandLiveService extends Service {
                         quietSignalStale = false;
                         nightQuietResult = false;
                         nightHadQuiet = false;
-                        wakeEvidenceObserved = false;
+                        wakeEvidence.reset();
                         wakeEvidenceCheckedAtMs = 0;
                         boolean night = isNightWindow();
                         boolean restartCooldown = night && lastNightFlushAtMs > 0
@@ -1307,6 +1305,7 @@ public final class BandLiveService extends Service {
         }
         boolean newSample = stepsAt != quietSampleAtMs;
         boolean wasQuiet = nightQuietResult;
+        boolean counterReset = quietCounterReset(quietStepsValue, quietSampleAtMs, steps, stepsAt);
         quietSampleAtMs = stepsAt;
         quietSignalStale = false;
         if (quietStepsValue == Long.MIN_VALUE) {
@@ -1314,13 +1313,18 @@ public final class BandLiveService extends Service {
             quietBaselineSteps = steps;
             quietSinceMs = nowMs;
             nightQuietResult = false;
+        } else if (counterReset) {
+            // A daily reset is not movement. Preserve the established quiet period.
+            quietStepsValue = steps;
+            quietBaselineSteps = steps;
+            nightQuietResult = quietElapsed(nowMs, quietSinceMs);
         } else if (steps != quietStepsValue) {
             if (quietStepNoise(steps, quietBaselineSteps)) {
                 // A handful of pedometer ticks do not end sleep; keep the original start.
                 quietStepsValue = steps;
                 nightQuietResult = quietElapsed(nowMs, quietSinceMs);
             } else {
-                wakeEvidenceObserved = true;
+                wakeEvidence.observe();
                 quietStepsValue = steps;
                 quietBaselineSteps = steps;
                 quietSinceMs = nowMs;
@@ -1352,6 +1356,15 @@ public final class BandLiveService extends Service {
                 || nowMs - stepsAtMs > TimeUnit.MINUTES.toMillis(QUIET_SAMPLE_MAX_AGE_MINUTES);
     }
 
+    static boolean quietCounterReset(long previousSteps, long previousAtMs, long steps, long stepsAtMs) {
+        if (previousSteps == Long.MIN_VALUE) return false;
+        if (steps < previousSteps) return true;
+        if (previousAtMs <= 0 || stepsAtMs <= previousAtMs) return false;
+        var zone = java.time.ZoneId.systemDefault();
+        return !java.time.Instant.ofEpochMilli(previousAtMs).atZone(zone).toLocalDate()
+                .equals(java.time.Instant.ofEpochMilli(stepsAtMs).atZone(zone).toLocalDate());
+    }
+
     static boolean quietStepNoise(long steps, long baselineSteps) {
         return baselineSteps >= 0 && steps >= baselineSteps
                 && steps - baselineSteps < QUIET_WAKE_STEPS;
@@ -1380,6 +1393,11 @@ public final class BandLiveService extends Service {
             advanceQuietTracker();
             boolean quiet = nightQuietObserved();
             if (quiet && !quietSignalStale) {
+                if (!nightHadQuiet) {
+                    wakeEvidence.beginEpisode(System.currentTimeMillis());
+                    wakeEvidenceCheckedAtMs = 0;
+                    awakeSamples = 0;
+                }
                 nightHadQuiet = true;
             } else if (!quiet && nightHadQuiet) {
                 nightHadQuiet = false;
@@ -1393,7 +1411,7 @@ public final class BandLiveService extends Service {
         }
         if (!suppressionWindow) {
             resetQuietTracker();
-            wakeEvidenceObserved = false;
+            wakeEvidence.reset();
             wakeEvidenceCheckedAtMs = 0;
             bandAsleep = null;
             awakeSamples = 0;
@@ -1423,18 +1441,18 @@ public final class BandLiveService extends Service {
     }
 
     private boolean wakeEvidence(long nowMs) {
-        if (wakeEvidenceObserved) return true;
+        if (wakeEvidence.observed()) return true;
         if (!sleepStateUnsupported && Boolean.FALSE.equals(bandAsleep)
                 && awakeSamples >= AWAKE_CONFIRM_SAMPLES) {
-            wakeEvidenceObserved = true;
+            wakeEvidence.observe();
             return true;
         }
         int hour = java.time.LocalTime.now().getHour();
         if (hour < NIGHT_END_HOUR) return false;
         if (wakeEvidenceCheckedAtMs > 0 && nowMs - wakeEvidenceCheckedAtMs < 60_000L) return false;
         wakeEvidenceCheckedAtMs = nowMs;
-        wakeEvidenceObserved = bandSleepClosed(nowMs);
-        return wakeEvidenceObserved;
+        if (bandSleepClosed(nowMs)) wakeEvidence.observe();
+        return wakeEvidence.observed();
     }
 
     /** The latest stored sleep interval is closed only when firmware wrote open == 0. */
@@ -1448,7 +1466,7 @@ public final class BandLiveService extends Service {
             var latest = rows.stream()
                     .max(java.util.Comparator.comparingLong(record -> record.endMs))
                     .orElse(null);
-            return latest != null && latest.complete;
+            return latest != null && latest.complete && wakeEvidence.acceptsClosedInterval(latest.endMs);
         } catch (Exception unavailable) {
             io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this,
                     "SLEEP_GATE sleep interval unavailable=" + unavailable.getClass().getSimpleName());
@@ -1536,9 +1554,10 @@ public final class BandLiveService extends Service {
         if (waitingForInitialSleepState && now >= historyStateDeadlineAt) {
             waitingForInitialSleepState = false;
             io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this,
-                    "HISTORY_SYNC sleep-state timeout, deferring");
-            nextHealthAt = now + TimeUnit.MINUTES.toNanos(historyPeriodMinutes());
+                    "HISTORY_SYNC sleep-state timeout, checking pending history");
         }
+        // Pending work may become eligible on timeout or when the suppression window ends.
+        flushPendingHistory();
         if (syncRequested || now >= nextHealthAt) {
             boolean historical = syncRequested && !isNightWindow();
             syncRequested = false;
@@ -2009,6 +2028,10 @@ public final class BandLiveService extends Service {
                             + " pending=" + historySyncPending);
         }
         if (asleep) {
+            if (changed) {
+                wakeEvidence.beginEpisode(System.currentTimeMillis());
+                wakeEvidenceCheckedAtMs = 0;
+            }
             awakeSamples = 0;
         } else {
             awakeSamples++;

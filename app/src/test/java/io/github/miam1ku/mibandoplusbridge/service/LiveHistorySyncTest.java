@@ -140,6 +140,7 @@ public final class LiveHistorySyncTest {
         var opens = new AtomicInteger();
         var todayLists = new AtomicInteger();
         var historyLists = new AtomicInteger();
+        var starts = new AtomicInteger();
         byte[] id = new byte[] {1, 0, 0, 0, 0, 4, 0};
         BlockingQueue<String> outcomes = new LinkedBlockingQueue<>();
         try (var queue = new LiveCommandQueue(0, 5_000, (sequence, command) -> {
@@ -162,7 +163,8 @@ public final class LiveHistorySyncTest {
             current.onAck(sequence);
         })) {
             queueRef.set(queue);
-            var history = new LiveHistorySync(queue, worker, () -> outcomes.add("complete"), outcomes::add, () -> {
+            var history = new LiveHistorySync(queue, worker, starts::incrementAndGet,
+                    () -> outcomes.add("complete"), outcomes::add, () -> {
                 if (!archiveFailure && opens.getAndIncrement() == 0) {
                     throw new IllegalStateException("HEALTH_STORAGE_UNAVAILABLE");
                 }
@@ -174,6 +176,7 @@ public final class LiveHistorySyncTest {
                     outcomes.poll(5, TimeUnit.SECONDS));
             assertEquals("complete", outcomes.poll(5, TimeUnit.SECONDS));
             assertEquals(2, todayLists.get());
+            assertEquals(2, starts.get());
             assertEquals(historicalFile ? 2 : 1, historyLists.get());
             assertEquals(archiveFailure ? 2 : 1, downloads.get());
             worker.submit(history::close).get(5, TimeUnit.SECONDS);

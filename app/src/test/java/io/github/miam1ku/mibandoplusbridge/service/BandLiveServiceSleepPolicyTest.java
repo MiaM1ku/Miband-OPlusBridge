@@ -46,6 +46,31 @@ public final class BandLiveServiceSleepPolicyTest {
         assertFalse(BandLiveService.quietStepNoise(1040, 1000));
     }
 
+    @Test public void counterResetRebasesWithoutWakeEvidence() {
+        var zone = java.time.ZoneId.systemDefault();
+        long before = java.time.LocalDate.of(2026, 11, 14).atTime(23, 59).atZone(zone).toInstant().toEpochMilli();
+        long after = java.time.LocalDate.of(2026, 11, 15).atTime(0, 1).atZone(zone).toInstant().toEpochMilli();
+        assertTrue(BandLiveService.quietCounterReset(1000, before, 0, after));
+        assertTrue(BandLiveService.quietCounterReset(5, before, 40, after));
+        assertTrue(BandLiveService.quietCounterReset(1000, before, 5, before + 1000));
+        assertFalse(BandLiveService.quietCounterReset(1000, before, 1040, before + 1000));
+        assertFalse(BandLiveService.quietCounterReset(Long.MIN_VALUE, 0, 0, after));
+    }
+
+    @Test public void newSleepEpisodeDiscardsOldWakeEvidenceAndClosedIntervals() {
+        var evidence = new NightWakeEvidence();
+        evidence.observe();
+        assertTrue(evidence.observed());
+        evidence.beginEpisode(2000);
+        assertFalse(evidence.observed());
+        assertFalse(evidence.acceptsClosedInterval(1999));
+        assertTrue(evidence.acceptsClosedInterval(2001));
+        evidence.observe();
+        assertTrue(evidence.observed());
+        evidence.reset();
+        assertFalse(evidence.observed());
+    }
+
     @Test public void nightAwakeNeedsTwoConsecutiveSamples() {
         assertTrue(BandLiveService.nightAwakeConfirmed(false, 1));
         assertFalse(BandLiveService.nightAwakeConfirmed(true, 1));

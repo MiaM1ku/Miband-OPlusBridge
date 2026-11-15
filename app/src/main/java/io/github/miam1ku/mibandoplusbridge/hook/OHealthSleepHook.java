@@ -86,7 +86,7 @@ public final class OHealthSleepHook {
         HookRuntime.tryHook("OHEALTH_SLEEP_NAVIGATION_UNAVAILABLE", OHealthSleepHook::hookNavigation);
         HookRuntime.tryHook("OHEALTH_SLEEP_TOOLBAR_UNAVAILABLE", OHealthSleepHook::hookToolbar);
         if (accountCompanion != null) {
-            XposedBridge.hookAllMethods(accountCompanion.getClass(), "getSsoid", new XC_MethodHook() {
+            XposedBridge.hookAllMethods(accountCompanion.getClass(), accountGetterName(accountCompanion.getClass()), new XC_MethodHook() {
                 @Override protected void afterHookedMethod(MethodHookParam p) {
                     updateAccount(p.getResult());
                 }
@@ -128,6 +128,13 @@ public final class OHealthSleepHook {
         } catch (Throwable unavailable) {
             return null;
         }
+    }
+
+    static String accountGetterName(Class<?> owner) {
+        for (Method method : owner.getDeclaredMethods()) {
+            if (method.getName().equals("getSsoId")) return "getSsoId";
+        }
+        return "getSsoid";
     }
 
     private static Object accountOwner(ClassLoader hostLoader) {
