@@ -380,8 +380,10 @@ public final class HealthRecordStore extends SQLiteOpenHelper {
         String after = "";
         while (found.size() <= 4_000) {
             int count = 0;
-            try (Cursor rows = measurements(requireConfirmedAccount(getReadableDatabase()), deviceId,
-                    kind, startMs, endMs, after)) {
+            try (Cursor rows = isDeviceSleep(kind)
+                    ? deviceSleep(deviceId, kind, startMs, endMs, after)
+                    : measurements(requireConfirmedAccount(getReadableDatabase()), deviceId,
+                            kind, startMs, endMs, after)) {
                 while (rows.moveToNext()) {
                     count++;
                     after = rows.getString(0);
@@ -411,11 +413,20 @@ public final class HealthRecordStore extends SQLiteOpenHelper {
     }
 
 
-    /** Sleep stays on the device and is not imported, so a later account confirmation can still read it. */
+    /**
+     * Sleep stays on the device and is not imported, so a later account confirmation can still
+     * read it. The explicit device id is part of every local query and prevents a missing account
+     * hash from widening the result.
+     */
     private static boolean isDeviceSleep(String kind) {
         return "sleep_interval".equals(kind) || "sleep_stage".equals(kind) || "sleep_breath".equals(kind);
     }
 
+    /**
+     * Local-only sleep read. It intentionally skips the host account confirmation because these
+     * rows are device data rather than OPPO Health account data, but it still requires an explicit,
+     * non-empty device id and filters on it in SQL.
+     */
     private Cursor deviceSleep(String deviceId, String kind, long startMs, long endMs, String after) {
         if (deviceId == null || deviceId.isBlank() || deviceId.length() > 128 || !isDeviceSleep(kind)
                 || startMs < 0 || endMs <= startMs || after != null && after.length() > 256) {

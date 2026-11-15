@@ -37,6 +37,7 @@ public final class BandDetailsActivity extends AppCompatActivity {
     private TextView battery;
     private TextView updated;
     private TextView history;
+    private TextView sleepFragments;
     private TextView saved;
     private Button next;
     private LinearLayout stepReviews;
@@ -50,11 +51,15 @@ public final class BandDetailsActivity extends AppCompatActivity {
     private TextView statusChip;
     private String after;
     private int historyGeneration;
+    private int sleepFragmentGeneration;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService reader = Executors.newSingleThreadExecutor();
     private static final String[] KINDS = {"sleep_interval", "sleep_stage", "heart_rate", "spo2", "stress", "steps_day", "steps_interval"};
     private final ContentObserver historyObserver = new ContentObserver(main) {
-        @Override public void onChange(boolean selfChange) { loadHistory(true); }
+        @Override public void onChange(boolean selfChange) {
+            loadHistory(true);
+            loadSleepFragments();
+        }
     };
     private final ContentObserver observer = new ContentObserver(new Handler(Looper.getMainLooper())) {
         @Override public void onChange(boolean selfChange) { refresh(); }
@@ -79,6 +84,8 @@ public final class BandDetailsActivity extends AppCompatActivity {
         battery = screen.bodyText(statusCard, "电量待读取");
         updated = screen.caption(statusCard, "");
         history = screen.caption(statusCard, "");
+        sleepFragments = screen.caption(statusCard, "");
+        sleepFragments.setVisibility(View.GONE);
         LinearLayout links = screen.card();
         screen.navRow(links, "打开 OPPO 健康", () -> openPackage(OHEALTH));
         screen.navRow(links, "打开 KernelSU", () -> openPackage(KERNELSU));
@@ -136,6 +143,7 @@ public final class BandDetailsActivity extends AppCompatActivity {
             main.post(() -> { if (!isFinishing() && !isDestroyed()) refresh(); });
         });
         loadHistory(true);
+        loadSleepFragments();
         loadStepReviews();
         Thread starter = new Thread(this::ensureLink, "OplusBandDetailsStart");
         starter.setDaemon(true);
@@ -157,6 +165,7 @@ public final class BandDetailsActivity extends AppCompatActivity {
         if (stepReviews != null) getContentResolver().unregisterContentObserver(stepReviewObserver);
         reviewGeneration++;
         historyGeneration++;
+        sleepFragmentGeneration++;
         reader.shutdownNow();
         super.onDestroy();
     }
@@ -171,6 +180,7 @@ public final class BandDetailsActivity extends AppCompatActivity {
             battery.setText("添加手环后显示电量和同步信息。");
             updated.setVisibility(View.GONE);
             history.setVisibility(View.GONE);
+            sleepFragments.setVisibility(View.GONE);
             return;
         }
         boolean connected = state.getBoolean("connected", false);
@@ -193,6 +203,45 @@ public final class BandDetailsActivity extends AppCompatActivity {
         history.setText((steps >= 0 ? "今日 " + steps + " 步" : "今日步数等待同步")
                 + (heart > 0 && heart <= 250 ? " · 最近心率 " + heart + " 次/分" : "")
                 + (sync > 0 ? "\n同步于 " + DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(new Date(sync)) : ""));
+    }
+
+    private void loadSleepFragments() {
+        if (sleepFragments == null || reader.isShutdown() || isFinishing() || isDestroyed()) return;
+        int generation = ++sleepFragmentGeneration;
+        reader.execute(() -> {
+            List<io.github.miam1ku.mibandoplusbridge.hook.OHealthSleepPlan.Night> nights = List.of();
+            try (HealthRecordStore records = new HealthRecordStore(this)) {
+                String device = io.github.miam1ku.mibandoplusbridge.data.LocalPrefs.open(this, "band-state")
+                        .getString("deviceId", "");
+                if (!device.isBlank() && new BandStateRepository(this).isRegistered()) {
+                    long end = System.currentTimeMillis() + 86_400_000L;
+                    long start = end - 4L * 86_400_000L;
+                    List<HealthRecord> intervals = records.storedRecords(
+                            device, "sleep_interval", start, end);
+                    nights = io.github.miam1ku.mibandoplusbridge.hook.OHealthSleepPlan.nights(
+                            intervals, java.time.ZoneId.systemDefault());
+                }
+            } catch (Exception unavailable) {
+                io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this,
+                        "SLEEP_FRAGMENTS unavailable=" + unavailable.getClass().getSimpleName());
+            }
+            var loaded = nights;
+            main.post(() -> {
+                if (generation != sleepFragmentGeneration || isFinishing() || isDestroyed()) return;
+                var latest = loaded.stream()
+                        .max(java.util.Comparator.comparingLong(
+                                io.github.miam1ku.mibandoplusbridge.hook.OHealthSleepPlan.Night::wakeMs))
+                        .orElse(null);
+                if (latest == null) {
+                    sleepFragments.setVisibility(View.GONE);
+                    return;
+                }
+                sleepFragments.setVisibility(View.VISIBLE);
+                sleepFragments.setText(latest.snapshots() <= 1
+                        ? "本夜同步稳定，检测到 0 次打断"
+                        : "本夜被同步打断 " + latest.snapshots() + " 次（手环固件行为）");
+            });
+        });
     }
 
     private void loadStepReviews() {

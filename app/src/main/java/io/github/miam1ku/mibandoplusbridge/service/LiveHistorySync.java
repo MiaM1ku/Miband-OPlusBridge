@@ -15,6 +15,7 @@ import nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto;
 final class LiveHistorySync {
     private final LiveCommandQueue commands;
     private final ScheduledExecutorService worker;
+    private final Runnable started;
     private final Runnable completed;
     private final Consumer<String> failed;
     private final java.util.function.BooleanSupplier capacity;
@@ -35,11 +36,22 @@ final class LiveHistorySync {
 
     LiveHistorySync(LiveCommandQueue commands, ScheduledExecutorService worker, Runnable completed, Consumer<String> failed,
             java.util.function.BooleanSupplier capacity) {
-        this(commands, worker, completed, failed, capacity, 5_000);
+        this(commands, worker, () -> {}, completed, failed, capacity, 5_000);
+    }
+
+    LiveHistorySync(LiveCommandQueue commands, ScheduledExecutorService worker, Runnable started, Runnable completed,
+            Consumer<String> failed, java.util.function.BooleanSupplier capacity) {
+        this(commands, worker, started, completed, failed, capacity, 5_000);
     }
 
     LiveHistorySync(LiveCommandQueue commands, ScheduledExecutorService worker, Runnable completed, Consumer<String> failed,
             java.util.function.BooleanSupplier capacity, long storageRetryDelayMs) {
+        this(commands, worker, () -> {}, completed, failed, capacity, storageRetryDelayMs);
+    }
+
+    LiveHistorySync(LiveCommandQueue commands, ScheduledExecutorService worker, Runnable started, Runnable completed,
+            Consumer<String> failed, java.util.function.BooleanSupplier capacity, long storageRetryDelayMs) {
+        this.started = started;
         this.commands = commands;
         this.worker = worker;
         this.completed = completed;
@@ -61,6 +73,7 @@ final class LiveHistorySync {
         includeHistory |= history;
         if (busy) return;
         busy = true;
+        started.run();
         historical = false;
         generation++;
         list(1, generation);

@@ -34,6 +34,7 @@ public final class CopyStyleTest {
 
     private static final Pattern LITERAL = Pattern.compile("\"((?:[^\"\\\\\\n]|\\\\.)*)\"");
     private static final Pattern CJK = Pattern.compile("[\\u4e00-\\u9fff]");
+    private static final Pattern PROTOCOL_TOKEN = Pattern.compile("\\b\\d+/\\d+\\b");
 
     @Test public void sourceLiteralsUsePositiveWording() throws IOException {
         Path root = sourceRoot();
@@ -54,6 +55,7 @@ public final class CopyStyleTest {
                         if (!CJK.matcher(value).find()) continue;
                         scanned++;
                         String hit = firstAvoided(value);
+                        if (hit == null && PROTOCOL_TOKEN.matcher(value).find()) hit = "protocol token";
                         if (hit != null) offenders.add(relative + ":" + (index + 1) + " [" + hit + "] " + value);
                     }
                 }
@@ -61,6 +63,7 @@ public final class CopyStyleTest {
         }
         assertTrue("scanner found " + scanned + " Chinese literals", scanned > 300);
         assertEquals("firstAvoided self-check", "未", firstAvoided("未连接"));
+        assertTrue("protocol token self-check", PROTOCOL_TOKEN.matcher("2/78").find());
         assertEquals("Rephrase these strings positively:\n" + String.join("\n", offenders), 0, offenders.size());
     }
 
