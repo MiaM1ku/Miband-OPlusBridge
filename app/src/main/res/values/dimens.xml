@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <dimen name="device_log_progress_wave_amplitude">2dp</dimen>
+    <dimen name="device_log_progress_wave_speed">16dp</dimen>
+    <dimen name="device_log_progress_wavelength_determinate">40dp</dimen>
+</resources>

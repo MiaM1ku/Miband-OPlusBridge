@@ -53,17 +53,19 @@ public final class LiveCommandQueue implements AutoCloseable {
         final int responseType;
         final int responseSubtype;
         final Kind kind;
+        final long timeoutMillis;
         final CompletableFuture<XiaomiProto.Command> result = new CompletableFuture<>();
         int sequence = -1;
         boolean acknowledged;
         XiaomiProto.Command response;
         ScheduledFuture<?> timeout;
 
-        Work(XiaomiProto.Command command, int type, int subtype, Kind kind) {
+        Work(XiaomiProto.Command command, int type, int subtype, Kind kind, long timeoutMillis) {
             this.command = command;
             this.responseType = type;
             this.responseSubtype = subtype;
             this.kind = kind;
+            this.timeoutMillis = timeoutMillis;
         }
 
         boolean wantsResponse() { return responseType >= 0; }
@@ -115,18 +117,25 @@ public final class LiveCommandQueue implements AutoCloseable {
 
     /** Completes after the matching transport ACK. Device-side rendering is a later event. */
     public CompletionStage<Void> send(XiaomiProto.Command command) {
-        return submit(command, -1, -1).thenApply(ignored -> null);
+        return submit(command, -1, -1, timeoutMillis).thenApply(ignored -> null);
     }
 
     /** Completes only after both the matching transport ACK and a successful semantic response. */
     public CompletionStage<XiaomiProto.Command> request(
             XiaomiProto.Command command, int type, int subtype) {
+        return request(command, type, subtype, timeoutMillis);
+    }
+
+    /** A larger deadline for operations such as report-data preparation on the band. */
+    public CompletionStage<XiaomiProto.Command> request(
+            XiaomiProto.Command command, int type, int subtype, long responseTimeoutMillis) {
         if (type < 0 || subtype < 0) return failed("LIVE_RESPONSE_KEY_INVALID");
-        return submit(command, type, subtype);
+        long deadline = responseTimeoutMillis <= 0 ? timeoutMillis : responseTimeoutMillis;
+        return submit(command, type, subtype, deadline);
     }
 
     private CompletableFuture<XiaomiProto.Command> submit(
-            XiaomiProto.Command command, int type, int subtype) {
+            XiaomiProto.Command command, int type, int subtype, long responseTimeoutMillis) {
         if (command == null || !command.isInitialized()) return failed("LIVE_COMMAND_INVALID");
         synchronized (lock) {
             if (closed) return failed("LIVE_QUEUE_CLOSED");
@@ -163,9 +172,9 @@ public final class LiveCommandQueue implements AutoCloseable {
                     finishLocked(disposable, null, failure("LIVE_NOTIFICATION_DROPPED"));
                 }
             }
-            Work item = new Work(command, type, subtype, kind);
+            Work item = new Work(command, type, subtype, kind, responseTimeoutMillis);
             work.add(item);
-            item.timeout = deadlines.schedule(() -> expire(item), timeoutMillis, TimeUnit.MILLISECONDS);
+            item.timeout = deadlines.schedule(() -> expire(item), item.timeoutMillis, TimeUnit.MILLISECONDS);
             scheduleDrainLocked();
             return item.result;
         }

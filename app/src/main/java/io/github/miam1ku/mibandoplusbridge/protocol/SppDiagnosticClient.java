@@ -76,6 +76,7 @@ public final class SppDiagnosticClient implements AutoCloseable {
     private Consumer<XiaomiProto.Command> onLiveCommand;
     private Consumer<java.util.List<BandHistoryParser.Measurement>> onSleepFile;
     private volatile LiveCommandQueue liveCommands;
+    private volatile XiaomiMassReceive deviceLogReceiver;
     private Result verifiedDevice;
     private boolean liveHold;
     private final ArrayDeque<byte[]> heldActivity = new ArrayDeque<>();
@@ -87,6 +88,21 @@ public final class SppDiagnosticClient implements AutoCloseable {
 
     public int notificationPayloadLimit() {
         return liveCommands == null || closed ? 0 : Math.max(0, peerPayloadLimit - 2);
+    }
+
+    /** Registers the one active full device-log MASS receiver before report 2/80 is sent. */
+    public synchronized void beginDeviceLogReceive(XiaomiMassReceive receiver) throws Failure {
+        if (receiver == null || liveCommands == null || closed || !liveHold) {
+            throw new Failure("DEVICE_LOG_SESSION_UNAVAILABLE");
+        }
+        if (deviceLogReceiver != null) throw new Failure("DEVICE_LOG_RECEIVE_ACTIVE");
+        deviceLogReceiver = receiver;
+    }
+
+    public synchronized void cancelDeviceLogReceive(String code) {
+        XiaomiMassReceive receiver = deviceLogReceiver;
+        deviceLogReceiver = null;
+        if (receiver != null) receiver.fail(code);
     }
 
     /** One data-channel part. The queue owns the sequence so it stays aligned with commands. */
@@ -514,6 +530,13 @@ public final class SppDiagnosticClient implements AutoCloseable {
             if (fitness != payload) Arrays.fill(fitness, (byte) 0);
             return null;
         }
+        if (packet.channel() == SppV1Codec.CHANNEL_MASS) {
+            byte[] mass = payload;
+            if (packet.dataType() == SppV1Codec.DATA_ENCRYPTED) mass = session.decryptV1(payload);
+            acceptDeviceLogMass(mass);
+            if (mass != payload) Arrays.fill(mass, (byte) 0);
+            return null;
+        }
         if (packet.channel() != SppV1Codec.CHANNEL_PROTO_RX && packet.channel() != SppV1Codec.CHANNEL_PROTO_TX) {
             return null;
         }
@@ -532,6 +555,20 @@ public final class SppDiagnosticClient implements AutoCloseable {
     private XiaomiProto.Command decodeBle(BleGattClient.Rx packet) throws Exception {
         if (packet == null || packet.payload == null || packet.payload.length == 0) return null;
         byte[] payload = packet.payload;
+        if (packet.mass) {
+            byte[] plain = payload;
+            try {
+                if (authenticated) plain = decryptBle(payload);
+                acceptDeviceLogMass(plain);
+            } catch (Exception failed) {
+                SessionLog.line(context, "rx ble mass rejected len=" + payload.length);
+                XiaomiMassReceive active = deviceLogReceiver;
+                if (active != null) active.fail("MASS_PACKET_INVALID");
+            } finally {
+                if (plain != payload) Arrays.fill(plain, (byte) 0);
+            }
+            return null;
+        }
         if (packet.activity) {
             byte[] plain = payload;
             try {
@@ -624,6 +661,17 @@ public final class SppDiagnosticClient implements AutoCloseable {
                 Arrays.fill(next, (byte) 0);
             }
         }
+    }
+
+    private void acceptDeviceLogMass(byte[] payload) {
+        XiaomiMassReceive receiver = deviceLogReceiver;
+        if (receiver == null) {
+            SessionLog.line(context, "rx mass without device-log receiver bytes="
+                    + (payload == null ? 0 : payload.length));
+            return;
+        }
+        receiver.accept(payload);
+        if (receiver.completion().toCompletableFuture().isDone()) deviceLogReceiver = null;
     }
 
     private void sendCommand(XiaomiProto.Command command) throws Exception {
@@ -846,6 +894,27 @@ public final class SppDiagnosticClient implements AutoCloseable {
         if (data.flags() != 0) throw new Failure("UNSUPPORTED_DATA_CHANNEL");
         if (data.channel() == SppV2Codec.CHANNEL_ACTIVITY) {
             acceptActivity(data, sequence, rawPayload);
+            return null;
+        }
+        if (data.channel() == SppV2Codec.CHANNEL_DATA) {
+            byte[] plain;
+            if (data.opcode() == SppV2Codec.OPCODE_ENCRYPTED) {
+                if (!authenticated) throw new Failure("ENCRYPTION_STATE_MISMATCH");
+                plain = session.decryptV2(data.payload());
+            } else if (data.opcode() == SppV2Codec.OPCODE_PLAINTEXT) {
+                plain = data.payload();
+            } else {
+                throw new Failure("UNSUPPORTED_DATA_CHANNEL");
+            }
+            try {
+                acceptDeviceLogMass(plain);
+            } finally {
+                Arrays.fill(plain, (byte) 0);
+            }
+            if (receivedPayloads[sequence] != null) Arrays.fill(receivedPayloads[sequence], (byte) 0);
+            receivedPayloads[sequence] = rawPayload;
+            receivedAt[sequence] = receive.count() - 1;
+            sendFrame(new SppV2Codec.Frame(SppV2Codec.TYPE_ACK, sequence, new byte[0]));
             return null;
         }
         if (data.channel() != SppV2Codec.CHANNEL_PROTOBUF) {
@@ -1132,6 +1201,7 @@ public final class SppDiagnosticClient implements AutoCloseable {
     }
 
     @Override public void close() {
+        cancelDeviceLogReceive("MASS_RECEIVE_CANCELLED");
         LiveCommandQueue commands = liveCommands;
         if (commands != null) commands.close(new IllegalStateException("SESSION_CLOSED"));
         BluetoothSocket closing;

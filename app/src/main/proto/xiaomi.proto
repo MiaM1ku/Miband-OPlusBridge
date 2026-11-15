@@ -167,7 +167,37 @@ message System {
 
   // 2, 110 set, 2, 109 get. Mi Fitness puts the phone zen-rule list here.
   optional PhoneZenRuleList phoneZenRules = 71;
+
+  // 2, 80 request report data. The device answers on 2, 81.
+  optional ReportData reportData = 50;
+  optional ReportData.Result reportDataResult = 51;
  }
+
+// ReportData is how the band exports its full device-log bundle. The log itself follows over
+// the reverse MASS channel after the report result reports SUCCESS.
+message ReportData {
+  enum Type {
+    DEVICE_LOG = 1;
+    STATISTICS = 2;
+    DUMP_LOG = 3;
+  }
+
+  enum Status {
+    SUCCESS = 0;
+    NO_DATA = 1;
+    URL_DIRECT = 2;
+    BUSY = 3;
+    FAIL = 10;
+  }
+
+  message Result {
+    required Type type = 1;
+    required Status status = 2;
+  }
+
+  required Type type = 1;
+  optional string id = 2;
+}
 
 message Power {
   optional Battery battery = 1;

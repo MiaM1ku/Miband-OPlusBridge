@@ -49,6 +49,7 @@
             android:excludeFromRecents="true" android:noHistory="true"
             android:theme="@style/Theme.OplusBand.Tile" />
         <activity android:name=".DiagnosticActivity" android:exported="false" />
+        <activity android:name=".DeviceLogActivity" android:exported="false" />
         <activity android:name=".LabActivity" android:exported="false" />
 
         <activity android:name=".WeatherActivity" android:exported="false" />

@@ -56,6 +56,7 @@ final class BleGattClient implements AutoCloseable {
     private volatile int maxWrite = ATT_PAYLOAD;
     private final BleV1Codec.Reassembler commands = new BleV1Codec.Reassembler();
     private final BleV1Codec.Reassembler activity = new BleV1Codec.Reassembler();
+    private final BleV1Codec.Reassembler mass = new BleV1Codec.Reassembler();
     private final Object writeLock = new Object();
     private final LinkedBlockingQueue<PendingWrite> pendingWrites = new LinkedBlockingQueue<>();
     private final AtomicReference<PendingWrite> currentWrite = new AtomicReference<>();
@@ -150,7 +151,7 @@ final class BleGattClient implements AutoCloseable {
         failPending("CANCELLED");
         Thread writer = writerThread;
         if (writer != null) writer.interrupt();
-        incoming.offer(new Rx(new byte[0], false));
+        incoming.offer(new Rx(new byte[0], false, false));
         transportAcks.offer(new byte[0]);
     }
 
@@ -404,7 +405,7 @@ final class BleGattClient implements AutoCloseable {
         previousAt = now;
         UUID uuid = characteristic.getUuid();
         try {
-            if (writeUuid.equals(uuid) || uploadUuid.equals(uuid)) {
+            if (writeUuid.equals(uuid)) {
                 // Single-frame writes do not wait for the payload ACK (type 3). Those ACKs
                 // are identical and arrive once per command. Queueing them filled the 8-slot
                 // ack queue and aborted every Band 8 session after the handshake burst.
@@ -416,7 +417,12 @@ final class BleGattClient implements AutoCloseable {
                 return;
             }
             boolean activityChar = activityUuid.equals(uuid);
-            BleV1Codec.Reassembler reassembler = activityChar ? activity : commands;
+            boolean massChar = uploadUuid.equals(uuid);
+            if (massChar && BleV1Codec.control(value, BleV1Codec.TYPE_CHUNK_ACK)) {
+                if (!transportAcks.offer(value)) SessionLog.line(context, "ble chunk ack dropped");
+                return;
+            }
+            BleV1Codec.Reassembler reassembler = massChar ? mass : activityChar ? activity : commands;
             if (BleV1Codec.control(value, BleV1Codec.TYPE_CHUNK_START)) {
                 ack(characteristic, BleV1Codec.CHUNK_START_ACK);
             }
@@ -425,9 +431,9 @@ final class BleGattClient implements AutoCloseable {
                 ack(characteristic, BleV1Codec.control(value, BleV1Codec.TYPE_SINGLE)
                         ? BleV1Codec.PAYLOAD_ACK : BleV1Codec.CHUNK_END_ACK);
                 SessionLog.line(context, "rx ble bytes=" + payload.length
-                        + (activityChar ? " activity" : ""));
+                        + (activityChar ? " activity" : massChar ? " mass" : ""));
                 // The band already has the ACK. A full queue drops this packet before the caller, so the session stops instead of continuing with a gap. 
-                if (!incoming.offer(new Rx(payload, activityChar))) overflow();
+                if (!incoming.offer(new Rx(payload, activityChar, massChar))) overflow();
             }
         } catch (IllegalArgumentException ignored) {
             fail("BLE_FRAME_INVALID");
@@ -497,10 +503,12 @@ final class BleGattClient implements AutoCloseable {
     static final class Rx {
         final byte[] payload;
         final boolean activity;
+        final boolean mass;
 
-        Rx(byte[] payload, boolean activity) {
+        Rx(byte[] payload, boolean activity, boolean mass) {
             this.payload = payload;
             this.activity = activity;
+            this.mass = mass;
         }
     }
     private void overflow() {
@@ -512,6 +520,6 @@ final class BleGattClient implements AutoCloseable {
         if (!failure.compareAndSet(null, code)) return;
         ready.countDown();
         // Wake a live read. Otherwise it sits out the rest of its poll after the link is already dead.
-        incoming.offer(new Rx(new byte[0], false));
+        incoming.offer(new Rx(new byte[0], false, false));
     }
 }

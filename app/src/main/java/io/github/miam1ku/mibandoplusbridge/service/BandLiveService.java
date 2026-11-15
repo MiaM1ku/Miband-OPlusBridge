@@ -29,6 +29,7 @@ public final class BandLiveService extends Service {
     private static final String ACTION_SYNC = "io.github.miam1ku.mibandoplusbridge.SYNC";
     private static final String ACTION_REPAIR = "io.github.miam1ku.mibandoplusbridge.REPAIR";
     private static volatile BandLiveService instance;
+    private static volatile io.github.miam1ku.mibandoplusbridge.protocol.XiaomiMassReceive deviceLogReceiver;
     private static volatile boolean diagnosticPaused;
     private volatile java.util.concurrent.CountDownLatch stopped = new java.util.concurrent.CountDownLatch(0);
     private final java.util.concurrent.CountDownLatch destroyed = new java.util.concurrent.CountDownLatch(1);
@@ -306,6 +307,103 @@ public final class BandLiveService extends Service {
             return java.util.concurrent.CompletableFuture.failedFuture(new IllegalStateException("LIVE_SESSION_REQUIRED"));
         }
         return inspect ? live.weatherSync.inspectCities(sample) : live.weatherSync.send(sample);
+    }
+
+    /**
+     * Requests the band's complete report-data log bundle and receives the reverse MASS stream.
+     * The receiver is installed before report 2/80, so the first file fragment cannot race past us.
+     */
+    public static java.util.concurrent.CompletionStage<
+            io.github.miam1ku.mibandoplusbridge.protocol.XiaomiMassReceive.Result>
+            requestDeviceLogExport(Context context,
+                    java.util.function.Consumer<
+                            io.github.miam1ku.mibandoplusbridge.protocol.XiaomiMassReceive.Progress> observer) {
+        BandLiveService live = instance;
+        var client = live == null ? null : live.client;
+        var queue = live == null ? null : live.commands;
+        if (client == null || queue == null || live.stopRequested) {
+            return java.util.concurrent.CompletableFuture.failedFuture(
+                    new IllegalStateException("LIVE_SESSION_REQUIRED"));
+        }
+        File directory = new File(context.getCacheDir(),
+                "device-logs/" + System.currentTimeMillis());
+        if (!directory.isDirectory() && !directory.mkdirs()) {
+            return java.util.concurrent.CompletableFuture.failedFuture(
+                    new IllegalStateException("DEVICE_LOG_DIRECTORY_FAILED"));
+        }
+        java.util.function.Consumer<
+                io.github.miam1ku.mibandoplusbridge.protocol.XiaomiMassReceive.Progress> safe =
+                progress -> {
+                    if (observer == null) return;
+                    try {
+                        observer.accept(progress);
+                    } catch (RuntimeException ignored) { }
+                };
+        var receiver = new io.github.miam1ku.mibandoplusbridge.protocol.XiaomiMassReceive(
+                directory, safe);
+        if (deviceLogReceiver != null) {
+            return java.util.concurrent.CompletableFuture.failedFuture(
+                    new IllegalStateException("DEVICE_LOG_RECEIVE_ACTIVE"));
+        }
+        deviceLogReceiver = receiver;
+        try {
+            client.beginDeviceLogReceive(receiver);
+        } catch (Exception unavailable) {
+            deviceLogReceiver = null;
+            return java.util.concurrent.CompletableFuture.failedFuture(unavailable);
+        }
+        io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(context,
+                "DEVICE_LOG_EXPORT request");
+        return queue.request(
+                io.github.miam1ku.mibandoplusbridge.protocol.BandLogCommand.exportDeviceLog(),
+                2, 81, 120_000L)
+                .thenCompose(response -> {
+                    int status = io.github.miam1ku.mibandoplusbridge.protocol.BandLogCommand
+                            .resultStatus(response);
+                    if (status != 0) {
+                        client.cancelDeviceLogReceive(deviceLogStatus(status));
+                        return java.util.concurrent.CompletableFuture.failedFuture(
+                                new IllegalStateException(deviceLogStatus(status)));
+                    }
+                    io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(context,
+                            "DEVICE_LOG_EXPORT receiving");
+                    java.util.concurrent.CompletableFuture<
+                            io.github.miam1ku.mibandoplusbridge.protocol.XiaomiMassReceive.Result>
+                            completion = receiver.completion().toCompletableFuture();
+                    completion.orTimeout(10, TimeUnit.MINUTES);
+                    return completion.whenComplete((result, error) -> {
+                        if (error != null) {
+                            client.cancelDeviceLogReceive("DEVICE_LOG_RECEIVE_FAILED");
+                            io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(context,
+                                    "DEVICE_LOG_EXPORT failed " + error.getClass().getSimpleName());
+                        } else {
+                            io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(context,
+                                    "DEVICE_LOG_EXPORT complete bytes=" + result.bytes());
+                        }
+                    });
+                }).whenComplete((result, error) -> {
+                    deviceLogReceiver = null;
+                    if (error != null) client.cancelDeviceLogReceive("DEVICE_LOG_EXPORT_FAILED");
+                });
+    }
+
+    public static io.github.miam1ku.mibandoplusbridge.protocol.XiaomiMassReceive.Progress
+            deviceLogProgressSnapshot() {
+        var receiver = deviceLogReceiver;
+        return receiver == null
+                ? new io.github.miam1ku.mibandoplusbridge.protocol.XiaomiMassReceive.Progress(
+                        0, 0, "", 0)
+                : receiver.progressSnapshot();
+    }
+
+    private static String deviceLogStatus(int status) {
+        return switch (status) {
+            case 1 -> "DEVICE_LOG_NO_DATA";
+            case 2 -> "DEVICE_LOG_DIRECT_UPLOAD_UNSUPPORTED";
+            case 3 -> "DEVICE_LOG_DEVICE_BUSY";
+            case 10 -> "DEVICE_LOG_DEVICE_REJECTED";
+            default -> "DEVICE_LOG_RESULT_INVALID";
+        };
     }
 
     public static void refreshWeather(Context context) {

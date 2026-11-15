@@ -24,6 +24,11 @@ import com.google.android.material.materialswitch.MaterialSwitch;
  * Pages read top to bottom: status, next step, features, help, management, advanced.
  */
 public final class BridgeScreen {
+    private static final int ATTR_COLOR_PRIMARY = androidx.appcompat.R.attr.colorPrimary;
+    private static final int ATTR_COLOR_ERROR = androidx.appcompat.R.attr.colorError;
+    private static final int ATTR_BORDERLESS_BUTTON_STYLE =
+            androidx.appcompat.R.attr.borderlessButtonStyle;
+
     /** Colour role of a chip, notice card, or status line. */
     public enum Tone { POSITIVE, ACTIVE, NEUTRAL, ATTENTION }
 
@@ -77,7 +82,7 @@ public final class BridgeScreen {
     /** Section label above a group of cards. */
     public TextView heading(LinearLayout parent, String value) {
         TextView text = label(parent, value, 14, true);
-        text.setTextColor(color(activity, R.attr.colorPrimary));
+        text.setTextColor(color(activity, ATTR_COLOR_PRIMARY));
         LinearLayout.LayoutParams params = (LinearLayout.LayoutParams) text.getLayoutParams();
         params.topMargin = dp(activity, 12);
         params.leftMargin = dp(activity, 4);
@@ -153,7 +158,7 @@ public final class BridgeScreen {
     }
 
     public LinearLayout expander(LinearLayout parent, String title, Runnable onOpen) {
-        MaterialButton toggle = new MaterialButton(activity, null, R.attr.borderlessButtonStyle);
+        MaterialButton toggle = new MaterialButton(activity, null, ATTR_BORDERLESS_BUTTON_STYLE);
         toggle.setAllCaps(false);
         toggle.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
         toggle.setMinHeight(dp(activity, 48));
@@ -215,7 +220,7 @@ public final class BridgeScreen {
         row.setText(mark + "  " + index + ". " + title);
         row.setTypeface(state == StepState.CURRENT
                 ? Typeface.create("sans-serif-medium", Typeface.NORMAL) : Typeface.DEFAULT);
-        row.setTextColor(state == StepState.CURRENT ? color(activity, R.attr.colorPrimary)
+        row.setTextColor(state == StepState.CURRENT ? color(activity, ATTR_COLOR_PRIMARY)
                 : color(activity, R.attr.colorOnSurfaceVariant));
     }
 
@@ -256,13 +261,13 @@ public final class BridgeScreen {
     }
 
     public MaterialButton textButton(LinearLayout parent, String title, Runnable action) {
-        return material(parent, title, R.attr.borderlessButtonStyle, action);
+        return material(parent, title, ATTR_BORDERLESS_BUTTON_STYLE, action);
     }
 
     /** Outlined button in the error role for removal. */
     public MaterialButton dangerOutlined(LinearLayout parent, String title, Runnable action) {
         MaterialButton button = outlined(parent, title, action);
-        int error = color(activity, R.attr.colorError);
+        int error = color(activity, ATTR_COLOR_ERROR);
         button.setTextColor(error);
         button.setStrokeColor(ColorStateList.valueOf(error));
         return button;
@@ -274,7 +279,7 @@ public final class BridgeScreen {
 
     /** Full-width list row with a trailing chevron. */
     public MaterialButton navRow(LinearLayout parent, String title, Runnable action) {
-        MaterialButton button = new MaterialButton(activity, null, R.attr.borderlessButtonStyle);
+        MaterialButton button = new MaterialButton(activity, null, ATTR_BORDERLESS_BUTTON_STYLE);
         button.setText(title + "   ›");
         button.setAllCaps(false);
         button.setTextColor(color(activity, R.attr.colorOnSurface));
@@ -363,10 +368,10 @@ public final class BridgeScreen {
 
     private int foreground(Tone tone) {
         return switch (tone) {
-            case POSITIVE -> color(activity, R.attr.colorPrimary);
+            case POSITIVE -> color(activity, ATTR_COLOR_PRIMARY);
             case ACTIVE -> color(activity, R.attr.colorTertiary);
             case NEUTRAL -> color(activity, R.attr.colorOnSurfaceVariant);
-            case ATTENTION -> color(activity, R.attr.colorError);
+            case ATTENTION -> color(activity, ATTR_COLOR_ERROR);
         };
     }
 
