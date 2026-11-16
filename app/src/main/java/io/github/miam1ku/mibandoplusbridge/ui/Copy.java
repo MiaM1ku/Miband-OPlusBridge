@@ -58,6 +58,7 @@ public final class Copy {
     public static String ownershipFailure(String code) {
         return switch (code == null ? "" : code) {
             case "USER_LOCKED" -> "解锁手机后再点一次。";
+            case "SERVICE_STOPPING" -> "连接服务正在重启，再点一次「立即同步」。";
             case "UNPROVISIONED", "BINDING_INCOMPLETE" -> "到高级设置重新导入绑定，然后再添加。";
             case "BINDING_ADDRESS" -> "重新选择这只手环并导入绑定，蓝牙地址会按大写 MAC 保存。";
             case "BINDING_REGION" -> "在小米运动健康里打开这只手环，等它连上后再导入一次。";
@@ -120,6 +121,8 @@ public final class Copy {
             case "HISTORY_FILE_REJECTED" -> "一份健康文件需要重新获取，下次同步时自动完成。";
             case "HISTORY_STORAGE_FAILED", "HEALTH_STORAGE_UNAVAILABLE" -> "清理一些存储空间后，健康同步会继续。";
             case "HEALTH_REPLAY_PAUSED", "HISTORY_CONFIRMATION_PENDING" -> "健康同步稍后继续，已保存的记录都在。";
+            case "HISTORY_SYNC_QUEUED" -> "同步已排队，睡眠保护解除后继续。";
+            case "HISTORY_SYNCING" -> "正在同步健康记录。";
             default -> "";
         };
     }
