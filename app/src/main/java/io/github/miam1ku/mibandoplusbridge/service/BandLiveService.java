@@ -1723,7 +1723,7 @@ public final class BandLiveService extends Service {
             io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this,
                     "HISTORY_SYNC sleep-state timeout, checking pending history");
         }
-        boolean manualRequested = manualSyncOverrideActive(manualSyncRequested,
+        boolean manualRequested = isManualSyncOverrideActive(manualSyncRequested,
                 manualSyncRequestedAtMs, android.os.SystemClock.elapsedRealtime());
         if (syncRequested || manualRequested || now >= nextHealthAt) {
             boolean historical = manualRequested || (syncRequested && !isNightWindow());
@@ -2133,7 +2133,7 @@ public final class BandLiveService extends Service {
 
     private void requestHistoryWhenAwake(boolean historical) {
         pendingHistoryIncludesHistory |= historical && !isNightWindow();
-        boolean manualRequested = manualSyncOverrideActive(manualSyncRequested,
+        boolean manualRequested = isManualSyncOverrideActive(manualSyncRequested,
                 manualSyncRequestedAtMs, android.os.SystemClock.elapsedRealtime());
         if (manualRequested) pendingHistoryIncludesHistory = true;
         historySyncPending = true;
@@ -2172,18 +2172,22 @@ public final class BandLiveService extends Service {
         }
     }
 
-    static boolean manualSyncOverrideActive(AtomicBoolean requested, long requestedAtMs, long nowMs) {
-        if (!requested.get()) return false;
-        if (requestedAtMs > 0 && nowMs >= requestedAtMs
-                && nowMs - requestedAtMs <= MANUAL_SYNC_OVERRIDE_TTL_MS) return true;
-        requested.set(false);
-        return false;
+    /** Read-only: a tick checks this several times, so expiry must not clear the request. */
+    static boolean isManualSyncOverrideActive(AtomicBoolean requested, long requestedAtMs, long nowMs) {
+        return requested.get() && overrideWithinTtl(requestedAtMs, nowMs);
+    }
+
+    private static boolean overrideWithinTtl(long requestedAtMs, long nowMs) {
+        return requestedAtMs > 0 && nowMs >= requestedAtMs
+                && nowMs - requestedAtMs <= MANUAL_SYNC_OVERRIDE_TTL_MS;
     }
 
     static boolean consumeManualSync(AtomicBoolean requested, boolean historyReady,
             long requestedAtMs, long nowMs) {
-        if (!manualSyncOverrideActive(requested, requestedAtMs, nowMs)) return false;
-        return historyReady && requested.compareAndSet(true, false);
+        if (!historyReady) return false;
+        if (!requested.compareAndSet(true, false)) return false;
+        // Expired requests still get cleared here so a stale flag cannot outlive its round.
+        return overrideWithinTtl(requestedAtMs, nowMs);
     }
 
     static boolean historyShouldFlush(boolean pending, boolean manualOverride, boolean mayRun) {

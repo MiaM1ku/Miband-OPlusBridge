@@ -120,6 +120,27 @@ public final class BandLiveServiceSleepPolicyTest {
         assertFalse(BandLiveService.consumeManualSync(requested, true, requestedAtMs, requestedAtMs + 1));
     }
 
+    @Test public void repeatedOverrideChecksDoNotConsumeThePendingRound() {
+        var requested = new java.util.concurrent.atomic.AtomicBoolean(true);
+        long requestedAtMs = 1_000L;
+        assertTrue(BandLiveService.isManualSyncOverrideActive(requested, requestedAtMs, requestedAtMs + 1));
+        assertTrue(BandLiveService.isManualSyncOverrideActive(requested, requestedAtMs, requestedAtMs + 2));
+        assertTrue(requested.get());
+        assertTrue(BandLiveService.consumeManualSync(requested, true, requestedAtMs, requestedAtMs + 2));
+        assertFalse(requested.get());
+    }
+
+    @Test public void expiredOverrideCheckLeavesCleanupToConsume() {
+        var requested = new java.util.concurrent.atomic.AtomicBoolean(true);
+        long requestedAtMs = 1_000L;
+        assertFalse(BandLiveService.isManualSyncOverrideActive(requested, requestedAtMs,
+                requestedAtMs + 60_001L));
+        assertTrue(requested.get());
+        assertFalse(BandLiveService.consumeManualSync(requested, true, requestedAtMs,
+                requestedAtMs + 60_001L));
+        assertFalse(requested.get());
+    }
+
     @Test public void manualSyncOverrideExpiresAfterOneMinute() {
         var requested = new java.util.concurrent.atomic.AtomicBoolean(true);
         long requestedAtMs = 1_000L;
