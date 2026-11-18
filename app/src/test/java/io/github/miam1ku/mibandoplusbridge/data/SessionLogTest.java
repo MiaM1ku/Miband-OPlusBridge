@@ -64,6 +64,31 @@ public final class SessionLogTest {
         return file;
     }
 
+    @Test public void deviceLogEntryKeepsOnlyAttachableFiles() throws Exception {
+        java.io.File dir = java.nio.file.Files.createTempDirectory("device-log").toFile();
+        try {
+            assertNull(SessionLog.deviceLogEntry(null));
+            assertNull(SessionLog.deviceLogEntry(new java.io.File(dir, "missing.zip")));
+            java.io.File empty = new java.io.File(dir, "empty.zip");
+            assertTrue(empty.createNewFile());
+            assertNull(SessionLog.deviceLogEntry(empty));
+            java.io.File log = new java.io.File(dir, "log 2026-11.tar.gz");
+            java.nio.file.Files.write(log.toPath(), new byte[] {1, 2, 3});
+            assertEquals("device-log/log_2026-11.tar.gz", SessionLog.deviceLogEntry(log));
+        } finally {
+            for (java.io.File file : dir.listFiles()) file.delete();
+            dir.delete();
+        }
+    }
+
+    @Test public void readmeNamesTheDeviceLogOrWhyItIsEmpty() {
+        String attached = SessionLog.readme(false, "device-log/a.zip", "OK");
+        assertTrue(attached.contains("device-log/a.zip"));
+        String skipped = SessionLog.readme(false, null, "LIVE_SESSION_REQUIRED");
+        assertTrue(skipped.contains("LIVE_SESSION_REQUIRED"));
+        assertTrue(SessionLog.readme(true, null, null).contains("SKIPPED"));
+    }
+
     @Test public void fewerThanThreeStartsAreLeftIntact() {
         String log = "--- module start 1 ---\nonly\n";
         assertEquals(log, SessionLog.keepLastStarts(log, 3));
