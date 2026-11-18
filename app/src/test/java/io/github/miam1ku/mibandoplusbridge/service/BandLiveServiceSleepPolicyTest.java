@@ -87,11 +87,39 @@ public final class BandLiveServiceSleepPolicyTest {
         assertFalse(BandLiveService.quietSuppressesHistory(false, false));
     }
 
-    @Test public void sleepStatePollingRunsAtNightOnly() {
-        assertTrue(BandLiveService.shouldPollSleepState(23, true));
-        assertTrue(BandLiveService.shouldPollSleepState(3, true));
-        assertFalse(BandLiveService.shouldPollSleepState(10, true));
-        assertFalse(BandLiveService.shouldPollSleepState(23, false));
+    @Test public void sleepStatePollingCoversTheLateHoldUntilWakeEvidence() {
+        assertTrue(BandLiveService.shouldPollSleepState(23, true, false));
+        assertTrue(BandLiveService.shouldPollSleepState(3, true, true));
+        // 08:00-14:00 still holds history without evidence, so the band must be asked.
+        assertTrue(BandLiveService.shouldPollSleepState(10, true, false));
+        assertTrue(BandLiveService.shouldPollSleepState(13, true, false));
+        assertFalse(BandLiveService.shouldPollSleepState(10, true, true));
+        assertFalse(BandLiveService.shouldPollSleepState(14, true, false));
+        assertFalse(BandLiveService.shouldPollSleepState(23, false, false));
+    }
+
+    @Test public void daytimeNapHoldsHistoryOnTheBandState() {
+        // An asleep band blocks a daytime pull exactly like at night.
+        assertFalse(BandLiveService.shouldRequestHistory(false, false, Boolean.TRUE,
+                false, false, false, false));
+        assertTrue(BandLiveService.shouldRequestHistory(false, false, Boolean.FALSE,
+                false, false, false, false));
+        long hour = 60L * 60_000L;
+        long start = 10L * hour;
+        assertFalse(BandLiveService.napCapReached(false, 0, start + 10L * hour));
+        assertFalse(BandLiveService.napCapReached(false, start, start + 2L * hour));
+        assertTrue(BandLiveService.napCapReached(false, start, start + 3L * hour));
+        // The night hold has its own 14:00 end; the nap cap never shortens it.
+        assertFalse(BandLiveService.napCapReached(true, start, start + 5L * hour));
+    }
+
+    @Test public void sleepReportIsReaskedAfterFiveMinutes() {
+        long now = 100L * 60_000L;
+        assertFalse(BandLiveService.sleepStateFresh(now, 0));
+        assertTrue(BandLiveService.sleepStateFresh(now, now - 4L * 60_000L));
+        assertTrue(BandLiveService.sleepStateFresh(now, now - 5L * 60_000L));
+        assertFalse(BandLiveService.sleepStateFresh(now, now - 6L * 60_000L));
+        assertFalse(BandLiveService.sleepStateFresh(now, now + 60_000L));
     }
 
     @Test public void lateWakeRequiresEvidenceBeforeTheHardEnd() {

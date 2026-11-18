@@ -58,6 +58,11 @@ public final class BandLiveService extends Service {
     private static final long NIGHT_STATS_REFRESH_MINUTES = 60;
     private static final int AWAKE_CONFIRM_SAMPLES = 2;
     private static final int SLEEP_STATE_MISS_LIMIT = 2;
+    /** A band sleep report older than this is re-asked before any history request. */
+    private static final long SLEEP_STATE_FRESH_MINUTES = 5;
+    /** Second AWAKE sample during the late hold; the first is often minutes after waking. */
+    private static final long LATE_AWAKE_CONFIRM_SECONDS = 60;
+    private static final long DAY_ASLEEP_DEFER_HOURS = 3;
     private static final long NIGHT_RESTART_COOLDOWN_MINUTES = 60;
     private static final String LIVE_PREFS = "live-service";
     private static final String LAST_NIGHT_FLUSH = "lastNightFlushAtMs";
@@ -152,10 +157,16 @@ public final class BandLiveService extends Service {
     private volatile boolean sleepPauseOn;
     private volatile long sleepArmedAtMs = Long.MAX_VALUE;
     private volatile Boolean bandAsleep;
+    /** Wall time of the last 2/78 or 2/79 report behind {@link #bandAsleep}. */
+    private volatile long bandAsleepAtMs;
+    /** First deferral of the pending pull; 0 when nothing is held. */
+    private volatile long historyDeferredSinceMs;
     private volatile boolean sleepStateUnsupported;
     private int sleepStateMisses;
     private volatile boolean waitingForInitialSleepState;
     private volatile boolean historySyncPending;
+    /** Last deferred verdict written to the session log; identical repeats are dropped. */
+    private volatile String lastHistoryDeferLine;
     private volatile boolean pendingHistoryIncludesHistory;
     private volatile long historyCooldownUntilMs;
     private long historyStateDeadlineAt;
@@ -1012,6 +1023,8 @@ public final class BandLiveService extends Service {
                         nextHealthAt = now + TimeUnit.MINUTES.toNanos(historyPeriodMinutes());
                         nextWeatherAt = now + TimeUnit.MINUTES.toNanos(30);
                         bandAsleep = null;
+                        bandAsleepAtMs = 0;
+                        historyDeferredSinceMs = 0;
                         awakeSamples = 0;
                         quietStepsValue = Long.MIN_VALUE;
                         quietCheckedAtMs = 0;
@@ -1022,6 +1035,7 @@ public final class BandLiveService extends Service {
                         nightHadQuiet = false;
                         wakeEvidence.reset();
                         wakeEvidenceCheckedAtMs = 0;
+                        lastHistoryDeferLine = null;
                         boolean night = isNightWindow();
                         boolean restartCooldown = night && lastNightFlushAtMs > 0
                                 && sessionStartAtMs >= lastNightFlushAtMs
@@ -1061,7 +1075,8 @@ public final class BandLiveService extends Service {
                             }, REALTIME_STATS_TIMEOUT_SECONDS, TimeUnit.SECONDS);
                         }
                         syncDnd();
-                        requestSleepState();
+                        // Baseline at every hour: the initial history pull waits for it.
+                        requestSleepState(true);
                         });
                     }, fileId -> coordinator.execute(() -> {
                         if (client == active && !stopRequested && historySync != null) historySync.saved(fileId);
@@ -1270,8 +1285,20 @@ public final class BandLiveService extends Service {
         return isSleepSuppressionWindow(java.time.LocalTime.now().getHour());
     }
 
-    static boolean shouldPollSleepState(int hour, boolean nightTrackingEnabled) {
-        return nightTrackingEnabled && isNightWindow(hour);
+    /**
+     * The band's own sleep state is the cheapest wake evidence. History stays gated until 14:00
+     * without evidence, so keep asking through the late-morning hold until the band says awake;
+     * a fresh process at noon otherwise never learns it and waits for the hard end.
+     */
+    static boolean shouldPollSleepState(int hour, boolean nightTrackingEnabled, boolean wakeObserved) {
+        if (!nightTrackingEnabled) return false;
+        if (isNightWindow(hour)) return true;
+        return isSleepSuppressionWindow(hour) && !wakeObserved;
+    }
+
+    private boolean shouldPollSleepStateNow() {
+        return shouldPollSleepState(java.time.LocalTime.now().getHour(), nightTrackingEnabled(),
+                wakeEvidence.observed());
     }
 
     private boolean nightTrackingEnabled() {
@@ -1511,7 +1538,6 @@ public final class BandLiveService extends Service {
             resetQuietTracker();
             wakeEvidence.reset();
             wakeEvidenceCheckedAtMs = 0;
-            bandAsleep = null;
             awakeSamples = 0;
         }
     }
@@ -1612,6 +1638,7 @@ public final class BandLiveService extends Service {
                     "supervise stalled " + (beatAge / 1000) + "s, restarting");
             if (isNightWindow()) {
                 historySyncPending = false;
+                historyDeferredSinceMs = 0;
                 nextHealthAt = now + TimeUnit.MINUTES.toNanos(NIGHT_RESTART_COOLDOWN_MINUTES);
                 historyCooldownUntilMs = System.currentTimeMillis()
                         + TimeUnit.MINUTES.toMillis(NIGHT_RESTART_COOLDOWN_MINUTES);
@@ -1645,8 +1672,10 @@ public final class BandLiveService extends Service {
         }
         if (now >= nextSleepStateAt) {
             nextSleepStateAt = now + TimeUnit.MINUTES.toNanos(SLEEP_STATE_POLL_MINUTES);
-            if (shouldPollSleepState(java.time.LocalTime.now().getHour(), nightTrackingEnabled())) {
-                requestSleepState();
+            // A nap holds pending history the same way a night does, so keep asking until awake.
+            if (shouldPollSleepStateNow()
+                    || (historySyncPending && Boolean.TRUE.equals(bandAsleep))) {
+                requestSleepState(true);
             }
         }
         if (waitingForInitialSleepState && now >= historyStateDeadlineAt) {
@@ -2055,28 +2084,85 @@ public final class BandLiveService extends Service {
         boolean quiet = sleepStateUnsupported && !waitingForInitialSleepState
                 && !cooldown && !evidence && nightQuietObserved();
         boolean stale = quietSignalStale && !evidence;
-        Boolean gatedSleepState = evidence ? Boolean.FALSE : bandAsleep;
+        Boolean gatedSleepState = evidence || napCapReached(isSleepSuppressionWindow(hour),
+                historyDeferredSinceMs, nowMs) ? Boolean.FALSE : bandAsleep;
         return shouldRequestHistory(night, sleepStateUnsupported, gatedSleepState,
                 waitingForInitialSleepState, quiet, cooldown, stale);
+    }
+
+    /**
+     * History pulls make the band close an open sleep file (firmware logs "Force wk-5"), at any
+     * hour, so a daytime nap is gated by the band's own state just like a night. Outside the
+     * night hold a band that keeps reporting asleep is trusted for {@link #DAY_ASLEEP_DEFER_HOURS}.
+     */
+    static boolean napCapReached(boolean suppressionWindow, long deferredSinceMs, long nowMs) {
+        return !suppressionWindow && deferredSinceMs > 0
+                && nowMs - deferredSinceMs >= TimeUnit.HOURS.toMillis(DAY_ASLEEP_DEFER_HOURS);
+    }
+
+    static boolean sleepStateFresh(long nowMs, long reportedAtMs) {
+        return reportedAtMs > 0 && nowMs >= reportedAtMs
+                && nowMs - reportedAtMs <= TimeUnit.MINUTES.toMillis(SLEEP_STATE_FRESH_MINUTES);
+    }
+
+    private boolean sleepStateFresh(long nowMs) {
+        return sleepStateFresh(nowMs, bandAsleepAtMs);
+    }
+
+    /** Asks the band before pulling history; the reply or the timeout resumes the pending pull. */
+    private boolean checkSleepStateBeforeHistory() {
+        if (sleepStateUnsupported || waitingForInitialSleepState || commands == null
+                || sleepStateFresh(System.currentTimeMillis())) {
+            return false;
+        }
+        waitingForInitialSleepState = true;
+        historyStateDeadlineAt = System.nanoTime()
+                + TimeUnit.SECONDS.toNanos(INITIAL_HISTORY_SYNC_WAIT_SECONDS);
+        requestSleepState(true);
+        return true;
     }
 
     private void requestHistoryWhenAwake(boolean historical) {
         pendingHistoryIncludesHistory |= historical && !isNightWindow();
         historySyncPending = true;
+        if (historyDeferredSinceMs == 0) historyDeferredSinceMs = System.currentTimeMillis();
+        if (checkSleepStateBeforeHistory()) return;
         if (!historyMayRun()) {
-            io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this,
-                    "HISTORY_SYNC deferred asleep=" + bandAsleep
-                            + " waiting=" + waitingForInitialSleepState
-                            + " quiet=" + (sleepStateUnsupported && nightQuietObserved()));
+            String line = "HISTORY_SYNC deferred reason=" + historyDeferReason()
+                    + " asleep=" + bandAsleep
+                    + " waiting=" + waitingForInitialSleepState
+                    + " quiet=" + (sleepStateUnsupported && nightQuietObserved());
+            // Health pulls and ticks repeat the same verdict many times a minute.
+            if (!line.equals(lastHistoryDeferLine)) {
+                lastHistoryDeferLine = line;
+                io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this, line);
+            }
             return;
         }
         flushPendingHistory();
+    }
+
+    /** Mirrors {@link #historyMayRun()} so a deferred line names the gate that held it. */
+    private String historyDeferReason() {
+        int hour = java.time.LocalTime.now().getHour();
+        long nowMs = System.currentTimeMillis();
+        boolean evidence = wakeEvidence.observed();
+        if (nightStillSuppressed(hour, evidence)) {
+            return isNightWindow(hour) ? "night" : "late-hold-no-wake-evidence";
+        }
+        if (waitingForInitialSleepState) return "waiting-sleep-state";
+        if (isNightWindow(hour) && nowMs < historyCooldownUntilMs) return "cooldown";
+        if (!sleepStateUnsupported) return isSleepSuppressionWindow(hour) ? "band-asleep" : "band-asleep-nap";
+        if (quietSignalStale && !evidence) return "steps-stale";
+        return "quiet";
     }
 
     private void flushPendingHistory() {
         if (!historySyncPending || !historyMayRun() || historySync == null) return;
         boolean historical = pendingHistoryIncludesHistory && !isNightWindow();
         historySyncPending = false;
+        historyDeferredSinceMs = 0;
+        lastHistoryDeferLine = null;
         pendingHistoryIncludesHistory = false;
         historySync.request(historical);
         if (isNightWindow()) {
@@ -2093,9 +2179,13 @@ public final class BandLiveService extends Service {
     }
 
     private void requestSleepState() {
+        requestSleepState(false);
+    }
+
+    private void requestSleepState(boolean beforeHistory) {
         var queue = commands;
         if (sleepStateUnsupported || stopRequested || queue == null
-                || !shouldPollSleepState(java.time.LocalTime.now().getHour(), nightTrackingEnabled())) {
+                || !(beforeHistory || shouldPollSleepStateNow())) {
             return;
         }
         long epoch = sessionEpoch;
@@ -2118,6 +2208,7 @@ public final class BandLiveService extends Service {
         }
         boolean changed = !asleep.equals(bandAsleep);
         bandAsleep = asleep;
+        bandAsleepAtMs = System.currentTimeMillis();
         waitingForInitialSleepState = false;
         historyStateDeadlineAt = 0;
         if (changed && historySyncPending) {
@@ -2133,6 +2224,11 @@ public final class BandLiveService extends Service {
             awakeSamples = 0;
         } else {
             awakeSamples++;
+            if (historySyncPending && awakeSamples < AWAKE_CONFIRM_SAMPLES
+                    && !isNightWindow() && isSleepSuppressionWindow()) {
+                nextSleepStateAt = Math.min(nextSleepStateAt,
+                        System.nanoTime() + TimeUnit.SECONDS.toNanos(LATE_AWAKE_CONFIRM_SECONDS));
+            }
             if (nightAwakeConfirmed(isNightWindow(), awakeSamples)) {
                 flushPendingHistory();
             } else {
