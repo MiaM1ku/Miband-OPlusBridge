@@ -29,22 +29,31 @@ final class OHealthLockCardHook {
 
     static void install(Context context, ClassLoader loader) {
         if (context != null) app = context.getApplicationContext();
-        XposedHelpers.findAndHookMethod(
-                "com.heytap.health.core.provider.adapter.open.HeartRateAdapter", loader,
-                "query", String[].class, String.class, String[].class, String.class,
-                new XC_MethodHook() {
-                    @Override protected void afterHookedMethod(MethodHookParam param) {
-                        param.setResult(heart((Cursor) param.getResult()));
-                    }
-                });
-        XposedHelpers.findAndHookMethod(
-                "com.heytap.health.core.provider.adapter.open.SportDataAdapter", loader,
-                "query", String[].class, String.class, String[].class, String.class,
-                new XC_MethodHook() {
-                    @Override protected void afterHookedMethod(MethodHookParam param) {
-                        param.setResult(steps((Cursor) param.getResult()));
-                    }
-                });
+        XC_MethodHook heartHook = new XC_MethodHook() {
+            @Override protected void afterHookedMethod(MethodHookParam param) {
+                param.setResult(heart((Cursor) param.getResult()));
+            }
+        };
+        XC_MethodHook stepHook = new XC_MethodHook() {
+            @Override protected void afterHookedMethod(MethodHookParam param) {
+                param.setResult(steps((Cursor) param.getResult()));
+            }
+        };
+        try {
+            XposedHelpers.findAndHookMethod(
+                    "com.heytap.health.core.provider.adapter.open.HeartRateAdapter", loader,
+                    "query", String[].class, String.class, String[].class, String.class, heartHook);
+            XposedHelpers.findAndHookMethod(
+                    "com.heytap.health.core.provider.adapter.open.SportDataAdapter", loader,
+                    "query", String[].class, String.class, String[].class, String.class, stepHook);
+        } catch (Throwable renamed) {
+            XposedHelpers.findAndHookMethod(
+                    "com.heytap.health.core.provider.adapter.open.c", loader,
+                    "e", String.class, String.class, String[].class, heartHook);
+            XposedHelpers.findAndHookMethod(
+                    "com.heytap.health.core.provider.adapter.open.y", loader,
+                    "e", String.class, String.class, String[].class, stepHook);
+        }
     }
 
     static void notifyCards(Context context) {

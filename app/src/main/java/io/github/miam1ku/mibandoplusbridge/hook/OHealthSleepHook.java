@@ -44,7 +44,9 @@ public final class OHealthSleepHook {
     private static final String CARD = "com.heytap.health.main.card.SleepCard";
     private static final String PAGE = "com.heytap.health.sleep.day.view.SleepDayViewPage2";
     private static final String DAY_CARD = "com.heytap.health.sleep.day.card.SleepDayViewPageCard";
+    private static final String DAY_CARD_6117 = "j60.a0";
     private static final String LOAD = "com.heytap.health.sleep.day.util.SleepDataLoadUtils";
+    private static final String LOAD_6117 = "l60.c";
     private static final String HISTORY = "com.heytap.health.sleep.SleepHistoryActivity";
     private static final String[] COLUMNS = {"recordId", "revision", "record"};
     private static final Handler MAIN = HookRuntime.main();
@@ -57,6 +59,7 @@ public final class OHealthSleepHook {
     private static ClassLoader loader;
     private static Handler worker;
     private static Object dateUtils;
+    private static boolean dateUtilsRenamed;
     private static Object manager;
     private static Object allRole;
     private static Object accountCompanion;
@@ -64,6 +67,7 @@ public final class OHealthSleepHook {
     private static volatile Cache cache = Cache.empty();
     private static boolean installed;
     private static boolean refreshingNavigation;
+    private static boolean navigationRenamed;
     private static final Runnable RELOAD = OHealthSleepHook::load;
 
     private OHealthSleepHook() {}
@@ -75,9 +79,15 @@ public final class OHealthSleepHook {
         context = app == null ? supplied : app;
         loader = hostLoader;
         dateUtils = singletonOrNull("com.heytap.health.healthbase.util.HealthDateUtils", "INSTANCE");
+        if (dateUtils == null) {
+            dateUtils = singletonOrNull("com.heytap.health.healthbase.util.e", "INSTANCE");
+            dateUtilsRenamed = dateUtils != null;
+        }
         manager = singletonOrNull("com.heytap.health.devicemanager.client.DMHeytap", "managerApi");
+        if (manager == null) manager = singletonOrNull("et.n", "managerApi");
         allRole = singletonOrNull(
                 "com.heytap.health.devicemanager.client.role.DeviceBasegetRole$All", "INSTANCE");
+        if (allRole == null) allRole = singletonOrNull("nt.a", "INSTANCE");
         accountCompanion = accountOwner(hostLoader);
         HandlerThread thread = HookRuntime.thread("OplusBandSleepRead");
         worker = new Handler(thread.getLooper());
@@ -100,7 +110,9 @@ public final class OHealthSleepHook {
         if (manager != null) {
             for (Method method : manager.getClass().getMethods()) {
                 if (method.getName().equals("setThirdpartySelectMac")
-                        || method.getName().equals("setCurrActiveMac")) {
+                        || method.getName().equals("setCurrActiveMac")
+                        || (method.getName().equals("C") && method.getParameterCount() == 1
+                        && method.getParameterTypes()[0] == String.class)) {
                     XposedBridge.hookMethod(method, selection);
                 }
             }
@@ -250,9 +262,21 @@ public final class OHealthSleepHook {
         MAIN.post(OHealthSleepHook::renderAll);
     }
 
-    private static long sleepStart(long time) { return ((Number) XposedHelpers.callMethod(dateUtils, "getSleepStartTime", time)).longValue(); }
-    private static long sleepEnd(long time) { return ((Number) XposedHelpers.callMethod(dateUtils, "getSleepEndTime", time)).longValue(); }
-    private static long dayStart(long time) { return ((Number) XposedHelpers.callMethod(dateUtils, "getCurDayMinTime", time)).longValue(); }
+    private static long sleepStart(long time) {
+        return ((Number) (dateUtilsRenamed
+                ? XposedHelpers.callStaticMethod(dateUtils.getClass(), "m", time)
+                : XposedHelpers.callMethod(dateUtils, "getSleepStartTime", time))).longValue();
+    }
+    private static long sleepEnd(long time) {
+        return ((Number) (dateUtilsRenamed
+                ? XposedHelpers.callStaticMethod(dateUtils.getClass(), "l", time)
+                : XposedHelpers.callMethod(dateUtils, "getSleepEndTime", time))).longValue();
+    }
+    private static long dayStart(long time) {
+        return ((Number) (dateUtilsRenamed
+                ? XposedHelpers.callStaticMethod(dateUtils.getClass(), "c", time)
+                : XposedHelpers.callMethod(dateUtils, "getCurDayMinTime", time))).longValue();
+    }
 
     private static void hookHome() throws Exception {
         Class<?> card = Class.forName(CARD, false, loader);
@@ -351,8 +375,19 @@ public final class OHealthSleepHook {
     }
 
     private static void hookNavigation() throws Exception {
-        XposedBridge.hookAllMethods(Class.forName(LOAD, false, loader), "getAllDataList", new XC_MethodHook() {
+        Class<?> loadClass;
+        boolean renamed = false;
+        try {
+            loadClass = Class.forName(LOAD, false, loader);
+        } catch (ClassNotFoundException missing) {
+            loadClass = Class.forName(LOAD_6117, false, loader);
+            renamed = true;
+        }
+        navigationRenamed = renamed;
+        final boolean isRenamed = renamed;
+        XposedBridge.hookAllMethods(loadClass, isRenamed ? "a" : "getAllDataList", new XC_MethodHook() {
             @Override protected void beforeHookedMethod(MethodHookParam p) {
+                if (p.args.length != 3) return;
                 if (!refreshingNavigation) NAVIGATION.put(p.thisObject,
                         new Navigation(((Number) p.args[0]).longValue(), ((Number) p.args[1]).longValue(), ((Number) p.args[2]).longValue()));
                 Cache data = available();
@@ -364,30 +399,41 @@ public final class OHealthSleepHook {
                         Math.min(((Number) p.args[1]).longValue(), ((Number) p.args[2]).longValue()));
             }
             @Override protected void afterHookedMethod(MethodHookParam p) {
-                Object control = field(p.thisObject, "sleepDayControlModel");
-                XposedHelpers.callMethod(control, "setBorderStartTime", p.args[0]);
-                XposedHelpers.callMethod(control, "setBorderEndTime", p.args[1]);
+                if (p.args.length != 3) return;
+                Object control = field(p.thisObject, isRenamed ? "c" : "sleepDayControlModel");
+                if (control == null) return;
+                if (isRenamed) {
+                    setLongField(control, "i", ((Number) p.args[0]).longValue());
+                    setLongField(control, "j", ((Number) p.args[1]).longValue());
+                } else {
+                    XposedHelpers.callMethod(control, "setBorderStartTime", p.args[0]);
+                    XposedHelpers.callMethod(control, "setBorderEndTime", p.args[1]);
+                }
             }
         });
-        XposedBridge.hookAllMethods(Class.forName(DAY_CARD, false, loader), "refreshCardView", new XC_MethodHook() {
+        Class<?> dayCardClass = Class.forName(isRenamed ? DAY_CARD_6117 : DAY_CARD, false, loader);
+        XposedBridge.hookAllMethods(dayCardClass, isRenamed ? "n" : "refreshCardView", new XC_MethodHook() {
             @Override protected void afterHookedMethod(MethodHookParam p) {
                 if (p.args.length != 1 || !(p.args[0] instanceof Long)) return;
-                Object fragment = field(p.thisObject, "fragment");
-                Object load = XposedHelpers.callMethod(fragment, "getSleepDataLoadUtils");
+                Object fragment = field(p.thisObject, isRenamed ? "w" : "fragment");
+                Object load = XposedHelpers.callMethod(fragment, isRenamed ? "f0" : "getSleepDataLoadUtils");
                 Navigation navigation = NAVIGATION.get(load);
-                if (navigation != null) navigation.selectedDate = ((Number) field(p.thisObject, "lastRefreshTimestamp")).longValue();
+                if (navigation != null) navigation.selectedDate = ((Number) field(p.thisObject,
+                        isRenamed ? "N" : "lastRefreshTimestamp")).longValue();
             }
         });
-        XposedBridge.hookAllMethods(Class.forName("com.heytap.health.sleep.day.viewmodel.SleepDayControlModel", false, loader),
-                "changeSelectTime", new XC_MethodHook() {
-                    @Override protected void afterHookedMethod(MethodHookParam p) {
-                        for (Map.Entry<Object, Navigation> entry : NAVIGATION.entrySet()) {
-                            if (field(entry.getKey(), "sleepDayControlModel") == p.thisObject) {
-                                entry.getValue().selectedDate = ((Number) p.args[0]).longValue();
+        if (!isRenamed) {
+            XposedBridge.hookAllMethods(Class.forName("com.heytap.health.sleep.day.viewmodel.SleepDayControlModel", false, loader),
+                    "changeSelectTime", new XC_MethodHook() {
+                        @Override protected void afterHookedMethod(MethodHookParam p) {
+                            for (Map.Entry<Object, Navigation> entry : NAVIGATION.entrySet()) {
+                                if (field(entry.getKey(), "sleepDayControlModel") == p.thisObject) {
+                                    entry.getValue().selectedDate = ((Number) p.args[0]).longValue();
+                                }
                             }
                         }
-                    }
-                });
+                    });
+        }
     }
 
     private static void hookToolbar() throws Exception {
@@ -416,9 +462,15 @@ public final class OHealthSleepHook {
             for (Map.Entry<Object, Navigation> entry : new ArrayList<>(NAVIGATION.entrySet())) {
                 try {
                     Navigation value = entry.getValue();
-                    Object dates = XposedHelpers.callMethod(entry.getKey(), "getAllDataList", value.start, value.end, value.selectedDate);
-                    XposedHelpers.callMethod(entry.getKey(), "updateChartData", dates,
-                            XposedHelpers.getIntField(entry.getKey(), "currentItemIndex"));
+                    if (navigationRenamed) {
+                        Object dates = XposedHelpers.callMethod(entry.getKey(), "a", value.start, value.end, value.selectedDate);
+                        XposedHelpers.callMethod(entry.getKey(), "b",
+                                XposedHelpers.getIntField(entry.getKey(), "j"), dates);
+                    } else {
+                        Object dates = XposedHelpers.callMethod(entry.getKey(), "getAllDataList", value.start, value.end, value.selectedDate);
+                        XposedHelpers.callMethod(entry.getKey(), "updateChartData", dates,
+                                XposedHelpers.getIntField(entry.getKey(), "currentItemIndex"));
+                    }
                 } catch (Throwable ignored) { }
             }
         } finally { refreshingNavigation = false; }
@@ -427,6 +479,14 @@ public final class OHealthSleepHook {
     private static Object field(Object owner, String name) {
         if (owner == null) return null;
         try { return XposedHelpers.getObjectField(owner, name); } catch (Throwable unavailable) { return null; }
+    }
+    private static void setLongField(Object owner, String name, long value) {
+        if (owner == null) return;
+        try {
+            java.lang.reflect.Field field = owner.getClass().getDeclaredField(name);
+            field.setAccessible(true);
+            field.setLong(owner, value);
+        } catch (Throwable ignored) { }
     }
     private static void hide(Object owner, String... names) {
         for (String name : names) { Object view = field(owner, name); if (view instanceof View) ((View) view).setVisibility(View.GONE); }

@@ -109,4 +109,12 @@ public final class BandLiveServiceSleepPolicyTest {
         assertTrue(BandLiveService.quietSampleMaxAgeMinutes()
                 < BandLiveService.nightPollMinutes());
     }
+
+    @Test public void activeSessionIsNeverTreatedAsSupervisorStall() {
+        assertFalse(BandLiveService.supervisorStalled(true, true, 1_000L, 1_000L + 240_000L));
+        assertFalse(BandLiveService.supervisorStalled(true, false, 1_000L, 1_000L + 180_000L));
+        assertTrue(BandLiveService.supervisorStalled(true, false, 1_000L, 1_000L + 180_001L));
+        assertFalse(BandLiveService.supervisorStalled(false, false, 1_000L, 1_000L + 240_000L));
+        assertFalse(BandLiveService.supervisorStalled(true, false, 0L, 240_000L));
+    }
 }

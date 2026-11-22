@@ -1148,6 +1148,7 @@ public final class BandLiveService extends Service {
                 } finally {
                     client = null;
                     commands = null;
+                    supervisorBeatMs = android.os.SystemClock.elapsedRealtime();
                     realtimeStatsStopPending = false;
                     try {
                         coordinator.execute(() -> {
@@ -1592,27 +1593,27 @@ public final class BandLiveService extends Service {
         queue.send(realtimeStats(REALTIME_STATS_STOP));
     }
 
+    static boolean supervisorStalled(boolean running, boolean sessionActive, long beatMs, long nowElapsedMs) {
+        return running && !sessionActive && beatMs != 0L && nowElapsedMs - beatMs > SUPERVISOR_STALL_MS;
+    }
+
     private void tick() {
+        if (stopRequested) return;
         var queue = commands;
-        if (stopRequested || queue == null || historySync == null) return;
-        if (!healthBound) bindHealthHost();
-        if (!new BandStateRepository(this).isRegistered()) {
-            requestStop();
-            return;
-        }
-        long now = System.nanoTime();
-        updateNightTransition(now);
-        long beatAge = android.os.SystemClock.elapsedRealtime() - supervisorBeatMs;
-        if (running.get() && supervisorBeatMs != 0L && beatAge > SUPERVISOR_STALL_MS) {
+        long nowElapsed = android.os.SystemClock.elapsedRealtime();
+        if (queue != null) {
+            supervisorBeatMs = nowElapsed;
+        } else if (supervisorStalled(running.get(), false, supervisorBeatMs, nowElapsed)) {
+            long beatAge = nowElapsed - supervisorBeatMs;
             // The coordinator survives a process freeze, so it can put the worker back after the
-            // frozen supervisor thread died. Re-entry is harmless: SppDiagnosticClient admits one
-            // live session at a time and the loser reports CONNECTION_ALREADY_ACTIVE.
-            supervisorBeatMs = android.os.SystemClock.elapsedRealtime();
+            // frozen supervisor thread died while disconnected. Re-entry is harmless:
+            // SppDiagnosticClient admits one live session at a time.
+            supervisorBeatMs = nowElapsed;
             io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this,
                     "supervise stalled " + (beatAge / 1000) + "s, restarting");
             if (isNightWindow()) {
                 historySyncPending = false;
-                nextHealthAt = now + TimeUnit.MINUTES.toNanos(NIGHT_RESTART_COOLDOWN_MINUTES);
+                nextHealthAt = System.nanoTime() + TimeUnit.MINUTES.toNanos(NIGHT_RESTART_COOLDOWN_MINUTES);
                 historyCooldownUntilMs = System.currentTimeMillis()
                         + TimeUnit.MINUTES.toMillis(NIGHT_RESTART_COOLDOWN_MINUTES);
                 persistNightCooldown();
@@ -1623,6 +1624,14 @@ public final class BandLiveService extends Service {
                 worker.execute(this::supervise);
             } catch (java.util.concurrent.RejectedExecutionException stopping) { }
         }
+        if (queue == null || historySync == null) return;
+        if (!healthBound) bindHealthHost();
+        if (!new BandStateRepository(this).isRegistered()) {
+            requestStop();
+            return;
+        }
+        long now = System.nanoTime();
+        updateNightTransition(now);
         if (now >= nextBatteryAt) {
             nextBatteryAt = now + TimeUnit.MINUTES.toNanos(BATTERY_POLL_MINUTES);
             queue.request(nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto.Command

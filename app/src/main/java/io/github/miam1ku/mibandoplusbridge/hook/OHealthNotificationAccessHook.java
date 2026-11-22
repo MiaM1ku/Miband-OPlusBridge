@@ -22,6 +22,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public final class OHealthNotificationAccessHook {
     private static final String UTIL = "com.heytap.health.watch.notification.NotificationListenerUtil";
     private static final String COMPANION = UTIL + "$Companion";
+    private static final String UTIL_6117 = "com.heytap.health.watch.notification.w0";
+    private static final String REGISTER_CENTER =
+            "com.heytap.health.watch.notification.HealthNotificationRegisterCenter";
+    private static final String REGISTER_CENTER_6117 = "com.heytap.health.watch.notification.d0";
+    private static final String MENU_ITEM =
+            "com.heytap.health.device.tab.itemview.wearable.MenuNotificationItem";
+    private static final String MENU_ITEM_6117 =
+            "com.heytap.health.device.tab.itemview.wearable.l0";
     private static final String LISTENER =
             "com.heytap.health.watch.commonnotification.HeytapNotificationListenerService";
     private static final String COMPONENT = "com.heytap.health/" + LISTENER;
@@ -43,14 +51,7 @@ public final class OHealthNotificationAccessHook {
                 if (host != null && granted(host)) param.setResult(true);
             }
         };
-        Class<?> companion = Class.forName(COMPANION, false, loader);
-        Class<?> util = Class.forName(UTIL, false, loader);
-        XposedBridge.hookAllMethods(companion, "isNotificationListenerEnabled", grant);
-        XposedBridge.hookAllMethods(util, "isNotificationListenerEnabled", grant);
-        XposedBridge.hookAllMethods(companion, "runNotificationService", keep(false));
-        XposedBridge.hookAllMethods(util, "runNotificationService", keep(false));
-        XposedBridge.hookAllMethods(companion, "stopNotificationService", keep(true));
-        XposedBridge.hookAllMethods(util, "stopNotificationService", keep(true));
+        hookUtil(loader, grant);
         XposedHelpers.findAndHookMethod(NotificationManager.class, "isNotificationListenerAccessGranted",
                 ComponentName.class, new XC_MethodHook() {
                     @Override protected void afterHookedMethod(MethodHookParam param) {
@@ -65,32 +66,76 @@ public final class OHealthNotificationAccessHook {
                 });
         hookServiceLifecycle(loader);
         noteExistingService(context, loader);
-        Class<?> item = Class.forName(
-                "com.heytap.health.device.tab.itemview.wearable.MenuNotificationItem", false, loader);
-        XposedBridge.hookAllMethods(item, "initData", new XC_MethodHook() {
-            @Override protected void afterHookedMethod(MethodHookParam param) {
-                try {
-                    Object controller = XposedHelpers.callMethod(param.thisObject, "getController");
-                    Object label = XposedHelpers.callMethod(param.thisObject, "getMTvRight");
-                    XposedHelpers.callMethod(label, "setText", "");
-                } catch (Throwable ignored) { }
-            }
-        });
+        hookMenuRow(loader);
         rebind(context);
         scheduleRetry(context);
     }
 
+    private static void hookUtil(ClassLoader loader, XC_MethodHook grant) throws ClassNotFoundException {
+        try {
+            Class<?> companion = Class.forName(COMPANION, false, loader);
+            Class<?> util = Class.forName(UTIL, false, loader);
+            XposedBridge.hookAllMethods(companion, "isNotificationListenerEnabled", grant);
+            XposedBridge.hookAllMethods(util, "isNotificationListenerEnabled", grant);
+            XposedBridge.hookAllMethods(companion, "runNotificationService", keep(false));
+            XposedBridge.hookAllMethods(util, "runNotificationService", keep(false));
+            XposedBridge.hookAllMethods(companion, "stopNotificationService", keep(true));
+            XposedBridge.hookAllMethods(util, "stopNotificationService", keep(true));
+            return;
+        } catch (ClassNotFoundException renamed) { }
+        Class<?> util = Class.forName(UTIL_6117, false, loader);
+        XposedHelpers.findAndHookMethod(util, "b", Context.class, grant);
+        XposedHelpers.findAndHookMethod(util, "f", Context.class, keep(false));
+        XposedHelpers.findAndHookMethod(util, "g", Context.class, keep(true));
+    }
+
+    private static void hookMenuRow(ClassLoader loader) {
+        try {
+            Class<?> item = Class.forName(MENU_ITEM, false, loader);
+            XposedBridge.hookAllMethods(item, "initData", new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam param) {
+                    try {
+                        Object label = XposedHelpers.callMethod(param.thisObject, "getMTvRight");
+                        XposedHelpers.callMethod(label, "setText", "");
+                    } catch (Throwable ignored) { }
+                }
+            });
+            return;
+        } catch (Throwable renamed) { }
+        try {
+            Class<?> item = Class.forName(MENU_ITEM_6117, false, loader);
+            XposedBridge.hookAllMethods(item, "j", new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam param) {
+                    try {
+                        Object label = XposedHelpers.callMethod(param.thisObject, "H");
+                        XposedHelpers.callMethod(label, "setText", "");
+                    } catch (Throwable ignored) { }
+                }
+            });
+        } catch (Throwable ignored) { }
+    }
+
     /** The service may already be bound before this hook is installed. */
     private static void noteExistingService(Context context, ClassLoader loader) {
+        Object existing = existingListenerService(loader);
+        if (existing == null) return;
+        serviceConnected.set(true);
+        note(context, "OHEALTH_LISTENER state=already-connected process="
+                + android.app.Application.getProcessName());
+        report(context, true);
+    }
+
+    private static Object existingListenerService(ClassLoader loader) {
         try {
-            Class<?> center = Class.forName(
-                    "com.heytap.health.watch.notification.HealthNotificationRegisterCenter", false, loader);
-            if (XposedHelpers.getStaticObjectField(center, "mListenerService") == null) return;
-            serviceConnected.set(true);
-            note(context, "OHEALTH_LISTENER state=already-connected process="
-                    + android.app.Application.getProcessName());
-            report(context, true);
-        } catch (Throwable ignored) { }
+            Class<?> center = Class.forName(REGISTER_CENTER, false, loader);
+            return XposedHelpers.getStaticObjectField(center, "mListenerService");
+        } catch (Throwable renamed) { }
+        try {
+            Class<?> center = Class.forName(REGISTER_CENTER_6117, false, loader);
+            return XposedHelpers.getStaticObjectField(center, "c");
+        } catch (Throwable ignored) {
+            return null;
+        }
     }
 
     /** The framework method is empty and may be inlined. Hook the service's own overrides. */

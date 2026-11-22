@@ -75,7 +75,7 @@ final class OHealthStepAggregateHook {
                         && active.applied && !param.hasThrowable()) param.setResult(true);
             }
         });
-        XposedBridge.hookMethod(nativeAccess.factory.getMethod("getStat", int.class), new XC_MethodHook() {
+        XposedBridge.hookMethod(nativeAccess.createStat, new XC_MethodHook() {
             @Override protected void afterHookedMethod(MethodHookParam param) {
                 if (param.args[0].equals(1002) && !param.hasThrowable() && param.getResult() != null) request();
             }
@@ -204,8 +204,7 @@ final class OHealthStepAggregateHook {
     private void repair(Object process, Object db, Request request, StepAggregateReview review) throws Exception {
         List<Map<String, String>> before = rows(db, request);
         Object dao = nativeAccess.dao.get(process);
-        @SuppressWarnings("unchecked") List<Object> originals = (List<Object>) nativeAccess.queryDays.invoke(
-                dao, request.account(), request.date(), request.date());
+        List<Object> originals = nativeAccess.queryDays(dao, request.account(), request.date());
         for (Object old : originals) {
             int mode = (Integer) nativeAccess.mode.invoke(old);
             if ((mode != -2 && mode != -4) || !empty(nativeAccess.device.invoke(old))) continue;
@@ -381,35 +380,72 @@ final class OHealthStepAggregateHook {
         return stat;
     }
 
-    private static final class NativeAccess {
+    static final class NativeAccess {
         final Class<?> factory;
         final Field map, db, dao, sharedDb, common;
         final Method merge, stat, queryDays, sql, transaction, createStat, isOpen, applicationContext;
         final Method account, device, date, mode, steps, id, setSteps, setSync;
+        final boolean queryDaysDateFirst;
         final ClassLoader loader;
         NativeAccess(ClassLoader loader) throws Exception {
             this.loader = loader;
-            factory = Class.forName("com.heytap.databaseengineservice.store.SportHealthStatFactory", false, loader);
+            Class<?> factoryClass;
+            boolean renamed = false;
+            try {
+                factoryClass = Class.forName("com.heytap.databaseengineservice.store.SportHealthStatFactory", false, loader);
+            } catch (ClassNotFoundException missing) {
+                factoryClass = Class.forName("com.heytap.databaseengineservice.store.l", false, loader);
+                renamed = true;
+            }
+            factory = factoryClass;
             Class<?> process = Class.forName("com.heytap.databaseengineservice.store.stat.SportDataStatProcess", false, loader);
             Class<?> entity = Class.forName("com.heytap.databaseengineservice.db.table.DBSportDataStat", false, loader);
-            Class<?> daoType = Class.forName("com.heytap.databaseengineservice.db.dao.SportDataStatDao", false, loader);
+            Class<?> daoType = firstClass(loader,
+                    "com.heytap.databaseengineservice.db.dao.SportDataStatDao", "lb.o1");
             Class<?> room = Class.forName("androidx.room.RoomDatabase", false, loader);
-            map = factory.getField("map"); db = process.getField("db"); dao = process.getField("sportDataStatDao");
-            sharedDb = Class.forName("com.heytap.databaseengineservice.db.AppDatabase", false, loader).getField("INSTANCE");
-            common = Class.forName("com.heytap.databaseengineservice.depend.BusinessDelegate", false, loader).getField("common");
-            applicationContext = Class.forName("com.heytap.databaseengineservice.depend.ICommon", false, loader)
-                    .getMethod("getApplicationContext");
-            createStat = factory.getMethod("getStat", int.class);
+            map = findField(factory, renamed ? "a" : "map");
+            db = findField(process, "db");
+            dao = findField(process, "sportDataStatDao");
+            Class<?> appDb = Class.forName("com.heytap.databaseengineservice.db.AppDatabase", false, loader);
+            sharedDb = findField(appDb, "INSTANCE", "f");
+            Class<?> delegate = firstClass(loader,
+                    "com.heytap.databaseengineservice.depend.BusinessDelegate", "kd.a");
+            common = findField(delegate, "common");
+            Class<?> commonType = firstClass(loader,
+                    "com.heytap.databaseengineservice.depend.ICommon", "kd.c");
+            applicationContext = commonType.getMethod("getApplicationContext");
+            createStat = factory.getMethod(renamed ? "b" : "getStat", int.class);
             isOpen = room.getMethod("isOpen");
-            merge = process.getMethod("processOldStat", entity, boolean.class, entity);
+            merge = process.getDeclaredMethod("processOldStat", entity, boolean.class, entity);
+            merge.setAccessible(true);
             stat = process.getMethod("stat", List.class, boolean.class, boolean.class);
-            queryDays = daoType.getMethod("query", String.class, int.class, int.class);
+            Method resolvedQuery;
+            boolean dateFirst = false;
+            try {
+                resolvedQuery = daoType.getMethod("query", String.class, int.class, int.class);
+            } catch (NoSuchMethodException moved) {
+                resolvedQuery = daoType.getMethod("i", int.class, int.class, String.class);
+                dateFirst = true;
+            }
+            queryDays = resolvedQuery;
+            queryDaysDateFirst = dateFirst;
             sql = room.getMethod("query", String.class, Object[].class);
             transaction = room.getMethod("runInTransaction", Runnable.class);
             account = entity.getMethod("getSsoid"); device = entity.getMethod("getDeviceUniqueId");
             date = entity.getMethod("getDate"); mode = entity.getMethod("getSportMode");
             steps = entity.getMethod("getTotalSteps"); id = entity.getMethod("getSportStatId");
             setSteps = entity.getMethod("setTotalSteps", int.class); setSync = entity.getMethod("setSyncStatus", int.class);
+        }
+        @SuppressWarnings("unchecked")
+        List<Object> queryDays(Object dao, String account, int date) throws Exception {
+            Object rows = invokeQueryDays(queryDays, queryDaysDateFirst, dao, account, date);
+            return (List<Object>) rows;
+        }
+        static Object invokeQueryDays(Method queryDays, boolean dateFirst, Object dao, String account, int date)
+                throws Exception {
+            return dateFirst
+                    ? queryDays.invoke(dao, date, date, account)
+                    : queryDays.invoke(dao, account, date, date);
         }
         Object existingProcess() throws Exception {
             synchronized (factory) {
@@ -432,7 +468,39 @@ final class OHealthStepAggregateHook {
                 Class.forName("com.heytap.databaseengineservice.broadcast.BroadcastUtil", false, loader)
                         .getMethod("sendDataRefreshBroadcast", Context.class, int.class, String.class)
                         .invoke(null, context, 1, account);
+                return;
+            } catch (Exception renamed) { }
+            try {
+                Class.forName("kl1.i", false, loader)
+                        .getMethod("m", Context.class, int.class, String.class)
+                        .invoke(null, context, 1, account);
             } catch (Exception unavailable) { HookRuntime.log("OHEALTH_STEP_AUDIT_REFRESH_PENDING"); }
+        }
+        private static Class<?> firstClass(ClassLoader loader, String... names) throws ClassNotFoundException {
+            ClassNotFoundException last = null;
+            for (String name : names) {
+                try {
+                    return Class.forName(name, false, loader);
+                } catch (ClassNotFoundException missing) {
+                    last = missing;
+                }
+            }
+            throw last == null ? new ClassNotFoundException() : last;
+        }
+        static Field findField(Class<?> owner, String... names) throws NoSuchFieldException {
+            NoSuchFieldException last = null;
+            for (String name : names) {
+                for (Class<?> type = owner; type != null && type != Object.class; type = type.getSuperclass()) {
+                    try {
+                        Field field = type.getDeclaredField(name);
+                        field.setAccessible(true);
+                        return field;
+                    } catch (NoSuchFieldException missing) {
+                        last = missing;
+                    }
+                }
+            }
+            throw last == null ? new NoSuchFieldException() : last;
         }
     }
 }

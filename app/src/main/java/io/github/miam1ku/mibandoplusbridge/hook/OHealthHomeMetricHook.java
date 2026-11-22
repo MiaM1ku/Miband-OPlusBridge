@@ -20,8 +20,10 @@ import java.util.WeakHashMap;
 public final class OHealthHomeMetricHook {
     private static final String HOST = "com.heytap.health";
     private static final String BASE = "com.heytap.health.main.card.common.HealthBaseCard";
+    private static final String BASE_6117 = "mz.c";
     private static final String CARD_PREFIX = "com.heytap.health.main.card.";
     private static final WeakHashMap<Object, Boolean> CARDS = new WeakHashMap<>();
+    private static volatile boolean renamedBuild;
     private static Handler main;
     private static boolean reloadPosted;
     private static final XC_MethodHook BIND = new XC_MethodHook() {
@@ -43,13 +45,20 @@ public final class OHealthHomeMetricHook {
     public static synchronized void install(Context supplied, ClassLoader loader) {
         if (supplied == null || !HOST.equals(supplied.getPackageName())) return;
         Class<?> base;
+        boolean renamed = false;
         try {
             base = Class.forName(BASE, false, loader);
-        } catch (Throwable failure) {
-            HookRuntime.log("OHEALTH_HOME_RELOAD_HOOK_FAIL");
-            return;
+        } catch (Throwable missing) {
+            try {
+                base = Class.forName(BASE_6117, false, loader);
+                renamed = true;
+            } catch (Throwable failure) {
+                HookRuntime.log("OHEALTH_HOME_RELOAD_HOOK_FAIL");
+                return;
+            }
         }
-        hookBind(base);
+        renamedBuild = renamed;
+        hookBind(base, renamed);
         ApplicationInfo info = supplied.getApplicationInfo();
         List<String> apks = new ArrayList<>();
         if (info.sourceDir != null) apks.add(info.sourceDir);
@@ -69,7 +78,7 @@ public final class OHealthHomeMetricHook {
                     }
                     if (type != base && base.isAssignableFrom(type)
                             && !Modifier.isAbstract(type.getModifiers())) {
-                        hookBind(type);
+                        hookBind(type, renamed);
                     }
                 }
             } catch (Throwable failure) {
@@ -94,14 +103,16 @@ public final class OHealthHomeMetricHook {
             reloadPosted = false;
             cards = new ArrayList<>(CARDS.keySet());
         }
+        String primary = renamedBuild ? "o" : "refresh";
+        String secondary = renamedBuild ? "r" : "refreshViewIfNeed";
         for (Object card : cards) {
             if (card == null) continue;
             Class<?> type = card.getClass();
             try {
-                Method refresh = declaredVoid(type, "refresh");
-                if (refresh == null) refresh = declaredVoid(type, "refreshViewIfNeed");
+                Method refresh = declaredVoid(type, primary);
+                if (refresh == null) refresh = declaredVoid(type, secondary);
                 if (refresh == null) {
-                    if (declares(type, "refresh") || declares(type, "refreshViewIfNeed")) {
+                    if (declares(type, primary) || declares(type, secondary)) {
                         HookRuntime.log("OHEALTH_HOME_RELOAD_SKIP " + type.getName());
                     }
                     continue;
@@ -113,11 +124,17 @@ public final class OHealthHomeMetricHook {
         }
     }
 
-    private static void hookBind(Class<?> type) {
+    private static void hookBind(Class<?> type, boolean renamed) {
+        String bindName = renamed ? "k" : "onCommonBindViewHolder";
         for (Method method : type.getDeclaredMethods()) {
-            if (!method.getName().equals("onCommonBindViewHolder")) continue;
+            if (!method.getName().equals(bindName)) continue;
+            if (renamed) {
+                Class<?>[] params = method.getParameterTypes();
+                if (params.length != 3 || params[1] != int.class
+                        || !Context.class.isAssignableFrom(params[2])) continue;
+            }
             try {
-                XposedBridge.hookAllMethods(type, "onCommonBindViewHolder", BIND);
+                XposedBridge.hookMethod(method, BIND);
             } catch (Throwable failure) {
                 HookRuntime.log("OHEALTH_HOME_RELOAD_HOOK_FAIL");
             }

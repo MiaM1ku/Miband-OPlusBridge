@@ -22,8 +22,14 @@ import io.github.miam1ku.mibandoplusbridge.protocol.BandMusicCommand;
 public final class OHealthMusicHook {
     private static final String PRESENTER =
             "com.heytap.health.watch.music.control.SendInfoPresenter$Companion";
+    private static final String PRESENTER_6117 = "com.heytap.health.watch.music.control.z";
     private static final String MANAGER = "com.heytap.health.watch.music.control.MusicControlManager";
+    private static final String MANAGER_6117 = "com.heytap.health.watch.music.control.r";
+    private static final String SERVICE = "com.heytap.health.watch.music.control.MusicService";
+    private static final String SERVICE_6117 = "com.heytap.health.watch.music.control.w";
+    private static final String HANDLER_6117 = "ay1.d";
     private static Context app;
+    private static volatile boolean renamedBuild;
     private static int lastState = Integer.MIN_VALUE;
     private static int lastVolume = Integer.MIN_VALUE;
     private static int lastDuration = Integer.MIN_VALUE;
@@ -38,25 +44,45 @@ public final class OHealthMusicHook {
         if (process == null || !process.startsWith("com.heytap.health")) return;
         app = context.getApplicationContext() == null ? context : context.getApplicationContext();
         trace("MUSIC_HOOK process=" + process);
-        Class<?> presenter;
+        Class<?> presenter = null;
+        boolean renamed = false;
         try {
             presenter = XposedHelpers.findClass(PRESENTER, loader);
-        } catch (Throwable failure) {
-            HookRuntime.log("MUSIC native unavailable");
-            trace("MUSIC_HOOK presenter-missing");
-            return;
-        }
-        XC_MethodHook mirror = new XC_MethodHook() {
-            @Override protected void beforeHookedMethod(MethodHookParam param) {
-                mirror(param.method.getName(), param.args);
+        } catch (Throwable missing) {
+            try {
+                presenter = XposedHelpers.findClass(PRESENTER_6117, loader);
+                renamed = true;
+            } catch (Throwable failure) {
+                HookRuntime.log("MUSIC native unavailable");
+                trace("MUSIC_HOOK presenter-missing");
+                return;
             }
-        };
-        XposedBridge.hookAllMethods(presenter, "sendPlayInfo", mirror);
-        XposedBridge.hookAllMethods(presenter, "sendPlayState", mirror);
-        XposedBridge.hookAllMethods(presenter, "sendTotalInfo", mirror);
-        XposedBridge.hookAllMethods(presenter, "sendVolumeInfo", mirror);
-        XposedBridge.hookAllMethods(presenter, "sendMusicCloseInfo", mirror);
-        XposedBridge.hookAllMethods(presenter, "responseTotalInfo", mirror);
+        }
+        renamedBuild = renamed;
+        if (!renamed) {
+            XC_MethodHook mirror = new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam param) {
+                    mirror(param.method.getName(), param.args);
+                }
+            };
+            XposedBridge.hookAllMethods(presenter, "sendPlayInfo", mirror);
+            XposedBridge.hookAllMethods(presenter, "sendPlayState", mirror);
+            XposedBridge.hookAllMethods(presenter, "sendTotalInfo", mirror);
+            XposedBridge.hookAllMethods(presenter, "sendVolumeInfo", mirror);
+            XposedBridge.hookAllMethods(presenter, "sendMusicCloseInfo", mirror);
+            XposedBridge.hookAllMethods(presenter, "responseTotalInfo", mirror);
+        } else {
+            XposedBridge.hookAllMethods(presenter, "i", new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam param) {
+                    mirror("sendMusicCloseInfo", param.args);
+                }
+            });
+            XposedBridge.hookAllMethods(presenter, "g", new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam param) {
+                    mirror("responseTotalInfo", param.args);
+                }
+            });
+        }
         if (!"com.heytap.health:transport".equals(process)) return;
         HookRuntime.receive(app, new BroadcastReceiver() {
             @Override public void onReceive(Context receiverContext, Intent intent) {
@@ -66,19 +92,62 @@ public final class OHealthMusicHook {
             }
         }, new IntentFilter(NativeMusic.ACTION), FindPhone.PERMISSION, null, Context.RECEIVER_EXPORTED);
         try {
-            Class<?> service = XposedHelpers.findClass(
-                    "com.heytap.health.watch.music.control.MusicService", loader);
-            XposedBridge.hookAllMethods(service, "handleNoControllers", new XC_MethodHook() {
+            Class<?> service = XposedHelpers.findClass(renamed ? SERVICE_6117 : SERVICE, loader);
+            XposedBridge.hookAllMethods(service, renamed ? "c" : "handleNoControllers", new XC_MethodHook() {
                 @Override protected void afterHookedMethod(MethodHookParam param) {
                     publish(true, 0, Math.max(0, lastVolume), "", "", 0, 0);
                 }
             });
+            if (renamed) {
+                // 6.11.7 inlined sendTotalInfo/sendPlayState/sendPlayInfo/sendVolumeInfo into w.g() and ay1.d.a(Message).
+                XposedBridge.hookAllMethods(service, "g", new XC_MethodHook() {
+                    @Override protected void beforeHookedMethod(MethodHookParam param) {
+                        mirrorServiceState(param.thisObject, true, false);
+                    }
+                });
+                Class<?> handlerClass = XposedHelpers.findClass(HANDLER_6117, loader);
+                java.lang.reflect.Method dispatch = handlerClass.getDeclaredMethod("a", android.os.Message.class);
+                dispatch.setAccessible(true);
+                XposedBridge.hookMethod(dispatch, new XC_MethodHook() {
+                    @Override protected void afterHookedMethod(MethodHookParam param) {
+                        if (param.args.length == 0 || !(param.args[0] instanceof android.os.Message msg)) return;
+                        int what = msg.what;
+                        if (what != 2 && what != 3 && what != 6) return;
+                        Object owner = XposedHelpers.getObjectField(param.thisObject, "b");
+                        if (!service.isInstance(owner)) return;
+                        mirrorServiceState(owner, what == 3, what == 6);
+                    }
+                });
+            }
             // The manager's static block is what registers the media-session listener.
             // Nothing else loads it until an OPPO watch message arrives.
-            XposedHelpers.getStaticObjectField(XposedHelpers.findClass(MANAGER, loader), "INSTANCE");
+            XposedHelpers.getStaticObjectField(XposedHelpers.findClass(renamed ? MANAGER_6117 : MANAGER, loader), "INSTANCE");
         } catch (Throwable failure) {
             HookRuntime.log("MUSIC native unavailable");
             trace("MUSIC_HOOK manager-missing " + failure.getClass().getSimpleName());
+        }
+    }
+
+    private static void mirrorServiceState(Object musicService, boolean force, boolean volumeOnly) {
+        if (musicService == null) return;
+        try {
+            Object wrapper = XposedHelpers.getObjectField(musicService, "i");
+            Object volumeObserver = XposedHelpers.getObjectField(musicService, "f");
+            int volume = volumeObserver == null ? 0 : number(new Object[]{XposedHelpers.callMethod(volumeObserver, "a")}, 0);
+            int max = volumeObserver == null ? 0 : number(new Object[]{XposedHelpers.callMethod(volumeObserver, "b")}, 0);
+            if (volumeOnly) {
+                if (wrapper == null) return;
+                int percent = BandMusicCommand.percent(volume, max);
+                publish(false, lastState < 0 ? 0 : lastState, percent, lastTrack, lastArtist,
+                        0, Math.max(0, lastDuration));
+                return;
+            }
+            if (wrapper == null) return;
+            Object playback = XposedHelpers.callMethod(wrapper, "d");
+            Object metadata = XposedHelpers.callMethod(wrapper, "c");
+            publishMedia(force, playback, metadata, volume, max);
+        } catch (Throwable failure) {
+            HookRuntime.log("MUSIC native unavailable");
         }
     }
 
@@ -101,24 +170,28 @@ public final class OHealthMusicHook {
             int max = number(args, base + 5);
             boolean force = "sendTotalInfo".equals(method) || "responseTotalInfo".equals(method)
                     || "sendPlayInfo".equals(method);
-            if (!(playback instanceof PlaybackState stateObject)) {
-                publish(force, metadata instanceof MediaMetadata ? 2 : 0,
-                        BandMusicCommand.percent(volume, max), "", "", 0, 0);
-                return;
-            }
-            MediaMetadata meta = metadata instanceof MediaMetadata cast ? cast : null;
-            int state = stateObject.getState() == PlaybackState.STATE_PLAYING ? 1 : 2;
-            long positionMs = stateObject.getPosition();
-            int position = positionMs <= 0 ? 0 : (int) Math.min(Integer.MAX_VALUE, positionMs / 1000L);
-            long durationMs = meta == null ? 0 : meta.getLong(MediaMetadata.METADATA_KEY_DURATION);
-            int duration = durationMs <= 0 ? 0 : (int) Math.min(Integer.MAX_VALUE, durationMs / 1000L);
-            String title = meta == null ? null : meta.getString(MediaMetadata.METADATA_KEY_TITLE);
-            String name = meta == null ? null : meta.getString(MediaMetadata.METADATA_KEY_ARTIST);
-            publish(force, state, BandMusicCommand.percent(volume, max),
-                    title == null ? "" : title, name == null ? "" : name, position, duration);
+            publishMedia(force, playback, metadata, volume, max);
         } catch (RuntimeException failure) {
             HookRuntime.log("MUSIC native unavailable");
         }
+    }
+
+    private static void publishMedia(boolean force, Object playback, Object metadata, int volume, int max) {
+        if (!(playback instanceof PlaybackState stateObject)) {
+            publish(force, metadata instanceof MediaMetadata ? 2 : 0,
+                    BandMusicCommand.percent(volume, max), "", "", 0, 0);
+            return;
+        }
+        MediaMetadata meta = metadata instanceof MediaMetadata cast ? cast : null;
+        int state = stateObject.getState() == PlaybackState.STATE_PLAYING ? 1 : 2;
+        long positionMs = stateObject.getPosition();
+        int position = positionMs <= 0 ? 0 : (int) Math.min(Integer.MAX_VALUE, positionMs / 1000L);
+        long durationMs = meta == null ? 0 : meta.getLong(MediaMetadata.METADATA_KEY_DURATION);
+        int duration = durationMs <= 0 ? 0 : (int) Math.min(Integer.MAX_VALUE, durationMs / 1000L);
+        String title = meta == null ? null : meta.getString(MediaMetadata.METADATA_KEY_TITLE);
+        String name = meta == null ? null : meta.getString(MediaMetadata.METADATA_KEY_ARTIST);
+        publish(force, state, BandMusicCommand.percent(volume, max),
+                title == null ? "" : title, name == null ? "" : name, position, duration);
     }
 
     private static void publish(boolean force, int state, int volume, String track, String artist,
@@ -157,7 +230,12 @@ public final class OHealthMusicHook {
             return;
         }
         try {
-            XposedHelpers.callMethod(service, "onRequestTotalInfo");
+            if (!renamedBuild) {
+                XposedHelpers.callMethod(service, "onRequestTotalInfo");
+            } else {
+                android.os.Handler handler = (android.os.Handler) XposedHelpers.getObjectField(service, "c");
+                handler.sendEmptyMessage(7);
+            }
         } catch (Throwable failure) {
             HookRuntime.log("MUSIC native unavailable");
         }
@@ -175,7 +253,8 @@ public final class OHealthMusicHook {
                 int current = audio == null ? 0 : BandMusicCommand.percent(
                         audio.getStreamVolume(AudioManager.STREAM_MUSIC),
                         audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC));
-                XposedHelpers.callMethod(listener, "adjustVolume", requestedPercent > current ? 1 : -1);
+                XposedHelpers.callMethod(listener, renamedBuild ? "j" : "adjustVolume",
+                        requestedPercent > current ? 1 : -1);
             } else {
                 int code = switch (key) {
                     case 0 -> android.view.KeyEvent.KEYCODE_MEDIA_PLAY;
@@ -185,7 +264,17 @@ public final class OHealthMusicHook {
                     default -> -1;
                 };
                 if (code < 0) return;
-                XposedHelpers.callMethod(listener, "dispatchMediaKeyEvent", code);
+                if (!renamedBuild) {
+                    XposedHelpers.callMethod(listener, "dispatchMediaKeyEvent", code);
+                } else {
+                    XposedHelpers.callMethod(listener, "k");
+                    Object service = XposedHelpers.getObjectField(listener, "b");
+                    if (service == null) return;
+                    android.os.Handler handler = (android.os.Handler) XposedHelpers.getObjectField(service, "c");
+                    android.os.Message msg = handler.obtainMessage(5);
+                    msg.arg1 = code;
+                    handler.sendMessage(msg);
+                }
             }
         } catch (Throwable failure) {
             HookRuntime.log("MUSIC native unavailable");
@@ -194,8 +283,8 @@ public final class OHealthMusicHook {
 
     private static Object listener(ClassLoader loader) {
         try {
-            Class<?> manager = XposedHelpers.findClass(MANAGER, loader);
-            return XposedHelpers.getStaticObjectField(manager, "mListener");
+            Class<?> manager = XposedHelpers.findClass(renamedBuild ? MANAGER_6117 : MANAGER, loader);
+            return XposedHelpers.getStaticObjectField(manager, renamedBuild ? "i" : "mListener");
         } catch (Throwable failure) {
             return null;
         }
@@ -205,7 +294,7 @@ public final class OHealthMusicHook {
         Object listener = listener(loader);
         if (listener == null) return null;
         try {
-            return XposedHelpers.getObjectField(listener, "mMusicService");
+            return XposedHelpers.getObjectField(listener, renamedBuild ? "b" : "mMusicService");
         } catch (Throwable failure) {
             return null;
         }

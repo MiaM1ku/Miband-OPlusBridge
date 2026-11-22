@@ -16,9 +16,14 @@ import io.github.miam1ku.mibandoplusbridge.notify.FindPhone;
 public final class OHealthFindPhoneHook {
     private static final String HANDLER =
             "com.heytap.health.watch.commonsync.messagehandler.FindPhoneHandler";
+    private static final String HANDLER_6117 =
+            "com.heytap.health.watch.commonsync.messagehandler.g";
     private static final String UTIL = "com.heytap.health.watch.commonsync.util.FindPhoneUtil";
+    private static final String UTIL_6117 = "ne0.d";
     private static final String FIND_ROW =
             "com.heytap.health.device.tab.itemview.wearable.MenuFindDeviceItem";
+    private static final String FIND_ROW_6117 =
+            "com.heytap.health.device.tab.itemview.wearable.f0";
     private static boolean findingWatch;
 
     private OHealthFindPhoneHook() {}
@@ -34,31 +39,36 @@ public final class OHealthFindPhoneHook {
                 else stop(loader);
             }
         }, filter, FindPhone.PERMISSION, null, Context.RECEIVER_EXPORTED);
-        try {
-            XposedHelpers.findAndHookMethod(FIND_ROW, loader, "itemClick", new XC_MethodHook() {
-                @Override protected void beforeHookedMethod(MethodHookParam param) {
-                    if (!ourBand(param.thisObject)) return;
-                    param.setResult(null);
-                    findingWatch = !findingWatch;
-                    Bundle extras = new Bundle();
-                    extras.putBoolean("start", findingWatch);
-                    try {
-                        Bundle result = app.getContentResolver().call(
-                                HostNotifyProvider.URI, "findWatch", null, extras);
-                        if (result == null || !"QUEUED".equals(result.getString("status"))) {
-                            findingWatch = !findingWatch;
-                            HookRuntime.log("FIND_WATCH native unavailable");
-                            return;
-                        }
-                        HookRuntime.log(findingWatch ? "FIND_WATCH start" : "FIND_WATCH stop");
-                    } catch (RuntimeException failure) {
+        XC_MethodHook click = new XC_MethodHook() {
+            @Override protected void beforeHookedMethod(MethodHookParam param) {
+                if (!ourBand(param.thisObject)) return;
+                param.setResult(null);
+                findingWatch = !findingWatch;
+                Bundle extras = new Bundle();
+                extras.putBoolean("start", findingWatch);
+                try {
+                    Bundle result = app.getContentResolver().call(
+                            HostNotifyProvider.URI, "findWatch", null, extras);
+                    if (result == null || !"QUEUED".equals(result.getString("status"))) {
                         findingWatch = !findingWatch;
                         HookRuntime.log("FIND_WATCH native unavailable");
+                        return;
                     }
+                    HookRuntime.log(findingWatch ? "FIND_WATCH start" : "FIND_WATCH stop");
+                } catch (RuntimeException failure) {
+                    findingWatch = !findingWatch;
+                    HookRuntime.log("FIND_WATCH native unavailable");
                 }
-            });
-        } catch (Throwable failure) {
-            HookRuntime.log("FIND_WATCH native unavailable");
+            }
+        };
+        try {
+            XposedHelpers.findAndHookMethod(FIND_ROW, loader, "itemClick", click);
+        } catch (Throwable renamed) {
+            try {
+                XposedHelpers.findAndHookMethod(FIND_ROW_6117, loader, "J", click);
+            } catch (Throwable failure) {
+                HookRuntime.log("FIND_WATCH native unavailable");
+            }
         }
     }
 
@@ -66,6 +76,13 @@ public final class OHealthFindPhoneHook {
         try {
             Object handler = XposedHelpers.newInstance(XposedHelpers.findClass(HANDLER, loader));
             XposedHelpers.callMethod(handler, "playRing");
+            return;
+        } catch (Throwable renamed) { }
+        try {
+            Class<?> handler = XposedHelpers.findClass(HANDLER_6117, loader);
+            java.lang.reflect.Method ring = handler.getDeclaredMethod("a", String.class);
+            ring.setAccessible(true);
+            ring.invoke(null, (Object) null);
         } catch (Throwable failure) {
             HookRuntime.log("FIND_PHONE native unavailable");
         }
@@ -77,6 +94,12 @@ public final class OHealthFindPhoneHook {
             Object instance = XposedHelpers.getStaticObjectField(util, "INSTANCE");
             XposedHelpers.callMethod(instance, "stopPlayRing");
             XposedHelpers.callMethod(instance, "setVolumeToOrigin");
+            return;
+        } catch (Throwable renamed) { }
+        try {
+            Class<?> util = XposedHelpers.findClass(UTIL_6117, loader);
+            Object instance = XposedHelpers.getStaticObjectField(util, "INSTANCE");
+            XposedHelpers.callMethod(instance, "d");
         } catch (Throwable failure) {
             HookRuntime.log("FIND_PHONE native unavailable");
         }
@@ -88,7 +111,13 @@ public final class OHealthFindPhoneHook {
         String expected = band.getString("mac", "");
         if (expected.isBlank()) return false;
         try {
-            Object info = XposedHelpers.callMethod(item, "getCurrSelectWearableDevice");
+            Object info;
+            try {
+                info = XposedHelpers.callMethod(item, "getCurrSelectWearableDevice");
+            } catch (Throwable renamed) {
+                Object controller = XposedHelpers.getObjectField(item, "i");
+                info = XposedHelpers.callMethod(controller, "k");
+            }
             if (info == null) return false;
             Object mac = XposedHelpers.callMethod(info, "getMac");
             return mac != null && expected.equalsIgnoreCase(String.valueOf(mac));

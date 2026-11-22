@@ -28,11 +28,24 @@ public final class OHealthWeatherHook {
 
     public static void install(Context context, ClassLoader loader) throws Exception {
         if (!HOST.equals(android.app.Application.getProcessName())) return;
-        Class<?> cloud = Class.forName("com.heytap.weather.service.WeatherCloud2", false, loader);
         Class<?> consumerType = Class.forName("io.reactivex.rxjava3.functions.Consumer", false, loader);
-        cloud.getDeclaredMethod("getWeatherDetailByCoordinate", String.class, String.class,
-                String.class, consumerType, consumerType);
-        Object source = cloud.getField("INSTANCE").get(null);
+        java.lang.reflect.Method fetchMethod;
+        Object source;
+        try {
+            Class<?> cloud = Class.forName("com.heytap.weather.service.WeatherCloud2", false, loader);
+            fetchMethod = cloud.getDeclaredMethod("getWeatherDetailByCoordinate", String.class, String.class,
+                    String.class, consumerType, consumerType);
+            source = cloud.getField("INSTANCE").get(null);
+        } catch (ClassNotFoundException renamed) {
+            Class<?> cloud = Class.forName("com.heytap.weather.service.h", false, loader);
+            fetchMethod = cloud.getDeclaredMethod("f", String.class, String.class,
+                    String.class, consumerType, consumerType);
+            source = java.lang.reflect.Modifier.isStatic(fetchMethod.getModifiers())
+                    ? null : cloud.getField("INSTANCE").get(null);
+        }
+        fetchMethod.setAccessible(true);
+        final java.lang.reflect.Method fetch = fetchMethod;
+        final Object fetchTarget = source;
         LocationManager location = context.getSystemService(LocationManager.class);
         HandlerThread worker = HookRuntime.thread("OplusBandWeatherSource");
         Handler handler = new Handler(worker.getLooper());
@@ -95,7 +108,7 @@ public final class OHealthWeatherHook {
                                     }));
                                     Object error = consumer(loader, consumerType, ignored -> handler.post(() ->
                                             fail(context, active, requestId, "OHEALTH_WEATHER_CLOUD_UNAVAILABLE")));
-                                    XposedHelpers.callMethod(source, "getWeatherDetailByCoordinate",
+                                    fetch.invoke(fetchTarget,
                                             Double.toString(fix.getLongitude()), Double.toString(fix.getLatitude()),
                                             "c", success, error);
                                 } catch (Throwable unavailable) {
