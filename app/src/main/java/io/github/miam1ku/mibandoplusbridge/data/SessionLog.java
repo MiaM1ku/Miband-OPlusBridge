@@ -79,12 +79,22 @@ public final class SessionLog {
     private static final String BUNDLE = "band-debug";
     private static final int CAPTURE_FILES = 3;
     private static final long CAPTURE_BYTES = 24L * 1024 * 1024;
+    /** A band log above this stays in the device-log screen; the debug zip must still send over QQ. */
+    static final long DEVICE_LOG_BYTES = 48L * 1024 * 1024;
 
     /**
      * One archive for analysis: the session trace, the checked transport profile, and the
      * newest protocol captures. The captures are the band frames the debug window recorded.
      */
     public static File export(Context context) throws IOException {
+        return export(context, null, "SKIPPED");
+    }
+
+    /**
+     * @param deviceLog the band's own log bundle pulled for this export, or null
+     * @param deviceLogNote a short code that says how the pull ended, written into the README
+     */
+    public static File export(Context context, File deviceLog, String deviceLogNote) throws IOException {
         File dir = new File(context.getCacheDir(), "debug");
         if (!dir.isDirectory() && !dir.mkdirs()) throw new IOException("DEBUG_LOG_UNAVAILABLE");
         String stamp = DateTimeFormatter.ofPattern("yyyyMMdd-HHmm")
@@ -103,10 +113,16 @@ public final class SessionLog {
             put(zip, "band-debug.txt", trace);
             put(zip, "transport-observation.json",
                     transport(context).getBytes(StandardCharsets.UTF_8));
-            put(zip, "README.txt", readme().getBytes(StandardCharsets.UTF_8));
-            for (File capture : pickCaptures(captureFiles(context), CAPTURE_FILES, CAPTURE_BYTES)) {
+            List<File> captures = pickCaptures(captureFiles(context), CAPTURE_FILES, CAPTURE_BYTES);
+            String deviceLogEntry = deviceLogEntry(deviceLog);
+            String note = deviceLogEntry != null ? "OK"
+                    : deviceLog != null && deviceLog.isFile() ? "TOO_LARGE" : deviceLogNote;
+            put(zip, "README.txt", readme(!captures.isEmpty(), deviceLogEntry, note)
+                    .getBytes(StandardCharsets.UTF_8));
+            for (File capture : captures) {
                 put(zip, "captures/" + capture.getName(), capture);
             }
+            if (deviceLogEntry != null) put(zip, deviceLogEntry, deviceLog);
         } catch (IOException failed) {
             out.delete();
             throw failed;
@@ -151,12 +167,28 @@ public final class SessionLog {
         return directory.listFiles((parent, name) -> name.startsWith("capture-") && name.endsWith(".jsonl"));
     }
 
-    private static String readme() {
+    /** Zip path for the band log, or null when it is missing, empty, or too large to attach. */
+    static String deviceLogEntry(File deviceLog) {
+        if (deviceLog == null || !deviceLog.isFile()) return null;
+        long size = deviceLog.length();
+        if (size <= 0 || size > DEVICE_LOG_BYTES) return null;
+        String name = deviceLog.getName().replaceAll("[^A-Za-z0-9._-]", "_");
+        return "device-log/" + (name.isEmpty() ? "band-log.bin" : name);
+    }
+
+    static String readme(boolean hasCaptures, String deviceLogEntry, String deviceLogNote) {
         return "miband-oplusbridge 调试包\n"
                 + "band-debug.txt：会话日志（已去除 MAC 与控制字符）\n"
                 + "transport-observation.json：最近一次连接的传输参数（SPP/GATT、鉴权分支、RFCOMM）\n"
-                + "captures/*.jsonl：协议消息采集，一行一条，payloadBase64 是原始帧；\n"
-                + "  tx/rx 是方向，capturedAtMs/elapsedRealtimeNs 是宿主时间，receivedAtMs 是模块落盘时间。\n";
+                + (hasCaptures
+                        ? "captures/*.jsonl：协议消息采集，一行一条，payloadBase64 是原始帧；\n"
+                                + "  tx/rx 是方向，capturedAtMs/elapsedRealtimeNs 是宿主时间，receivedAtMs 是模块落盘时间。\n"
+                        : "captures/：本包只含会话日志与传输参数；协议采集窗口产生记录后会一并附带。\n")
+                + (deviceLogEntry != null
+                        ? deviceLogEntry + "：导出时从手环拉取的固件日志包（原样保存）。\n"
+                        : "device-log/：手环固件日志本次留空，状态 "
+                                + (deviceLogNote == null || deviceLogNote.isBlank() ? "SKIPPED" : deviceLogNote)
+                                + "；手环连上后重新导出即可附带。\n");
     }
 
     private static void put(ZipOutputStream zip, String name, byte[] content) throws IOException {

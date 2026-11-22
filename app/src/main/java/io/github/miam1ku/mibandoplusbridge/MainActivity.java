@@ -385,31 +385,123 @@ public final class MainActivity extends AppCompatActivity {
                 .show();
     }
 
+    /** Longest wait for the band log inside the debug export; the device-log screen has no cap. */
+    private static final long DEBUG_DEVICE_LOG_WAIT_MINUTES = 5;
+    private boolean debugExporting;
+
+    /** Pulls the band's own log once, then zips it with the session trace and shares the bundle. */
     private void shareDebugLog() {
-        worker.execute(() -> {
-            try {
-                java.io.File file = io.github.miam1ku.mibandoplusbridge.data.SessionLog.export(this);
-                Uri uri = androidx.core.content.FileProvider.getUriForFile(this,
-                        "io.github.miam1ku.mibandoplusbridge.debuglog", file);
-                Intent send = new Intent(Intent.ACTION_SEND);
-                send.setType("application/zip");
-                send.putExtra(Intent.EXTRA_STREAM, uri);
-                send.putExtra(Intent.EXTRA_SUBJECT, "小米手环桥接调试日志");
-                send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-                Intent qq = new Intent(send);
-                qq.setPackage("com.tencent.mobileqq");
-                main.post(() -> {
-                    if (isDestroyed()) return;
-                    if (qq.resolveActivity(getPackageManager()) != null) startActivity(qq);
-                    else startActivity(Intent.createChooser(send, "发送调试日志"));
-                });
-            } catch (Exception failure) {
-                main.post(() -> {
-                    if (!isDestroyed()) android.widget.Toast.makeText(this,
-                            "调试日志生成中断，稍后再试一次", android.widget.Toast.LENGTH_SHORT).show();
-                });
-            }
+        if (debugExporting) return;
+        debugExporting = true;
+        View content = getLayoutInflater().inflate(R.layout.dialog_device_log_progress, null, false);
+        TextView progressText = content.findViewById(R.id.device_log_progress_status);
+        progressText.setText("正在拉取手环日志，稍后一并放进调试包…");
+        java.util.concurrent.CompletableFuture<DebugDeviceLog> pulled =
+                new java.util.concurrent.CompletableFuture<>();
+        androidx.appcompat.app.AlertDialog dialog = new MaterialAlertDialogBuilder(this)
+                .setTitle("正在准备调试日志")
+                .setView(content)
+                .setCancelable(false)
+                .setNegativeButton("跳过手环日志",
+                        (ignored, which) -> pulled.complete(new DebugDeviceLog(null, "USER_SKIPPED")))
+                .create();
+        dialog.setCanceledOnTouchOutside(false);
+        dialog.show();
+        io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this, "DEBUG_EXPORT device-log pull");
+        BandLiveService.requestDeviceLogExport(this, progress -> main.post(() -> {
+            if (isDestroyed() || pulled.isDone() || progress.totalParts() <= 0) return;
+            int percent = Math.min(100, progress.currentPart() * 100 / progress.totalParts());
+            progressText.setText("正在接收手环日志 " + progress.currentPart() + "/"
+                    + progress.totalParts() + " 片 · " + percent + "%");
+        })).whenComplete((received, failure) -> {
+            boolean used = pulled.complete(failure == null
+                    ? new DebugDeviceLog(received.file(), "OK")
+                    : new DebugDeviceLog(null, debugPullCode(failure)));
+            // Skipped or past the wait: the bundle already left, so drop the late copy.
+            if (!used && received != null) worker.execute(() -> deleteDeviceLogCopy(received.file()));
         });
+        pulled.completeOnTimeout(new DebugDeviceLog(null, "WAIT_LIMIT"),
+                DEBUG_DEVICE_LOG_WAIT_MINUTES, java.util.concurrent.TimeUnit.MINUTES);
+        pulled.thenAcceptAsync(part -> {
+            main.post(() -> {
+                if (!isDestroyed() && dialog.isShowing()) progressText.setText("正在打包调试日志…");
+            });
+            io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this,
+                    "DEBUG_EXPORT device-log " + part.code());
+            exportDebugBundle(part, dialog);
+        }, worker);
+    }
+
+    private record DebugDeviceLog(java.io.File file, String code) {}
+
+    /** The service fails with a short code such as DEVICE_LOG_DEVICE_BUSY or LIVE_SESSION_REQUIRED. */
+    private static String debugPullCode(Throwable failure) {
+        Throwable cause = failure;
+        while ((cause instanceof java.util.concurrent.CompletionException
+                || cause instanceof java.util.concurrent.ExecutionException) && cause.getCause() != null) {
+            cause = cause.getCause();
+        }
+        String message = cause.getMessage();
+        if (message != null && message.matches("[A-Z0-9_]{3,64}")) return message;
+        return cause.getClass().getSimpleName();
+    }
+
+    private static String debugDeviceLogHint(String code) {
+        return switch (code) {
+            case "OK", "USER_SKIPPED" -> null;
+            case "LIVE_SESSION_REQUIRED" -> "调试包已生成。手环连上后再导出，可附带手环日志。";
+            case "DEVICE_LOG_RECEIVE_ACTIVE" -> "调试包已生成。设备日志页正在拉取，完成后再导出即可附带。";
+            case "WAIT_LIMIT" -> "调试包已生成。手环日志较大，可在「拉取设备日志」页单独拉取。";
+            default -> "调试包已生成，手环日志这次留空（" + code + "）。";
+        };
+    }
+
+    private void exportDebugBundle(DebugDeviceLog part, android.app.Dialog dialog) {
+        try {
+            java.io.File file = io.github.miam1ku.mibandoplusbridge.data.SessionLog.export(
+                    this, part.file(), part.code());
+            deleteDeviceLogCopy(part.file());
+            Uri uri = androidx.core.content.FileProvider.getUriForFile(this,
+                    "io.github.miam1ku.mibandoplusbridge.debuglog", file);
+            Intent send = new Intent(Intent.ACTION_SEND);
+            send.setType("application/zip");
+            send.putExtra(Intent.EXTRA_STREAM, uri);
+            send.putExtra(Intent.EXTRA_SUBJECT, "小米手环桥接调试日志");
+            send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            Intent qq = new Intent(send);
+            qq.setPackage("com.tencent.mobileqq");
+            main.post(() -> {
+                debugExporting = false;
+                if (dialog.isShowing()) dialog.dismiss();
+                if (isDestroyed()) return;
+                String hint = debugDeviceLogHint(part.code());
+                if (hint != null) android.widget.Toast.makeText(this, hint,
+                        android.widget.Toast.LENGTH_LONG).show();
+                if (qq.resolveActivity(getPackageManager()) != null) startActivity(qq);
+                else startActivity(Intent.createChooser(send, "发送调试日志"));
+            });
+        } catch (Exception failure) {
+            deleteDeviceLogCopy(part.file());
+            main.post(() -> {
+                debugExporting = false;
+                if (dialog.isShowing()) dialog.dismiss();
+                if (!isDestroyed()) android.widget.Toast.makeText(this,
+                        "调试日志生成中断，稍后再试一次", android.widget.Toast.LENGTH_SHORT).show();
+            });
+        }
+    }
+
+    /** The pull lands in cache/device-logs/<stamp>/; the zip now holds the only copy we need. */
+    private void deleteDeviceLogCopy(java.io.File received) {
+        if (received == null) return;
+        java.io.File directory = received.getParentFile();
+        java.io.File root = new java.io.File(getCacheDir(), "device-logs");
+        if (directory == null || !root.equals(directory.getParentFile())) return;
+        java.io.File[] files = directory.listFiles();
+        if (files != null) {
+            for (java.io.File file : files) file.delete();
+        }
+        directory.delete();
     }
 
     private void promptHostVersions() {
