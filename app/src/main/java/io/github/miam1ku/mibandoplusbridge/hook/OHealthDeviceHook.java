@@ -2391,6 +2391,7 @@ public final class OHealthDeviceHook {
                 notifyDrop("identity pkg=" + !pkg.isBlank() + " key=" + !key.isBlank(), pkg, process);
                 return;
             }
+            if (io.github.miam1ku.mibandoplusbridge.BuildConfig.APPLICATION_ID.equals(pkg)) return;
             if (deliverPhoneAlarm(bean, pkg, key, removed)) return;
             Object posted = XposedHelpers.callMethod(bean, "getPostTimeMillis");
             long when = posted instanceof Number time && time.longValue() > 0
@@ -2399,7 +2400,6 @@ public final class OHealthDeviceHook {
             String body = text(bean, "getContent");
             String token = (removed ? "r|" : "p|") + key + "|" + when + "|" + title + "|" + body;
             if (!OHealthNotifyFilter.claim(FORWARDED_EVENTS, token, 64)) {
-                notifyDrop("duplicate", pkg, process);
                 return;
             }
             ALLOWLIST.execute(() -> deliverForward(bean, removed, process, pkg, key, when, title, body));

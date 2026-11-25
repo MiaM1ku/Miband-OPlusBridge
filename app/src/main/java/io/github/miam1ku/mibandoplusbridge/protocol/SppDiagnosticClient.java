@@ -76,7 +76,7 @@ public final class SppDiagnosticClient implements AutoCloseable {
     private Consumer<XiaomiProto.Command> onLiveCommand;
     private Consumer<java.util.List<BandHistoryParser.Measurement>> onSleepFile;
     private volatile LiveCommandQueue liveCommands;
-    private volatile XiaomiMassReceive deviceLogReceiver;
+    private final DeviceLogMassGate deviceLogGate;
     private Result verifiedDevice;
     private boolean liveHold;
     private final ArrayDeque<byte[]> heldActivity = new ArrayDeque<>();
@@ -92,17 +92,205 @@ public final class SppDiagnosticClient implements AutoCloseable {
 
     /** Registers the one active full device-log MASS receiver before report 2/80 is sent. */
     public synchronized void beginDeviceLogReceive(XiaomiMassReceive receiver) throws Failure {
+        beginDeviceLogReceive(receiver, null);
+    }
+
+    /** Registers the one active full device-log MASS receiver before report 2/80 is sent. */
+    public synchronized void beginDeviceLogReceive(XiaomiMassReceive receiver, Runnable onReportAccepted)
+            throws Failure {
         if (receiver == null || liveCommands == null || closed || !liveHold) {
             throw new Failure("DEVICE_LOG_SESSION_UNAVAILABLE");
         }
-        if (deviceLogReceiver != null) throw new Failure("DEVICE_LOG_RECEIVE_ACTIVE");
-        deviceLogReceiver = receiver;
+        deviceLogGate.begin(receiver, onReportAccepted);
     }
 
     public synchronized void cancelDeviceLogReceive(String code) {
-        XiaomiMassReceive receiver = deviceLogReceiver;
-        deviceLogReceiver = null;
-        if (receiver != null) receiver.fail(code);
+        deviceLogGate.cancelAny(code);
+    }
+
+    public synchronized void cancelDeviceLogReceive(XiaomiMassReceive expected, String code) {
+        deviceLogGate.cancel(expected, code);
+    }
+
+    /**
+     * Owns the one active device-log receiver on the reader thread. Pre-2/81 and unsolicited
+     * MASS traffic is ignored (with rate-limited header diagnostics) instead of poisoning the
+     * receiver; receiving 2/81 SUCCESS arms the receiver synchronously on the reader thread
+     * before the next wire frame is read, while a valid part-1 MASS packet arriving ahead of
+     * (or without) 2/81 starts the transfer immediately.
+     */
+    static final class DeviceLogMassGate {
+        private static final long IGNORED_LOG_INTERVAL_NANOS = TimeUnit.SECONDS.toNanos(5);
+        private final Consumer<String> log;
+        private final java.util.function.LongSupplier clockNanos;
+        private XiaomiMassReceive active;
+        private Runnable onReportAccepted;
+        private boolean armed;
+        private boolean reportAcceptedLogged;
+        private long ignoredLastLogNanos;
+        private int ignoredSuppressed;
+        private String ignoredReason;
+
+        DeviceLogMassGate(Consumer<String> log, java.util.function.LongSupplier clockNanos) {
+            this.log = log;
+            this.clockNanos = clockNanos;
+        }
+
+        synchronized void begin(XiaomiMassReceive receiver) throws Failure {
+            begin(receiver, null);
+        }
+
+        synchronized void begin(XiaomiMassReceive receiver, Runnable onReportAccepted) throws Failure {
+            if (active != null) throw new Failure("DEVICE_LOG_RECEIVE_ACTIVE");
+            active = receiver;
+            this.onReportAccepted = onReportAccepted;
+            armed = false;
+            reportAcceptedLogged = false;
+        }
+
+        synchronized void cancel(XiaomiMassReceive expected, String code) {
+            if (expected == null || active != expected) return;
+            active = null;
+            onReportAccepted = null;
+            armed = false;
+            reportAcceptedLogged = false;
+            expected.fail(code);
+        }
+
+        synchronized void cancelAny(String code) {
+            XiaomiMassReceive receiver = active;
+            active = null;
+            onReportAccepted = null;
+            armed = false;
+            reportAcceptedLogged = false;
+            flushIgnoredLocked();
+            if (receiver != null) receiver.fail(code);
+        }
+
+        void onCommand(XiaomiProto.Command command) {
+            XiaomiMassReceive rejectTarget = null;
+            String rejectCode = null;
+            Runnable acceptedCallback = null;
+            synchronized (this) {
+                if (active == null) return;
+                if (BandLogCommand.isProtocolRejection(command)) {
+                    log.accept("DEVICE_LOG_EXPORT rejected protoStatus=" + command.getStatus()
+                            + " subtype=" + command.getSubtype());
+                    rejectTarget = active;
+                    rejectCode = "DEVICE_LOG_DEVICE_REJECTED";
+                    active = null;
+                    onReportAccepted = null;
+                    armed = false;
+                    reportAcceptedLogged = false;
+                } else {
+                    int status = BandLogCommand.resultStatus(command);
+                    if (status == 0) {
+                        armed = true;
+                        if (!reportAcceptedLogged) {
+                            reportAcceptedLogged = true;
+                            log.accept("DEVICE_LOG_EXPORT receiving");
+                            acceptedCallback = onReportAccepted;
+                        }
+                    } else if (status > 0) {
+                        rejectCode = BandLogCommand.statusCode(status);
+                        log.accept("DEVICE_LOG_EXPORT rejected status=" + status + " code=" + rejectCode);
+                        rejectTarget = active;
+                        active = null;
+                        onReportAccepted = null;
+                        armed = false;
+                        reportAcceptedLogged = false;
+                    }
+                }
+            }
+            if (rejectTarget != null) rejectTarget.fail(rejectCode);
+            if (acceptedCallback != null) {
+                try { acceptedCallback.run(); } catch (RuntimeException ignored) { }
+            }
+        }
+
+        synchronized void onTransportRejected(String code) {
+            if (active != null && armed) {
+                XiaomiMassReceive receiver = active;
+                active = null;
+                onReportAccepted = null;
+                armed = false;
+                reportAcceptedLogged = false;
+                receiver.fail(code);
+            }
+        }
+
+        void onMass(byte[] payload) {
+            XiaomiMassReceive receiver;
+            boolean ready;
+            synchronized (this) {
+                receiver = active;
+                ready = armed;
+                if (receiver == null) {
+                    logIgnoredLocked("no-receiver", payload);
+                    return;
+                }
+                // Before 2/81 SUCCESS, ignore mid-stream or non-MASS packets from any prior
+                // or unsolicited transfer; still accept a valid part-1 header in case a
+                // firmware puts part 1 on the wire ahead of (or without) 2/81.
+                if (!ready && !receiver.hasStarted() && !XiaomiMassReceive.isFirstPart(payload)) {
+                    logIgnoredLocked("awaiting-result", payload);
+                    return;
+                }
+            }
+            boolean hadStarted = receiver.hasStarted();
+            int prevSkipped = receiver.skippedMidStreamCount();
+            receiver.accept(payload);
+            if (!hadStarted && receiver.hasStarted()) {
+                synchronized (this) {
+                    if (active == receiver) armed = true;
+                    flushIgnoredLocked();
+                }
+                log.accept("DEVICE_LOG_EXPORT stream start " + XiaomiMassReceive.describePacket(payload));
+            } else if (receiver.skippedMidStreamCount() > prevSkipped) {
+                synchronized (this) { logIgnoredLocked("mid-stream", payload); }
+            }
+            if (receiver.completion().toCompletableFuture().isDone()) {
+                String failed = receiver.failureCode();
+                if (failed != null) {
+                    log.accept("DEVICE_LOG_EXPORT stream failed code=" + failed + " "
+                            + XiaomiMassReceive.describePacket(payload));
+                }
+                synchronized (this) {
+                    if (active == receiver) {
+                        active = null;
+                        onReportAccepted = null;
+                        armed = false;
+                        reportAcceptedLogged = false;
+                    }
+                }
+            }
+        }
+
+        private void logIgnoredLocked(String reason, byte[] payload) {
+            long now = clockNanos.getAsLong();
+            boolean reasonChanged = ignoredReason != null && !ignoredReason.equals(reason);
+            if (reasonChanged) flushIgnoredLocked();
+            boolean firstPart = XiaomiMassReceive.isFirstPart(payload);
+            if (ignoredReason == null || firstPart || now - ignoredLastLogNanos >= IGNORED_LOG_INTERVAL_NANOS) {
+                int skipped = ignoredSuppressed;
+                ignoredSuppressed = 0;
+                ignoredReason = reason;
+                ignoredLastLogNanos = now;
+                log.accept("rx mass ignored reason=" + reason + " "
+                        + XiaomiMassReceive.describePacket(payload)
+                        + (skipped > 0 ? " suppressed=" + skipped : ""));
+            } else {
+                ignoredSuppressed++;
+            }
+        }
+
+        private void flushIgnoredLocked() {
+            if (ignoredSuppressed > 0 && ignoredReason != null) {
+                log.accept("rx mass ignored reason=" + ignoredReason + " suppressed=" + ignoredSuppressed);
+            }
+            ignoredSuppressed = 0;
+            ignoredReason = null;
+        }
     }
 
     /** One data-channel part. The queue owns the sequence so it stays aligned with commands. */
@@ -144,6 +332,7 @@ public final class SppDiagnosticClient implements AutoCloseable {
     public SppDiagnosticClient(Context context, Consumer<String> progress) {
         this.context = context.getApplicationContext();
         this.progress = progress;
+        this.deviceLogGate = new DeviceLogMassGate(line -> SessionLog.line(this.context, line), System::nanoTime);
         Arrays.fill(receivedAt, -1);
     }
 
@@ -530,7 +719,8 @@ public final class SppDiagnosticClient implements AutoCloseable {
             if (fitness != payload) Arrays.fill(fitness, (byte) 0);
             return null;
         }
-        if (packet.channel() == SppV1Codec.CHANNEL_MASS) {
+        if (packet.channel() == SppV1Codec.CHANNEL_MASS
+                || packet.channel() == SppV1Codec.CHANNEL_DEVICE_LOG) {
             byte[] mass = payload;
             if (packet.dataType() == SppV1Codec.DATA_ENCRYPTED) mass = session.decryptV1(payload);
             acceptDeviceLogMass(mass);
@@ -562,8 +752,7 @@ public final class SppDiagnosticClient implements AutoCloseable {
                 acceptDeviceLogMass(plain);
             } catch (Exception failed) {
                 SessionLog.line(context, "rx ble mass rejected len=" + payload.length);
-                XiaomiMassReceive active = deviceLogReceiver;
-                if (active != null) active.fail("MASS_PACKET_INVALID");
+                deviceLogGate.onTransportRejected("MASS_PACKET_INVALID");
             } finally {
                 if (plain != payload) Arrays.fill(plain, (byte) 0);
             }
@@ -664,14 +853,7 @@ public final class SppDiagnosticClient implements AutoCloseable {
     }
 
     private void acceptDeviceLogMass(byte[] payload) {
-        XiaomiMassReceive receiver = deviceLogReceiver;
-        if (receiver == null) {
-            SessionLog.line(context, "rx mass without device-log receiver bytes="
-                    + (payload == null ? 0 : payload.length));
-            return;
-        }
-        receiver.accept(payload);
-        if (receiver.completion().toCompletableFuture().isDone()) deviceLogReceiver = null;
+        deviceLogGate.onMass(payload);
     }
 
     private void sendCommand(XiaomiProto.Command command) throws Exception {
@@ -896,7 +1078,8 @@ public final class SppDiagnosticClient implements AutoCloseable {
             acceptActivity(data, sequence, rawPayload);
             return null;
         }
-        if (data.channel() == SppV2Codec.CHANNEL_DATA) {
+        if (data.channel() == SppV2Codec.CHANNEL_DATA
+                || data.channel() == SppV2Codec.CHANNEL_FILE_SENSOR) {
             byte[] plain;
             if (data.opcode() == SppV2Codec.OPCODE_ENCRYPTED) {
                 if (!authenticated) throw new Failure("ENCRYPTION_STATE_MISMATCH");
@@ -1131,6 +1314,7 @@ public final class SppDiagnosticClient implements AutoCloseable {
                     } else {
                         XiaomiProto.Command command = decodeAndAck(frame);
                         if (command != null) {
+                            deviceLogGate.onCommand(command);
                             if (onLiveCommand != null) onLiveCommand.accept(command);
                             liveCommands.onCommand(command);
                         }
@@ -1138,6 +1322,7 @@ public final class SppDiagnosticClient implements AutoCloseable {
                 } else {
                     XiaomiProto.Command command = nextCommand();
                     if (command != null) {
+                        deviceLogGate.onCommand(command);
                         // Transport ack already happened in writeLiveCommand. sentSequence is stale here.
                         if (onLiveCommand != null) onLiveCommand.accept(command);
                         liveCommands.onCommand(command);

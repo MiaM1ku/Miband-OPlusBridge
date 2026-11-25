@@ -33,6 +33,8 @@ public final class SppV2Codec {
     public static final int CHANNEL_PROTOBUF = 1;
     /** Plaintext bulk channel. Notification icons travel here after the type 22 accept. */
     public static final int CHANNEL_DATA = 2;
+    /** Sensor / device-log raw file channel used by some firmwares during log export. */
+    public static final int CHANNEL_FILE_SENSOR = 4;
     public static final int CHANNEL_ACTIVITY = 5;
     public static final int OPCODE_PLAINTEXT = 1;
     public static final int OPCODE_ENCRYPTED = 2;

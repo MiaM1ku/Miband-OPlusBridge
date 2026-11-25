@@ -337,6 +337,8 @@ public final class DeviceLogActivity extends AppCompatActivity {
                 .setTitle("正在拉取设备日志")
                 .setView(content)
                 .setCancelable(false)
+                .setNegativeButton("取消拉取",
+                        (ignored, which) -> BandLiveService.cancelDeviceLogExport("DEVICE_LOG_CANCELLED"))
                 .create();
         progressDialog.setCanceledOnTouchOutside(false);
         progressDialog.setOnKeyListener((dialog, keyCode, event) -> keyCode == KeyEvent.KEYCODE_BACK);
@@ -407,6 +409,11 @@ public final class DeviceLogActivity extends AppCompatActivity {
         String code = cause.getMessage() == null ? cause.getClass().getSimpleName()
                 : SessionLog.redact(cause.getMessage());
         return switch (code) {
+            case "DEVICE_LOG_CANCELLED" -> "已取消本次设备日志拉取，可随时重新开始。";
+            case "DEVICE_LOG_RECEIVE_ACTIVE" -> "已有设备日志拉取正在进行，完成后再试一次。";
+            case "LIVE_COMMAND_TIMEOUT" -> "等待手环响应超时，确认手环保持连接后再试一次。";
+            case "DEVICE_LOG_STREAM_TIMEOUT" -> "手环已应答，等待日志回传超时，确认手环保持连接后再试一次。";
+            case "DEVICE_LOG_STREAM_STALLED" -> "手环日志回传中途停滞，确认手环保持连接后再试一次。";
             case "DEVICE_LOG_NO_DATA" -> "手环暂无可导出的日志。稍后再试一次。";
             case "DEVICE_LOG_DEVICE_BUSY" -> "手环正在准备日志，请稍后再试。";
             case "DEVICE_LOG_DEVICE_REJECTED" -> "手环暂缓了日志导出请求。稍后再试一次。";

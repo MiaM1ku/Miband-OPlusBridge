@@ -223,6 +223,20 @@ public final class LiveCommandQueue implements AutoCloseable {
         cancelUnsent(true);
     }
 
+    /** Cancels any queued or in-flight request awaiting the given response type/subtype. */
+    public void cancelResponse(int type, int subtype, String code) {
+        String reason = code == null || code.isBlank() ? "LIVE_REQUEST_CANCELLED" : code;
+        synchronized (lock) {
+            for (int index = work.size() - 1; index >= 0; index--) {
+                Work item = work.get(index);
+                if (item.responseType == type && item.responseSubtype == subtype) {
+                    finishLocked(item, null, failure(reason));
+                }
+            }
+            scheduleDrainLocked();
+        }
+    }
+
     private void cancelUnsent(boolean calls) {
         synchronized (lock) {
             for (int index = work.size() - 1; index >= 0; index--) {

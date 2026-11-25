@@ -26,9 +26,13 @@ final class OHealthSleepWriter {
     static final int TABLE_STAT = 1011;
     static final int TABLE_BREATH_RATE = 1048;
     private static final int INSERT_CHUNK = 200;
+    private static final long VERIFIED_CACHE_TTL_MS = 30L * 60_000L;
     private static final String[] COLUMNS = {"recordId", "revision", "record"};
     private final OHealthHealthImportHook.HostContract host;
     private final OHealthSleepDerivedWriter derived;
+    private String verifiedScope = "";
+    private long verifiedCachedAtMs;
+    private final java.util.Map<Integer, String> verifiedDays = new java.util.HashMap<>();
     private final Class<?> sleepClass;
     private final Class<?> statClass;
     private final Class<?> breathClass;
@@ -141,21 +145,39 @@ final class OHealthSleepWriter {
         if (nights.isEmpty()) return;
         List<OHealthSleepPlan.Day> days = OHealthSleepPlan.days(nights);
         if (days.isEmpty()) return;
+        String scope = account + "|" + device;
+        long now = android.os.SystemClock.elapsedRealtime();
+        if (!scope.equals(verifiedScope) || now - verifiedCachedAtMs >= VERIFIED_CACHE_TTL_MS) {
+            verifiedScope = scope;
+            verifiedCachedAtMs = now;
+            verifiedDays.clear();
+        }
         HookRuntime.log("OHEALTH_SLEEP_BEGIN days=" + days.size() + " nights=" + nights.size());
         int inserted = 0;
         int skipped = 0;
+        int cached = 0;
         int held = 0;
         int failed = 0;
         for (OHealthSleepPlan.Day day : days) {
             if (!account.equals(host.account())) throw new SecurityException("IMPORT_ACCOUNT_CHANGED");
+            String signature = dayFingerprint(day, hasBreathForDay(context, account, queued, day));
+            if (signature.equals(verifiedDays.get(day.date()))) {
+                cached++;
+                continue;
+            }
             try {
                 String skip = writeDay(context, api, account, device, queued, day);
-                if (skip == null) inserted++;
-                else {
+                if (skip == null) {
+                    inserted++;
+                    verifiedDays.put(day.date(), signature);
+                } else {
                     skipped++;
+                    if ("already-ours".equals(skip)) {
+                        verifiedDays.put(day.date(), signature);
+                    }
                     String line = "OHEALTH_SLEEP_DAY_SKIPPED date=" + day.date() + " reason=" + skip;
                     HookRuntime.log(line);
-                    OHealthDeviceHook.traceLine(context, line);
+                    if (!"already-ours".equals(skip)) OHealthDeviceHook.traceLine(context, line);
                 }
             } catch (SecurityException paused) {
                 throw paused;
@@ -180,7 +202,34 @@ final class OHealthSleepWriter {
             }
         }
         HookRuntime.log("OHEALTH_SLEEP_IMPORT days=" + days.size()
-                + " inserted=" + inserted + " skipped=" + skipped + " held=" + held + " failed=" + failed);
+                + " inserted=" + inserted + " skipped=" + skipped
+                + " cached=" + cached + " held=" + held + " failed=" + failed);
+    }
+
+    private boolean hasBreathForDay(Context context, String account, String queued, OHealthSleepPlan.Day day) {
+        if (breathClass == null) return false;
+        for (OHealthSleepPlan.Night night : day.nights()) {
+            if (hasBreathRecords(context, account, queued, night)) return true;
+        }
+        return false;
+    }
+
+    static String dayFingerprint(OHealthSleepPlan.Day day, boolean hasBreath) {
+        StringBuilder out = new StringBuilder();
+        out.append(day.date()).append('|').append(day.fallAsleepMs()).append('|').append(day.wakeMs())
+                .append('|').append(day.sleepMinutes()).append('|').append(day.deepMinutes())
+                .append('|').append(day.lightMinutes()).append('|').append(day.remMinutes())
+                .append('|').append(day.wakeMinutes()).append('|').append(hasBreath ? 1 : 0);
+        for (OHealthSleepPlan.Night night : day.nights()) {
+            out.append(';').append(night.fallAsleepMs()).append(':').append(night.wakeMs())
+                    .append(':').append(night.snapshots()).append(':').append(night.syntheticAwakeMinutes())
+                    .append(':').append(night.segments().size());
+            for (OHealthSleepPlan.Segment seg : night.segments()) {
+                out.append(',').append(seg.startMs()).append('-').append(seg.endMs())
+                        .append('@').append(seg.sleepState());
+            }
+        }
+        return out.toString();
     }
 
     /** @return null when the day was written; otherwise {@code other-device} or {@code already-ours}. */
@@ -222,6 +271,7 @@ final class OHealthSleepWriter {
             boolean segmentsUpdated = writeSessionSegments(api, account, device, night);
             if (segmentsUpdated) anyUpdated = true;
 
+            boolean nightUpdated = segmentsUpdated;
             if (derived != null || breathClass != null) {
                 try {
                     boolean hasBreath = breathClass != null && hasBreathRecords(context, account, queued, night);
@@ -232,21 +282,24 @@ final class OHealthSleepWriter {
                     if (segmentsUpdated || needBreath || needIndex || needHr) {
                         writeDerived(api, account, device, night, context, queued, writeHrStat);
                         anyUpdated = true;
+                        nightUpdated = true;
                     }
                 } catch (Exception derivedFailure) {
                     HookRuntime.log("OHEALTH_SLEEP_DERIVED_FAILED date=" + day.date()
                             + " " + derivedFailure);
                 }
             }
-            int awakeShifts = 0;
-            for (OHealthSleepPlan.Segment segment : night.segments()) {
-                if (segment.sleepState() == OHealthSleepPlan.AWAKE) awakeShifts++;
+            if (nightUpdated) {
+                int awakeShifts = 0;
+                for (OHealthSleepPlan.Segment segment : night.segments()) {
+                    if (segment.sleepState() == OHealthSleepPlan.AWAKE) awakeShifts++;
+                }
+                String fragment = "SLEEP_FRAGMENT night=" + night.date()
+                        + " snapshots=" + night.snapshots() + " awakeShifts=" + awakeShifts
+                        + " syntheticAwake=" + night.syntheticAwakeMinutes();
+                HookRuntime.log(fragment);
+                OHealthDeviceHook.traceLine(context, fragment);
             }
-            String fragment = "SLEEP_FRAGMENT night=" + night.date()
-                    + " snapshots=" + night.snapshots() + " awakeShifts=" + awakeShifts
-                    + " syntheticAwake=" + night.syntheticAwakeMinutes();
-            HookRuntime.log(fragment);
-            OHealthDeviceHook.traceLine(context, fragment);
         }
 
         boolean sameStat = statMatches(stats, device, previous, day);

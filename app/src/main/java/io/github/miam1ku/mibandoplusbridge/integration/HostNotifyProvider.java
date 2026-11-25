@@ -19,7 +19,8 @@ import java.time.ZoneId;
 /** OHealth process cannot see BandLiveService.instance. This is the only notify IPC. */
 public final class HostNotifyProvider extends ContentProvider {
     public static final Uri URI = Uri.parse("content://io.github.miam1ku.mibandoplusbridge.notify");
-    private int postedCallState;
+    private final io.github.miam1ku.mibandoplusbridge.notify.HostCallState hostCall =
+            new io.github.miam1ku.mibandoplusbridge.notify.HostCallState();
     @Override public boolean onCreate() { return true; }
 
     @Override public Bundle call(String method, String arg, Bundle extras) {
@@ -54,22 +55,18 @@ public final class HostNotifyProvider extends ContentProvider {
                 alarm.putString("status", "QUEUED");
                 return alarm;
             }
+            // A live notification forward from Health proves its listener is connected even when
+            // the bridge process restarted after Health's listener bound.
+            io.github.miam1ku.mibandoplusbridge.notify.HealthListenerState.connected(true);
             int id = extras.getInt("id", 0);
             if (id == 0) id = Math.max(1, key.hashCode() & 0x7fffffff);
             boolean call = extras.getBoolean("call", false);
             if ("com.android.incallui".equals(pkg)
                     && CallPresentation.alreadyBlocked(extras.getString("title", ""), extras.getString("body", ""))) {
                 call = false;
-                if (!removed) {
-                    int showing;
-                    synchronized (this) {
-                        showing = postedCallState;
-                        postedCallState = 0;
-                    }
-                    if (showing != 0) {
-                        io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(getContext(), "CALL_BLOCKED_NOTICE");
-                        BandLiveService.forwardHostNotification(getContext(), BandNotificationCommand.endCall());
-                    }
+                if (!removed && hostCall.clear()) {
+                    io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(getContext(), "CALL_BLOCKED_NOTICE");
+                    BandLiveService.forwardHostNotification(getContext(), BandNotificationCommand.endCall());
                 }
             }
             int callState = call ? callState(extras) : 0;
@@ -80,7 +77,7 @@ public final class HostNotifyProvider extends ContentProvider {
                 return pending;
             }
             if (call && BandLiveService.callsOwned()) {
-                if (removed) postedCallState = 0;
+                if (removed) hostCall.reset();
                 else if (callState == BandNotificationCommand.CALL_ACTIVE) BandLiveService.noteCallAnswered();
                 io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(getContext(),
                         "CALL_HOST_SKIPPED removed=" + removed + " state=" + callState);
@@ -88,18 +85,23 @@ public final class HostNotifyProvider extends ContentProvider {
                 owned.putString("status", "QUEUED");
                 return owned;
             }
-            int previous;
-            synchronized (this) {
-                if (call && !removed && callState == postedCallState) {
-                    io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(getContext(),
-                            "CALL_HOST_UNCHANGED state=" + callState);
+            io.github.miam1ku.mibandoplusbridge.notify.HostCallState.Decision callDecision = null;
+            if (call) {
+                String model = io.github.miam1ku.mibandoplusbridge.data.LocalPrefs
+                        .open(getContext(), "band-state").getString("modelId", "");
+                boolean watch = io.github.miam1ku.mibandoplusbridge.data.BandCatalog.watchForm(model);
+                callDecision = hostCall.update(watch, removed, callState);
+                if (callDecision.action() == io.github.miam1ku.mibandoplusbridge.notify.HostCallState.Action.NONE) {
+                    if (!removed && callState == callDecision.previous()) {
+                        io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(getContext(),
+                                "CALL_HOST_UNCHANGED state=" + callState);
+                    }
                     Bundle unchanged = new Bundle();
                     unchanged.putString("status", "QUEUED");
                     return unchanged;
                 }
-                previous = postedCallState;
-                if (call) postedCallState = removed ? 0 : callState;
             }
+            int previous = callDecision == null ? 0 : callDecision.previous();
             Instant when = Instant.ofEpochMilli(Math.max(1, extras.getLong("when", System.currentTimeMillis())));
             String app = blankTo(extras.getString("app"), "");
             if (app.isBlank() || app.equals(pkg)) {
@@ -109,10 +111,12 @@ public final class HostNotifyProvider extends ContentProvider {
             if (app.isBlank()) app = pkg;
             io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(getContext(),
                     call ? "CALL_HOST removed=" + removed + " state=" + callState + " previous=" + previous
+                                    + " action=" + callDecision.action()
                             : "NOTIFY_HOST pkg=" + pkg + " app=" + (app.equals(pkg) ? "package" : "label")
                                     + " removed=" + removed + " call=false");
             var command = call
-                    ? (removed ? BandNotificationCommand.endCall()
+                    ? (callDecision.action() == io.github.miam1ku.mibandoplusbridge.notify.HostCallState.Action.END_CALL
+                            ? BandNotificationCommand.endCall()
                             : BandNotificationCommand.call(
                                     CallPresentation.displayName(extras.getString("title"),
                                             CallPresentation.kind(callState)),
@@ -122,7 +126,8 @@ public final class HostNotifyProvider extends ContentProvider {
                             : BandNotificationCommand.post(pkg, app, key, id,
                                     extras.getString("title", ""), extras.getString("body", ""),
                                     when, ZoneId.systemDefault()));
-            if (call && !removed && previous != 0) {
+            if (call && callDecision.action()
+                    == io.github.miam1ku.mibandoplusbridge.notify.HostCallState.Action.REPLACE_WITH_CALL) {
                 var next = command;
                 BandLiveService.forwardHostNotification(getContext(), BandNotificationCommand.endCall())
                         .whenComplete((ignored, error) -> BandLiveService.forwardHostNotification(getContext(), next));
@@ -158,6 +163,9 @@ public final class HostNotifyProvider extends ContentProvider {
     private Bundle trace(Bundle extras) {
         String line = extras == null ? "" : extras.getString("line", "");
         if (line.length() > 240) line = line.substring(0, 240);
+        if (line.startsWith("OHEALTH_NOTIFICATION_DROP ") && line.contains("process=com.heytap.health:transport")) {
+            io.github.miam1ku.mibandoplusbridge.notify.HealthListenerState.connected(true);
+        }
         io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(getContext(), "health " + line);
         Bundle result = new Bundle();
         result.putString("status", "LOGGED");

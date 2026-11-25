@@ -395,15 +395,19 @@ public final class MainActivity extends AppCompatActivity {
         debugExporting = true;
         View content = getLayoutInflater().inflate(R.layout.dialog_device_log_progress, null, false);
         TextView progressText = content.findViewById(R.id.device_log_progress_status);
-        progressText.setText("正在拉取手环日志，稍后一并放进调试包…");
+        com.google.android.material.progressindicator.LinearProgressIndicator progressBar =
+                content.findViewById(R.id.device_log_progress);
+        progressText.setText("正在请手环打包并回传日志（可能需要 10–60 秒），稍后一并放进调试包…");
         java.util.concurrent.CompletableFuture<DebugDeviceLog> pulled =
                 new java.util.concurrent.CompletableFuture<>();
         androidx.appcompat.app.AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setTitle("正在准备调试日志")
                 .setView(content)
                 .setCancelable(false)
-                .setNegativeButton("跳过手环日志",
-                        (ignored, which) -> pulled.complete(new DebugDeviceLog(null, "USER_SKIPPED")))
+                .setNegativeButton("跳过手环日志", (ignored, which) -> {
+                    BandLiveService.cancelDeviceLogExport("USER_SKIPPED");
+                    pulled.complete(new DebugDeviceLog(null, "USER_SKIPPED"));
+                })
                 .create();
         dialog.setCanceledOnTouchOutside(false);
         dialog.show();
@@ -411,6 +415,13 @@ public final class MainActivity extends AppCompatActivity {
         BandLiveService.requestDeviceLogExport(this, progress -> main.post(() -> {
             if (isDestroyed() || pulled.isDone() || progress.totalParts() <= 0) return;
             int percent = Math.min(100, progress.currentPart() * 100 / progress.totalParts());
+            if (progressBar != null) {
+                if (progressBar.isIndeterminate()) {
+                    progressBar.setIndeterminate(false);
+                    progressBar.setMax(100);
+                }
+                progressBar.setProgressCompat(percent, false);
+            }
             progressText.setText("正在接收手环日志 " + progress.currentPart() + "/"
                     + progress.totalParts() + " 片 · " + percent + "%");
         })).whenComplete((received, failure) -> {
@@ -423,6 +434,9 @@ public final class MainActivity extends AppCompatActivity {
         pulled.completeOnTimeout(new DebugDeviceLog(null, "WAIT_LIMIT"),
                 DEBUG_DEVICE_LOG_WAIT_MINUTES, java.util.concurrent.TimeUnit.MINUTES);
         pulled.thenAcceptAsync(part -> {
+            if ("USER_SKIPPED".equals(part.code()) || "WAIT_LIMIT".equals(part.code())) {
+                BandLiveService.cancelDeviceLogExport(part.code());
+            }
             main.post(() -> {
                 if (!isDestroyed() && dialog.isShowing()) progressText.setText("正在打包调试日志…");
             });
@@ -841,8 +855,8 @@ public final class MainActivity extends AppCompatActivity {
             nativeOwned = new OwnershipController(this).nativeReady();
         } catch (RuntimeException ignored) { }
         boolean accountConfirmed = false;
-        try {
-            accountConfirmed = new HealthRecordStore(this).confirmedAccountHash() != null;
+        try (HealthRecordStore store = new HealthRecordStore(this)) {
+            accountConfirmed = store.confirmedAccountHash() != null;
         } catch (Exception ignored) { }
         return new SetupProgress(rootGranted, hasBinding, hasProfile, registered, nativeOwned, accountConfirmed);
     }

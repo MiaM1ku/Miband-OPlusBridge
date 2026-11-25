@@ -40,6 +40,7 @@ public final class PhoneCallMonitor implements AutoCloseable {
     private final SharedPreferences settings;
     private final Map<Integer, CallListener> listeners = new HashMap<>();
     private final PhoneCallGate gate;
+    private final HostCallState wireState = new HostCallState();
     private boolean subscriptionListenerRegistered;
     private boolean gateConnected;
     private boolean sessionConnected;
@@ -72,7 +73,24 @@ public final class PhoneCallMonitor implements AutoCloseable {
             @Override public CompletionStage<Void> send(PhoneCallGate.Phase phase) {
                 SessionLog.line(PhoneCallMonitor.this.context, "CALL_PHASE " + phase);
                 if (phase == PhoneCallGate.Phase.NONE) restoreRinger();
-                return BandLiveService.forwardHostNotification(PhoneCallMonitor.this.context, commandFor(phase));
+                String model = io.github.miam1ku.mibandoplusbridge.data.LocalPrefs
+                        .open(PhoneCallMonitor.this.context, "band-state").getString("modelId", "");
+                boolean watch = io.github.miam1ku.mibandoplusbridge.data.BandCatalog.watchForm(model);
+                boolean removed = phase == PhoneCallGate.Phase.NONE;
+                int state = switch (phase) {
+                    case INCOMING -> BandNotificationCommand.CALL_INCOMING;
+                    case ACTIVE -> BandNotificationCommand.CALL_ACTIVE;
+                    case OUTGOING -> BandNotificationCommand.CALL_OUTGOING;
+                    case NONE -> 0;
+                };
+                var decision = wireState.update(watch, removed, state);
+                if (decision.action() == HostCallState.Action.NONE) {
+                    return java.util.concurrent.CompletableFuture.completedFuture(null);
+                }
+                XiaomiProto.Command wire = decision.action() == HostCallState.Action.END_CALL
+                        ? BandNotificationCommand.endCall()
+                        : commandFor(phase);
+                return BandLiveService.forwardHostNotification(PhoneCallMonitor.this.context, wire);
             }
             @Override public void cancelQueuedRing() {
                 BandLiveService.cancelCall(PhoneCallMonitor.this.context);
@@ -333,6 +351,7 @@ public final class PhoneCallMonitor implements AutoCloseable {
 
     private void disconnectGate() {
         gateConnected = false;
+        wireState.reset();
         gate.disconnected();
     }
 

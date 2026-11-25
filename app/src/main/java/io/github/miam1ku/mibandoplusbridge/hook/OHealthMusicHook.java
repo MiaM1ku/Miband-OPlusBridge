@@ -95,7 +95,7 @@ public final class OHealthMusicHook {
             Class<?> service = XposedHelpers.findClass(renamed ? SERVICE_6117 : SERVICE, loader);
             XposedBridge.hookAllMethods(service, renamed ? "c" : "handleNoControllers", new XC_MethodHook() {
                 @Override protected void afterHookedMethod(MethodHookParam param) {
-                    publish(true, 0, Math.max(0, lastVolume), "", "", 0, 0);
+                    publish(false, 0, Math.max(0, lastVolume), "", "", 0, 0);
                 }
             });
             if (renamed) {
@@ -154,7 +154,7 @@ public final class OHealthMusicHook {
     private static void mirror(String method, Object[] args) {
         try {
             if ("sendMusicCloseInfo".equals(method)) {
-                publish(true, 0, Math.max(0, lastVolume), "", "", 0, 0);
+                publish(false, 0, Math.max(0, lastVolume), "", "", 0, 0);
                 return;
             }
             if ("sendVolumeInfo".equals(method)) {

@@ -23,6 +23,7 @@ public final class SppV1Codec {
     public static final int CHANNEL_PROTO_RX = 1;
     public static final int CHANNEL_PROTO_TX = 2;
     public static final int CHANNEL_FITNESS = 3;
+    public static final int CHANNEL_DEVICE_LOG = 4;
     public static final int CHANNEL_MASS = 5;
     public static final int DATA_PLAIN = 0;
     public static final int DATA_ENCRYPTED = 1;

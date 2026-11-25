@@ -17,15 +17,28 @@ public final class BandLogCommandTest {
         assertEquals(command, XiaomiProto.Command.parseFrom(command.toByteArray()));
     }
 
-    @Test public void resultStatusReadsDeviceLogResultOnSubtype81() {
-        XiaomiProto.Command success = XiaomiProto.Command.newBuilder().setType(2).setSubtype(81)
+    @Test public void resultStatusReadsDeviceLogAndDumpLogOnSubtype81() {
+        XiaomiProto.Command deviceLog = XiaomiProto.Command.newBuilder().setType(2).setSubtype(81)
                 .setSystem(XiaomiProto.System.newBuilder().setReportDataResult(
                         XiaomiProto.ReportData.Result.newBuilder()
                                 .setType(XiaomiProto.ReportData.Type.DEVICE_LOG)
                                 .setStatus(XiaomiProto.ReportData.Status.SUCCESS)))
                 .build();
-        assertEquals(0, BandLogCommand.resultStatus(success));
+        XiaomiProto.Command dumpLog = XiaomiProto.Command.newBuilder().setType(2).setSubtype(81)
+                .setSystem(XiaomiProto.System.newBuilder().setReportDataResult(
+                        XiaomiProto.ReportData.Result.newBuilder()
+                                .setType(XiaomiProto.ReportData.Type.DUMP_LOG)
+                                .setStatus(XiaomiProto.ReportData.Status.BUSY)))
+                .build();
+        assertEquals(0, BandLogCommand.resultStatus(deviceLog));
+        assertEquals(3, BandLogCommand.resultStatus(dumpLog));
+        assertEquals("DEVICE_LOG_DEVICE_BUSY", BandLogCommand.statusCode(3));
+        assertEquals("DEVICE_LOG_NO_DATA", BandLogCommand.statusCode(1));
+        assertEquals("DEVICE_LOG_DIRECT_UPLOAD_UNSUPPORTED", BandLogCommand.statusCode(2));
+        assertEquals("DEVICE_LOG_DEVICE_REJECTED", BandLogCommand.statusCode(10));
         assertEquals(-1, BandLogCommand.resultStatus(
                 XiaomiProto.Command.newBuilder().setType(2).setSubtype(80).build()));
+        assertTrue(BandLogCommand.isProtocolRejection(
+                XiaomiProto.Command.newBuilder().setType(2).setSubtype(80).setStatus(5).build()));
     }
 }

@@ -47,6 +47,7 @@ public final class WeatherSync implements AutoCloseable {
     private ScheduledFuture<?> expiry;
     private LiveCommandQueue transactionQueue;
     private BandWeatherEncoder.Sample lastSent;
+    private String lastLoggedStatus;
 
     public WeatherSync(Context context, Supplier<LiveCommandQueue> queue,
                        ScheduledExecutorService coordinator) {
@@ -412,6 +413,11 @@ public final class WeatherSync implements AutoCloseable {
         if (error == null) result.complete(null); else result.completeExceptionally(new Failure(error));
     }
     private void record(String status) {
+        if (status != null && !status.equals(lastLoggedStatus)
+                && !"WEATHER_READING_CITIES".equals(status) && !"WEATHER_UNCHANGED".equals(status)) {
+            lastLoggedStatus = status;
+            SessionLog.line(context, "WEATHER_STATUS " + status);
+        }
         try {
             var edit = context.getSharedPreferences("weather-sync", 0).edit().putString("status", status);
             if ("WEATHER_TRANSPORT_CONFIRMED".equals(status)) edit.putLong("confirmedAtMs", System.currentTimeMillis());

@@ -27,6 +27,22 @@ public final class NotifyDedupe {
     }
 
     /** A different title or body is a new notification, even on the same key. */
+    public synchronized boolean first(XiaomiProto.Command command, long now) {
+        String id = identity(command);
+        boolean accepted = first(id, now);
+        if (accepted && command != null && command.hasNotification()) {
+            var notification = command.getNotification();
+            if (notification.hasNotification2() && notification.getNotification2().hasNotification3()) {
+                var item = notification.getNotification2().getNotification3();
+                // A fresh post on the same (pkg, key, id) must allow a subsequent dismiss within
+                // the dedupe window instead of collapsing it against an earlier dismiss.
+                seen.remove("dismiss\n" + item.getPackage() + "\n" + item.getKey() + "\n" + item.getId());
+            }
+        }
+        return accepted;
+    }
+
+    /** A different title or body is a new notification, even on the same key. */
     public synchronized boolean first(String identity, long now) {
         if (identity == null || identity.isBlank()) return true;
         Iterator<Map.Entry<String, Long>> entries = seen.entrySet().iterator();

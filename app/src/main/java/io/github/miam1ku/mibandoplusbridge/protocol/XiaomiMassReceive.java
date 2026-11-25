@@ -31,6 +31,8 @@ public final class XiaomiMassReceive implements AutoCloseable {
     private static final int CRC_BYTES = 4;
     private static final int MAX_NAME_BYTES = 180;
     private static final long MAX_FILE_BYTES = 512L * 1024 * 1024;
+    private static final int DEVICE_LOG_COMMAND = 129;
+    private static final int ONE_TRACK_LOG_COMMAND = 130;
 
     public record Progress(int currentPart, int totalParts, String fileName, long bytes) {}
     public record Result(File file, String fileName, long bytes) {}
@@ -39,6 +41,8 @@ public final class XiaomiMassReceive implements AutoCloseable {
     private final Consumer<Progress> progress;
     private final CompletableFuture<Result> completion = new CompletableFuture<>();
     private final CRC32 crc = new CRC32();
+    private final byte[] tail = new byte[CRC_BYTES];
+    private int tailLen;
     private File part;
     private OutputStream output;
     private String fileName = "";
@@ -46,6 +50,9 @@ public final class XiaomiMassReceive implements AutoCloseable {
     private int currentPart;
     private long bytes;
     private boolean complete;
+    private int skippedMidStream;
+    private String failureCode;
+    private long lastActivityNanos;
     private Progress latestProgress = new Progress(0, 0, "", 0);
 
     public XiaomiMassReceive(File directory, Consumer<Progress> progress) {
@@ -57,11 +64,74 @@ public final class XiaomiMassReceive implements AutoCloseable {
         return completion;
     }
 
+    public synchronized boolean hasStarted() {
+        return output != null || complete;
+    }
+
+    public synchronized int skippedMidStreamCount() {
+        return skippedMidStream;
+    }
+
+    public synchronized String failureCode() {
+        return failureCode;
+    }
+
+    public synchronized long lastActivityNanos() {
+        return lastActivityNanos;
+    }
+
+    /** Compact, privacy-safe summary of a reverse MASS packet header for session diagnostics. */
+    public static String describePacket(byte[] packet) {
+        if (packet == null) return "bytes=0";
+        StringBuilder out = new StringBuilder();
+        out.append("bytes=").append(packet.length);
+        if (packet.length >= PACKET_HEADER) {
+            int ver = packet[0] & 0xff;
+            int flags = packet[1] & 0xff;
+            int total = u16(packet, 2);
+            int current = u16(packet, 4);
+            out.append(" ver=").append(ver)
+                    .append(" flags=").append(flags)
+                    .append(" part=").append(current).append('/').append(total);
+            if (ver == 0 && current == 1 && packet.length > 7) {
+                int nameLen = packet[6] & 0xff;
+                if (nameLen > 0 && nameLen <= MAX_NAME_BYTES && 7 + nameLen <= packet.length) {
+                    String name = safeFileName(new String(packet, 7, nameLen, StandardCharsets.UTF_8));
+                    out.append(" name=").append(name);
+                }
+            }
+        }
+        int shown = Math.min(packet.length, 12);
+        if (shown > 0) {
+            out.append(" head=");
+            for (int i = 0; i < shown; i++) {
+                out.append(Character.forDigit((packet[i] >>> 4) & 0xf, 16))
+                        .append(Character.forDigit(packet[i] & 0xf, 16));
+            }
+        }
+        return out.toString();
+    }
+
+    /** True when the packet carries a valid part-1 reverse MASS header. */
+    public static boolean isFirstPart(byte[] packet) {
+        if (packet == null || packet.length < 7 || packet[0] != 0) return false;
+        int flags = packet[1] & 0xff;
+        int total = u16(packet, 2);
+        int current = u16(packet, 4);
+        if (total <= 0 || current != 1) return false;
+        int nameLength = packet[6] & 0xff;
+        int firstData = 7 + nameLength + RETAINED_HEADER;
+        int minLength = total == 1 ? firstData + CRC_BYTES : firstData;
+        boolean knownLogCommand = flags == DEVICE_LOG_COMMAND || flags == ONE_TRACK_LOG_COMMAND;
+        return (nameLength > 0 || knownLogCommand)
+                && nameLength <= MAX_NAME_BYTES && minLength <= packet.length;
+    }
+
     /** Called by the transport reader in wire order, after MASS payload decryption. */
     public synchronized void accept(byte[] packet) {
         if (complete || completion.isCompletedExceptionally()) return;
         try {
-            if (packet == null || packet.length < PACKET_HEADER + CRC_BYTES) {
+            if (packet == null || packet.length < PACKET_HEADER) {
                 throw new IllegalArgumentException("MASS_PACKET_TOO_SHORT");
             }
             if (packet[0] != 0) throw new IllegalArgumentException("MASS_VERSION_UNSUPPORTED");
@@ -73,15 +143,23 @@ public final class XiaomiMassReceive implements AutoCloseable {
 
             int from;
             if (output == null) {
-                if (current != 1) throw new IllegalArgumentException("MASS_FIRST_PART_MISSING");
+                // Mid-stream tail packets from a prior or unsolicited MASS transfer must not
+                // poison a newly armed device-log receiver; wait for part 1 of our transfer.
+                if (current != 1) {
+                    skippedMidStream++;
+                    return;
+                }
+                if (packet.length < 7) throw new IllegalArgumentException("MASS_HEADER_INVALID");
                 int nameLength = packet[6] & 0xff;
                 int firstData = 7 + nameLength + RETAINED_HEADER;
-                if (nameLength <= 0 || nameLength > MAX_NAME_BYTES
-                        || firstData + CRC_BYTES > packet.length) {
+                int minLength = total == 1 ? firstData + CRC_BYTES : firstData;
+                if (nameLength > MAX_NAME_BYTES || minLength > packet.length) {
                     throw new IllegalArgumentException("MASS_HEADER_INVALID");
                 }
-                fileName = safeFileName(new String(packet, 7, nameLength, StandardCharsets.UTF_8));
+                fileName = safeFileName(nameLength == 0 ? ""
+                        : new String(packet, 7, nameLength, StandardCharsets.UTF_8));
                 totalParts = total;
+                tailLen = 0;
                 startFile(packet, 6, firstData);
                 from = firstData;
                 crc.update(packet, 6, firstData - 6);
@@ -93,33 +171,64 @@ public final class XiaomiMassReceive implements AutoCloseable {
                 from = PACKET_HEADER;
             }
 
-            int to = packet.length;
+            lastActivityNanos = System.nanoTime();
+            appendWithTrailingCrcWindow(packet, from, packet.length - from);
+            if (bytes > MAX_FILE_BYTES) throw new IOException("MASS_FILE_TOO_LARGE");
+
             if (current == totalParts) {
-                if (to - from < CRC_BYTES) throw new IllegalArgumentException("MASS_FRAGMENT_MISSING");
-                int expected = le32(packet, to - CRC_BYTES);
-                to -= CRC_BYTES;
-                output.write(packet, from, to - from);
-                crc.update(packet, from, to - from);
-                bytes += to - from;
-                synchronized (this) {
-                    if ((int) crc.getValue() != expected) {
-                        throw new IllegalArgumentException("MASS_CRC_MISMATCH");
-                    }
-                    currentPart = current;
-                    finishFile();
-                    publishProgress(current, total);
+                if (tailLen < CRC_BYTES) throw new IllegalArgumentException("MASS_FRAGMENT_MISSING");
+                int expected = le32(tail, 0);
+                if ((int) crc.getValue() != expected) {
+                    throw new IllegalArgumentException("MASS_CRC_MISMATCH");
                 }
+                currentPart = current;
+                finishFile();
+                publishProgress(current, total);
                 return;
             }
 
-            output.write(packet, from, to - from);
-            crc.update(packet, from, to - from);
-            bytes += to - from;
             currentPart = current;
-            if (bytes > MAX_FILE_BYTES) throw new IOException("MASS_FILE_TOO_LARGE");
             publishProgress(current, total);
         } catch (Exception failure) {
             fail(failure.getMessage() == null ? failure.getClass().getSimpleName() : failure.getMessage());
+        }
+    }
+
+    /**
+     * Streams payload bytes while holding back the latest four bytes in {@link #tail}.
+     * This handles a CRC32 that straddles the boundary between the penultimate and final packet.
+     */
+    private void appendWithTrailingCrcWindow(byte[] data, int offset, int length) throws IOException {
+        if (length <= 0) return;
+        int combined = tailLen + length;
+        if (combined <= CRC_BYTES) {
+            System.arraycopy(data, offset, tail, tailLen, length);
+            tailLen = combined;
+            return;
+        }
+        int flush = combined - CRC_BYTES;
+        if (flush >= tailLen) {
+            if (tailLen > 0) {
+                output.write(tail, 0, tailLen);
+                crc.update(tail, 0, tailLen);
+                bytes += tailLen;
+            }
+            int fromData = flush - tailLen;
+            if (fromData > 0) {
+                output.write(data, offset, fromData);
+                crc.update(data, offset, fromData);
+                bytes += fromData;
+            }
+            System.arraycopy(data, offset + fromData, tail, 0, CRC_BYTES);
+            tailLen = CRC_BYTES;
+        } else {
+            output.write(tail, 0, flush);
+            crc.update(tail, 0, flush);
+            bytes += flush;
+            int kept = tailLen - flush;
+            System.arraycopy(tail, flush, tail, 0, kept);
+            System.arraycopy(data, offset, tail, kept, length);
+            tailLen = kept + length;
         }
     }
 
@@ -146,14 +255,15 @@ public final class XiaomiMassReceive implements AutoCloseable {
 
     public synchronized void fail(String code) {
         if (complete || completion.isDone()) return;
+        String resolved = code == null || code.isBlank() ? "MASS_RECEIVE_FAILED" : code;
+        failureCode = resolved;
         try {
             if (output != null) output.close();
         } catch (IOException ignored) { }
         output = null;
         if (part != null) part.delete();
         part = null;
-        completion.completeExceptionally(new IllegalStateException(
-                code == null || code.isBlank() ? "MASS_RECEIVE_FAILED" : code));
+        completion.completeExceptionally(new IllegalStateException(resolved));
     }
 
     public synchronized Progress progressSnapshot() {

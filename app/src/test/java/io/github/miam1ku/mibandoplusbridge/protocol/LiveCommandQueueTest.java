@@ -270,6 +270,29 @@ public final class LiveCommandQueueTest {
         }
     }
 
+    @Test public void cancelResponseReleasesPendingResponseSlotImmediately() throws Exception {
+        try (Harness h = new Harness()) {
+            var first = h.queue.request(BandLogCommand.exportDeviceLog(), 2, 81, 120_000L);
+            Sent firstSent = h.next();
+            h.queue.onAck(firstSent.sequence);
+            h.queue.cancelResponse(2, 81, "USER_SKIPPED");
+            ExecutionException failure = assertThrows(ExecutionException.class, () -> await(first));
+            assertEquals("USER_SKIPPED", failure.getCause().getMessage());
+
+            var second = h.queue.request(BandLogCommand.exportDeviceLog(), 2, 81, 120_000L);
+            Sent secondSent = h.next();
+            h.queue.onAck(secondSent.sequence);
+            var response = XiaomiProto.Command.newBuilder().setType(2).setSubtype(81)
+                    .setSystem(XiaomiProto.System.newBuilder().setReportDataResult(
+                            XiaomiProto.ReportData.Result.newBuilder()
+                                    .setType(XiaomiProto.ReportData.Type.DEVICE_LOG)
+                                    .setStatus(XiaomiProto.ReportData.Status.SUCCESS)))
+                    .build();
+            h.queue.onCommand(response);
+            assertEquals(response, await(second));
+        }
+    }
+
     private static XiaomiProto.Command command(int type, int subtype) {
         return XiaomiProto.Command.newBuilder().setType(type).setSubtype(subtype).build();
     }

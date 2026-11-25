@@ -32,6 +32,7 @@ public final class BandLiveService extends Service {
     private static final long MANUAL_SYNC_OVERRIDE_TTL_MS = 60_000L;
     private static volatile BandLiveService instance;
     private static volatile long pendingManualSyncAtMs;
+    private static final Object DEVICE_LOG_LOCK = new Object();
     private static volatile io.github.miam1ku.mibandoplusbridge.protocol.XiaomiMassReceive deviceLogReceiver;
     private static volatile boolean diagnosticPaused;
     private volatile java.util.concurrent.CountDownLatch stopped = new java.util.concurrent.CountDownLatch(0);
@@ -121,6 +122,10 @@ public final class BandLiveService extends Service {
             new io.github.miam1ku.mibandoplusbridge.notify.NotifyDedupe();
     private static final io.github.miam1ku.mibandoplusbridge.notify.NotifyReplay HELD_NOTIFICATIONS =
             new io.github.miam1ku.mibandoplusbridge.notify.NotifyReplay();
+    private final io.github.miam1ku.mibandoplusbridge.notify.NotifyCoalescer notifyCoalescer =
+            new io.github.miam1ku.mibandoplusbridge.notify.NotifyCoalescer();
+    private final Object coalescerLock = new Object();
+    private java.util.concurrent.ScheduledFuture<?> coalescerFlush;
     private final java.util.ArrayDeque<String> iconPackages = new java.util.ArrayDeque<>();
     private final AtomicBoolean iconUploadBusy = new AtomicBoolean();
     private volatile String iconPackage;
@@ -446,50 +451,117 @@ public final class BandLiveService extends Service {
                 };
         var receiver = new io.github.miam1ku.mibandoplusbridge.protocol.XiaomiMassReceive(
                 directory, safe);
-        if (deviceLogReceiver != null) {
-            return java.util.concurrent.CompletableFuture.failedFuture(
-                    new IllegalStateException("DEVICE_LOG_RECEIVE_ACTIVE"));
+        synchronized (DEVICE_LOG_LOCK) {
+            if (deviceLogReceiver != null) {
+                return java.util.concurrent.CompletableFuture.failedFuture(
+                        new IllegalStateException("DEVICE_LOG_RECEIVE_ACTIVE"));
+            }
+            deviceLogReceiver = receiver;
         }
-        deviceLogReceiver = receiver;
+        final long startedAtNanos = System.nanoTime();
+        final java.util.concurrent.atomic.AtomicLong reportAcceptedAtNanos =
+                new java.util.concurrent.atomic.AtomicLong(0L);
         try {
-            client.beginDeviceLogReceive(receiver);
+            client.beginDeviceLogReceive(receiver, () ->
+                    reportAcceptedAtNanos.compareAndSet(0L, System.nanoTime()));
         } catch (Exception unavailable) {
-            deviceLogReceiver = null;
+            synchronized (DEVICE_LOG_LOCK) {
+                if (deviceLogReceiver == receiver) deviceLogReceiver = null;
+            }
             return java.util.concurrent.CompletableFuture.failedFuture(unavailable);
         }
         io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(context,
                 "DEVICE_LOG_EXPORT request");
-        return queue.request(
-                io.github.miam1ku.mibandoplusbridge.protocol.BandLogCommand.exportDeviceLog(),
-                2, 81, 120_000L)
-                .thenCompose(response -> {
-                    int status = io.github.miam1ku.mibandoplusbridge.protocol.BandLogCommand
-                            .resultStatus(response);
-                    if (status != 0) {
-                        client.cancelDeviceLogReceive(deviceLogStatus(status));
-                        return java.util.concurrent.CompletableFuture.failedFuture(
-                                new IllegalStateException(deviceLogStatus(status)));
+        java.util.concurrent.CompletableFuture<
+                io.github.miam1ku.mibandoplusbridge.protocol.XiaomiMassReceive.Result>
+                completion = receiver.completion().toCompletableFuture();
+        // Watchdog modeled on Xiaomi's reverse-MASS export lifecycle:
+        // - up to 180s for the band to pack logs and either answer 2/81 or start streaming MASS;
+        // - up to 60s after 2/81 SUCCESS for the first MASS fragment to arrive;
+        // - up to 30s idle between MASS fragments once streaming has begun;
+        // - 10 minute hard cap for very large log bundles.
+        java.util.concurrent.ScheduledFuture<?> watchdog = live.coordinator.scheduleAtFixedRate(() -> {
+            if (completion.isDone()) return;
+            long now = System.nanoTime();
+            long elapsedMs = TimeUnit.NANOSECONDS.toMillis(now - startedAtNanos);
+            if (elapsedMs >= TimeUnit.MINUTES.toMillis(10)) {
+                client.cancelDeviceLogReceive(receiver, "DEVICE_LOG_STREAM_STALLED");
+                return;
+            }
+            if (receiver.hasStarted()) {
+                long lastActivity = receiver.lastActivityNanos();
+                if (lastActivity > 0 && TimeUnit.NANOSECONDS.toMillis(now - lastActivity) >= 30_000L) {
+                    client.cancelDeviceLogReceive(receiver, "DEVICE_LOG_STREAM_STALLED");
+                }
+                return;
+            }
+            long acceptedAt = reportAcceptedAtNanos.get();
+            if (acceptedAt > 0) {
+                if (TimeUnit.NANOSECONDS.toMillis(now - acceptedAt) >= 60_000L) {
+                    client.cancelDeviceLogReceive(receiver, "DEVICE_LOG_STREAM_TIMEOUT");
+                }
+                return;
+            }
+            if (elapsedMs >= 180_000L) {
+                client.cancelDeviceLogReceive(receiver, "LIVE_COMMAND_TIMEOUT");
+            }
+        }, 5, 5, TimeUnit.SECONDS);
+        // Send 2/80 without blocking completion on 2/81: some firmwares stream reverse MASS
+        // immediately and send 2/81 at the end (or not at all), while 2/81 errors are handled
+        // synchronously by DeviceLogMassGate on the reader thread.
+        queue.send(io.github.miam1ku.mibandoplusbridge.protocol.BandLogCommand.exportDeviceLog())
+                .whenComplete((ignored, sendError) -> {
+                    if (sendError != null && !completion.isDone()) {
+                        client.cancelDeviceLogReceive(receiver, unwrapFailureCode(sendError));
                     }
-                    io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(context,
-                            "DEVICE_LOG_EXPORT receiving");
-                    java.util.concurrent.CompletableFuture<
-                            io.github.miam1ku.mibandoplusbridge.protocol.XiaomiMassReceive.Result>
-                            completion = receiver.completion().toCompletableFuture();
-                    completion.orTimeout(10, TimeUnit.MINUTES);
-                    return completion.whenComplete((result, error) -> {
-                        if (error != null) {
-                            client.cancelDeviceLogReceive("DEVICE_LOG_RECEIVE_FAILED");
-                            io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(context,
-                                    "DEVICE_LOG_EXPORT failed " + error.getClass().getSimpleName());
-                        } else {
-                            io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(context,
-                                    "DEVICE_LOG_EXPORT complete bytes=" + result.bytes());
-                        }
-                    });
-                }).whenComplete((result, error) -> {
-                    deviceLogReceiver = null;
-                    if (error != null) client.cancelDeviceLogReceive("DEVICE_LOG_EXPORT_FAILED");
                 });
+        return completion.whenComplete((result, error) -> {
+            watchdog.cancel(false);
+            synchronized (DEVICE_LOG_LOCK) {
+                if (deviceLogReceiver == receiver) deviceLogReceiver = null;
+            }
+            if (error != null) {
+                String code = unwrapFailureCode(error);
+                client.cancelDeviceLogReceive(receiver, code);
+                io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(context,
+                        "DEVICE_LOG_EXPORT failed " + code);
+            } else {
+                io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(context,
+                        "DEVICE_LOG_EXPORT complete bytes=" + result.bytes());
+            }
+        });
+    }
+
+    /** Cancels an in-flight device-log pull so subsequent pulls are not blocked by DEVICE_LOG_RECEIVE_ACTIVE. */
+    public static void cancelDeviceLogExport(String reason) {
+        String code = reason == null || reason.isBlank() ? "DEVICE_LOG_CANCELLED" : reason;
+        io.github.miam1ku.mibandoplusbridge.protocol.XiaomiMassReceive active;
+        synchronized (DEVICE_LOG_LOCK) {
+            active = deviceLogReceiver;
+            deviceLogReceiver = null;
+        }
+        if (active == null) return;
+        BandLiveService live = instance;
+        SppDiagnosticClient client = live == null ? null : live.client;
+        io.github.miam1ku.mibandoplusbridge.protocol.LiveCommandQueue queue = live == null ? null : live.commands;
+        if (client != null) client.cancelDeviceLogReceive(active, code);
+        else active.fail(code);
+        if (queue != null) {
+            queue.cancelResponse(2,
+                    io.github.miam1ku.mibandoplusbridge.protocol.BandLogCommand.RESULT_SUBTYPE,
+                    code);
+        }
+    }
+
+    private static String unwrapFailureCode(Throwable error) {
+        Throwable cause = error;
+        while ((cause instanceof java.util.concurrent.CompletionException
+                || cause instanceof java.util.concurrent.ExecutionException) && cause.getCause() != null) {
+            cause = cause.getCause();
+        }
+        String message = cause.getMessage();
+        if (message != null && message.matches("[A-Z0-9_]{3,64}")) return message;
+        return cause.getClass().getSimpleName();
     }
 
     public static io.github.miam1ku.mibandoplusbridge.protocol.XiaomiMassReceive.Progress
@@ -502,13 +574,7 @@ public final class BandLiveService extends Service {
     }
 
     private static String deviceLogStatus(int status) {
-        return switch (status) {
-            case 1 -> "DEVICE_LOG_NO_DATA";
-            case 2 -> "DEVICE_LOG_DIRECT_UPLOAD_UNSUPPORTED";
-            case 3 -> "DEVICE_LOG_DEVICE_BUSY";
-            case 10 -> "DEVICE_LOG_DEVICE_REJECTED";
-            default -> "DEVICE_LOG_RESULT_INVALID";
-        };
+        return io.github.miam1ku.mibandoplusbridge.protocol.BandLogCommand.statusCode(status);
     }
 
     public static void refreshWeather(Context context) {
@@ -655,6 +721,9 @@ public final class BandLiveService extends Service {
         try {
             var fitted = io.github.miam1ku.mibandoplusbridge.protocol.BandNotificationCommand.fitToPayload(command,
                     notificationPayloadLimit());
+            if (ordinaryPost(fitted) || ordinaryDismiss(fitted)) {
+                return live.enqueueOrdinaryNotification(fitted);
+            }
             io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(context, "NOTIFY_OUT type=" + fitted.getType()
                     + " subtype=" + fitted.getSubtype() + " bytes=" + fitted.getSerializedSize());
             noteIconPackage(fitted);
@@ -695,6 +764,9 @@ public final class BandLiveService extends Service {
         try {
             var fitted = io.github.miam1ku.mibandoplusbridge.protocol.BandNotificationCommand.fitToPayload(
                     command, notificationPayloadLimit());
+            if (ordinaryPost(fitted) || ordinaryDismiss(fitted)) {
+                return live.enqueueOrdinaryNotification(fitted);
+            }
             android.util.Log.i("OplusBandBridge", "NOTIFY_OUT type=" + fitted.getType()
                     + " subtype=" + fitted.getSubtype() + " bytes=" + fitted.getSerializedSize()
                     + " limit=" + notificationPayloadLimit());
@@ -778,6 +850,13 @@ public final class BandLiveService extends Service {
         try {
             var fitted = io.github.miam1ku.mibandoplusbridge.protocol.BandNotificationCommand.fitToPayload(
                     command, notificationPayloadLimit());
+            if (ordinaryPost(fitted) || ordinaryDismiss(fitted)) {
+                enqueueOrdinaryNotification(fitted).whenComplete((ignored, error) -> {
+                    if (error == null) held.succeed();
+                    else held.fail(error);
+                });
+                return;
+            }
             io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this, "NOTIFY_OUT type=" + fitted.getType()
                     + " subtype=" + fitted.getSubtype() + " bytes=" + fitted.getSerializedSize());
             noteIconPackage(fitted);
@@ -808,8 +887,7 @@ public final class BandLiveService extends Service {
     private static boolean duplicate(Context context,
             nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto.Command command) {
         if (command == null || (!ordinaryPost(command) && !ordinaryDismiss(command))) return false;
-        if (NOTIFICATIONS.first(io.github.miam1ku.mibandoplusbridge.notify.NotifyDedupe.identity(command),
-                android.os.SystemClock.elapsedRealtime())) return false;
+        if (NOTIFICATIONS.first(command, android.os.SystemClock.elapsedRealtime())) return false;
         io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(context, "NOTIFY_DROP reason=duplicate");
         return true;
     }
@@ -827,7 +905,97 @@ public final class BandLiveService extends Service {
     public static void cancelNotifications(Context context) {
         BandLiveService live = instance;
         var queue = live == null ? null : live.commands;
+        if (live != null) live.cancelCoalescedNotifications(new IllegalStateException("NOTIFICATION_CANCELLED"));
         if (queue != null) queue.cancelNotifications(new IllegalStateException("NOTIFICATION_CANCELLED"));
+    }
+
+    private java.util.concurrent.CompletionStage<Void> enqueueOrdinaryNotification(
+            nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto.Command fitted) {
+        var waiter = notifyCoalescer.offer(fitted, android.os.SystemClock.elapsedRealtime());
+        scheduleCoalescerFlush();
+        return waiter;
+    }
+
+    private void scheduleCoalescerFlush() {
+        long dueAt = notifyCoalescer.nextDueAtMs();
+        synchronized (coalescerLock) {
+            if (coalescerFlush != null) {
+                coalescerFlush.cancel(false);
+                coalescerFlush = null;
+            }
+            if (dueAt == Long.MAX_VALUE || stopRequested) return;
+            long delay = Math.max(1L, dueAt - android.os.SystemClock.elapsedRealtime());
+            try {
+                coalescerFlush = coordinator.schedule(this::flushCoalescedNotifications, delay, TimeUnit.MILLISECONDS);
+            } catch (java.util.concurrent.RejectedExecutionException stopping) {
+                notifyCoalescer.failAll(new IllegalStateException("NOTIFICATION_SESSION_UNAVAILABLE"));
+            }
+        }
+    }
+
+    private void flushCoalescedNotifications() {
+        synchronized (coalescerLock) {
+            coalescerFlush = null;
+        }
+        io.github.miam1ku.mibandoplusbridge.notify.NotifyCoalescer.Entry entry;
+        while ((entry = notifyCoalescer.pollNext(android.os.SystemClock.elapsedRealtime())) != null) {
+            var current = entry;
+            var queue = commands;
+            if (queue != null && notificationSessionReady(this)) {
+                android.util.Log.i("OplusBandBridge", "NOTIFY_OUT type=" + current.command.getType()
+                        + " subtype=" + current.command.getSubtype() + " bytes=" + current.command.getSerializedSize()
+                        + " limit=" + notificationPayloadLimit());
+                io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(this, "NOTIFY_OUT type="
+                        + current.command.getType() + " subtype=" + current.command.getSubtype()
+                        + " bytes=" + current.command.getSerializedSize());
+                noteIconPackage(current.command);
+                queue.send(current.command).whenComplete((ignored, error) -> {
+                    if (error == null) current.succeed();
+                    else current.fail(error);
+                });
+            } else if (mayWake(this)) {
+                holdNotification(this, current.command).whenComplete((ignored, error) -> {
+                    if (error == null) current.succeed();
+                    else current.fail(error);
+                });
+            } else {
+                current.fail(new IllegalStateException("NOTIFICATION_SESSION_UNAVAILABLE"));
+            }
+        }
+        scheduleCoalescerFlush();
+    }
+
+    private void cancelCoalescedNotifications(Throwable reason) {
+        synchronized (coalescerLock) {
+            if (coalescerFlush != null) {
+                coalescerFlush.cancel(false);
+                coalescerFlush = null;
+            }
+        }
+        notifyCoalescer.failAll(reason);
+    }
+
+    private void onCoalescerDisconnected() {
+        synchronized (coalescerLock) {
+            if (coalescerFlush != null) {
+                coalescerFlush.cancel(false);
+                coalescerFlush = null;
+            }
+        }
+        notifyCoalescer.resetSession();
+        var pending = notifyCoalescer.drainAll();
+        if (pending.isEmpty()) return;
+        boolean wake = mayWake(this);
+        for (var entry : pending) {
+            if (wake) {
+                holdNotification(this, entry.command).whenComplete((ignored, error) -> {
+                    if (error == null) entry.succeed();
+                    else entry.fail(error);
+                });
+            } else {
+                entry.fail(new IllegalStateException("NOTIFICATION_SESSION_UNAVAILABLE"));
+            }
+        }
     }
 
     public static void cancelCall(Context context) {
@@ -1150,7 +1318,8 @@ public final class BandLiveService extends Service {
                             coordinator.execute(() -> {
                                 if (epoch == sessionEpoch) noteSleep(command);
                             });
-                        } else if (command.getType() == 10 || command.getType() == 7 || command.getType() == 18) {
+                        } else if (command.getType() == 10 || command.getType() == 7 || command.getType() == 18
+                                || deviceLogReceiver != null) {
                             io.github.miam1ku.mibandoplusbridge.data.SessionLog.line(BandLiveService.this,
                                     "rx type=" + command.getType() + " subtype=" + command.getSubtype()
                                             + " status=" + command.getStatus());
@@ -1237,6 +1406,7 @@ public final class BandLiveService extends Service {
                     } catch (java.util.concurrent.RejectedExecutionException stopping) { }
                     weatherSync.onDisconnected();
                     calls.disconnected();
+                    onCoalescerDisconnected();
                     io.github.miam1ku.mibandoplusbridge.notify.BandNotificationListener.connectionChanged();
                     try { repository.markSessionClosed(); } catch (RuntimeException ignored) { }
                 }
@@ -2586,6 +2756,7 @@ public final class BandLiveService extends Service {
         }
         try { getContentResolver().unregisterContentObserver(zenMode); } catch (RuntimeException ignored) { }
         requestStop();
+        cancelCoalescedNotifications(new IllegalStateException("NOTIFICATION_SESSION_UNAVAILABLE"));
         calls.close();
         weatherSync.close();
         healthReplay.close();

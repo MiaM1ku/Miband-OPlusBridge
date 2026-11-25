@@ -23,7 +23,8 @@ public final class BandLogCommand {
 
     /**
      * Returns the device status from a 2/81 result, or -1 when the command is a different
-     * response. SUCCESS is 0.
+     * response. SUCCESS is 0. Accepts both DEVICE_LOG and DUMP_LOG because some firmwares
+     * answer a DEVICE_LOG export with DUMP_LOG.
      */
     public static int resultStatus(XiaomiProto.Command command) {
         if (command == null || command.getType() != 2 || !command.hasSubtype()
@@ -32,7 +33,27 @@ public final class BandLogCommand {
             return -1;
         }
         XiaomiProto.ReportData.Result result = command.getSystem().getReportDataResult();
-        return result.getType() == XiaomiProto.ReportData.Type.DEVICE_LOG
+        XiaomiProto.ReportData.Type type = result.getType();
+        return (type == XiaomiProto.ReportData.Type.DEVICE_LOG
+                || type == XiaomiProto.ReportData.Type.DUMP_LOG)
                 ? result.getStatus().getNumber() : -1;
+    }
+
+    /** True when the band rejected 2/80 or 2/81 with a non-zero top-level protobuf status. */
+    public static boolean isProtocolRejection(XiaomiProto.Command command) {
+        return command != null && command.getType() == 2 && command.hasSubtype()
+                && (command.getSubtype() == REQUEST_SUBTYPE || command.getSubtype() == RESULT_SUBTYPE)
+                && command.hasStatus() && command.getStatus() != 0;
+    }
+
+    /** Maps a non-zero ReportData.Status number to a stable error code. */
+    public static String statusCode(int status) {
+        return switch (status) {
+            case 1 -> "DEVICE_LOG_NO_DATA";
+            case 2 -> "DEVICE_LOG_DIRECT_UPLOAD_UNSUPPORTED";
+            case 3 -> "DEVICE_LOG_DEVICE_BUSY";
+            case 10 -> "DEVICE_LOG_DEVICE_REJECTED";
+            default -> "DEVICE_LOG_RESULT_INVALID";
+        };
     }
 }

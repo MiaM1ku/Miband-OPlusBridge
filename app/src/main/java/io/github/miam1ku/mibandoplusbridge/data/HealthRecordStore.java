@@ -21,9 +21,19 @@ public final class HealthRecordStore extends SQLiteOpenHelper {
     private static final int MAX_RECORDS = 32768;
     private static final long MAX_BYTES = 64L * 1024 * 1024;
     private static final int MAX_RECORD_BYTES = 8192;
+    /** Serializes write transactions across independent helper instances in the same process. */
+    private static final Object WRITE_LOCK = new Object();
 
     public HealthRecordStore(Context context) {
         super(requireCredentialProtected(context), "health-outbox.db", null, 2);
+        setWriteAheadLoggingEnabled(true);
+    }
+
+    @Override public void onConfigure(SQLiteDatabase db) {
+        super.onConfigure(db);
+        try (Cursor ignored = db.rawQuery("PRAGMA busy_timeout=10000", null)) {
+            ignored.moveToFirst();
+        }
     }
     private static Context requireCredentialProtected(Context context) {
         if (context.isDeviceProtectedStorage()) throw new IllegalArgumentException("CE_STORAGE_REQUIRED");
@@ -105,28 +115,30 @@ public final class HealthRecordStore extends SQLiteOpenHelper {
     /** Unsent archives and the outbox follow the current account. Stored measurements stay put. */
     public synchronized void confirmAccountHash(String hash) {
         if (hash == null || !hash.matches("[0-9a-f]{64}")) throw new IllegalArgumentException("ACCOUNT_HASH_INVALID");
-        SQLiteDatabase db = getWritableDatabase();
-        db.beginTransaction();
-        try {
-            ContentValues values = new ContentValues(3);
-            values.put("id", 1);
-            values.put("account_hash", hash);
-            values.put("paused", 0);
-            if (db.insertWithOnConflict("binding", null, values, SQLiteDatabase.CONFLICT_REPLACE) < 0) {
-                throw new IllegalStateException("HEALTH_ACCOUNT_WRITE_FAILED");
+        synchronized (WRITE_LOCK) {
+            SQLiteDatabase db = getWritableDatabase();
+            db.beginTransaction();
+            try {
+                ContentValues values = new ContentValues(3);
+                values.put("id", 1);
+                values.put("account_hash", hash);
+                values.put("paused", 0);
+                if (db.insertWithOnConflict("binding", null, values, SQLiteDatabase.CONFLICT_REPLACE) < 0) {
+                    throw new IllegalStateException("HEALTH_ACCOUNT_WRITE_FAILED");
+                }
+                ContentValues owner = new ContentValues(1);
+                owner.put("account_hash", hash);
+                db.update("files", owner,
+                        "account_hash IS NULL OR (account_hash!=? AND next_record_index<record_count)",
+                        new String[]{hash});
+                db.execSQL("DELETE FROM records WHERE account_hash!=? AND EXISTS ("
+                        + "SELECT 1 FROM records existing WHERE existing.account_hash=? "
+                        + "AND existing.record_id=records.record_id)", new Object[]{hash, hash});
+                db.update("records", owner, "account_hash IS NULL OR account_hash!=?", new String[]{hash});
+                db.setTransactionSuccessful();
+            } finally {
+                db.endTransaction();
             }
-            ContentValues owner = new ContentValues(1);
-            owner.put("account_hash", hash);
-            db.update("files", owner,
-                    "account_hash IS NULL OR (account_hash!=? AND next_record_index<record_count)",
-                    new String[]{hash});
-            db.execSQL("DELETE FROM records WHERE account_hash!=? AND EXISTS ("
-                    + "SELECT 1 FROM records existing WHERE existing.account_hash=? "
-                    + "AND existing.record_id=records.record_id)", new Object[]{hash, hash});
-            db.update("records", owner, "account_hash IS NULL OR account_hash!=?", new String[]{hash});
-            db.setTransactionSuccessful();
-        } finally {
-            db.endTransaction();
         }
     }
 
@@ -158,14 +170,16 @@ public final class HealthRecordStore extends SQLiteOpenHelper {
             String accountHash, int nextRecordIndex, String parseStatus, int recordCount) {}
 
     public synchronized EnqueueResult enqueueMeasurement(Measurement measurement) {
-        SQLiteDatabase db = getWritableDatabase();
-        db.beginTransaction();
-        try {
-            EnqueueResult result = enqueue(db, requireConfirmedAccount(db), measurement);
-            db.setTransactionSuccessful();
-            return result;
-        } finally {
-            db.endTransaction();
+        synchronized (WRITE_LOCK) {
+            SQLiteDatabase db = getWritableDatabase();
+            db.beginTransaction();
+            try {
+                EnqueueResult result = enqueue(db, requireConfirmedAccount(db), measurement);
+                db.setTransactionSuccessful();
+                return result;
+            } finally {
+                db.endTransaction();
+            }
         }
     }
 
@@ -173,32 +187,34 @@ public final class HealthRecordStore extends SQLiteOpenHelper {
     public synchronized EnqueueResult enqueueArchivedMeasurement(String fileHash, int expectedIndex,
             Measurement measurement) {
         requireHash(fileHash);
-        SQLiteDatabase db = getWritableDatabase();
-        db.beginTransaction();
-        try {
-            String account = requireConfirmedAccount(db);
-            try (Cursor file = db.rawQuery("SELECT device_id, account_hash, next_record_index, record_count, parse_status "
-                    + "FROM files WHERE file_hash=?", new String[]{fileHash})) {
-                if (!file.moveToFirst() || !account.equals(file.getString(1))
-                        || measurement == null || !measurement.deviceId.equals(file.getString(0))) {
-                    throw new SecurityException("HEALTH_ARCHIVE_OWNERSHIP_REQUIRED");
+        synchronized (WRITE_LOCK) {
+            SQLiteDatabase db = getWritableDatabase();
+            db.beginTransaction();
+            try {
+                String account = requireConfirmedAccount(db);
+                try (Cursor file = db.rawQuery("SELECT device_id, account_hash, next_record_index, record_count, parse_status "
+                        + "FROM files WHERE file_hash=?", new String[]{fileHash})) {
+                    if (!file.moveToFirst() || !account.equals(file.getString(1))
+                            || measurement == null || !measurement.deviceId.equals(file.getString(0))) {
+                        throw new SecurityException("HEALTH_ARCHIVE_OWNERSHIP_REQUIRED");
+                    }
+                    if (expectedIndex < 0 || expectedIndex != file.getInt(2) || expectedIndex >= file.getInt(3)
+                            || !"PARSED".equals(file.getString(4))) {
+                        throw new IllegalStateException("HEALTH_ARCHIVE_CURSOR_CHANGED");
+                    }
                 }
-                if (expectedIndex < 0 || expectedIndex != file.getInt(2) || expectedIndex >= file.getInt(3)
-                        || !"PARSED".equals(file.getString(4))) {
+                EnqueueResult result = enqueue(db, account, measurement);
+                ContentValues cursor = new ContentValues(1);
+                cursor.put("next_record_index", expectedIndex + 1);
+                if (db.update("files", cursor, "file_hash=? AND account_hash=? AND next_record_index=?",
+                        new String[]{fileHash, account, Integer.toString(expectedIndex)}) != 1) {
                     throw new IllegalStateException("HEALTH_ARCHIVE_CURSOR_CHANGED");
                 }
+                db.setTransactionSuccessful();
+                return result;
+            } finally {
+                db.endTransaction();
             }
-            EnqueueResult result = enqueue(db, account, measurement);
-            ContentValues cursor = new ContentValues(1);
-            cursor.put("next_record_index", expectedIndex + 1);
-            if (db.update("files", cursor, "file_hash=? AND account_hash=? AND next_record_index=?",
-                    new String[]{fileHash, account, Integer.toString(expectedIndex)}) != 1) {
-                throw new IllegalStateException("HEALTH_ARCHIVE_CURSOR_CHANGED");
-            }
-            db.setTransactionSuccessful();
-            return result;
-        } finally {
-            db.endTransaction();
         }
     }
 
@@ -309,17 +325,19 @@ public final class HealthRecordStore extends SQLiteOpenHelper {
         if (recordId == null || recordId.isBlank() || recordId.length() > 256 || revision <= 0) {
             throw new IllegalArgumentException("INVALID_HEALTH_RECEIPT");
         }
-        SQLiteDatabase db = getWritableDatabase();
-        db.beginTransaction();
-        try {
-            String hash = hashAccount(account);
-            if (!hash.equals(requireConfirmedAccount(db))) throw new SecurityException("HEALTH_ACCOUNT_NOT_CONFIRMED");
-            int removed = db.delete("records", "account_hash=? AND record_id=? AND revision=?",
-                    new String[]{hash, recordId, Integer.toString(revision)});
-            db.setTransactionSuccessful();
-            return removed;
-        } finally {
-            db.endTransaction();
+        synchronized (WRITE_LOCK) {
+            SQLiteDatabase db = getWritableDatabase();
+            db.beginTransaction();
+            try {
+                String hash = hashAccount(account);
+                if (!hash.equals(requireConfirmedAccount(db))) throw new SecurityException("HEALTH_ACCOUNT_NOT_CONFIRMED");
+                int removed = db.delete("records", "account_hash=? AND record_id=? AND revision=?",
+                        new String[]{hash, recordId, Integer.toString(revision)});
+                db.setTransactionSuccessful();
+                return removed;
+            } finally {
+                db.endTransaction();
+            }
         }
     }
     public synchronized int releaseUnsupported(String account, String recordId, int revision) throws JSONException {
@@ -327,26 +345,28 @@ public final class HealthRecordStore extends SQLiteOpenHelper {
         if (recordId == null || recordId.isBlank() || recordId.length() > 256 || revision <= 0) {
             throw new IllegalArgumentException("INVALID_HEALTH_RECEIPT");
         }
-        SQLiteDatabase db = getWritableDatabase();
-        db.beginTransaction();
-        try {
-            String hash = hashAccount(account);
-            if (!hash.equals(requireConfirmedAccount(db))) throw new SecurityException("HEALTH_ACCOUNT_NOT_CONFIRMED");
-            String payload;
-            try (Cursor cursor = db.rawQuery("SELECT payload FROM records WHERE account_hash=? AND record_id=? AND revision=?",
-                    new String[]{hash, recordId, Integer.toString(revision)})) {
-                if (!cursor.moveToFirst()) return 0;
-                payload = cursor.getString(0);
+        synchronized (WRITE_LOCK) {
+            SQLiteDatabase db = getWritableDatabase();
+            db.beginTransaction();
+            try {
+                String hash = hashAccount(account);
+                if (!hash.equals(requireConfirmedAccount(db))) throw new SecurityException("HEALTH_ACCOUNT_NOT_CONFIRMED");
+                String payload;
+                try (Cursor cursor = db.rawQuery("SELECT payload FROM records WHERE account_hash=? AND record_id=? AND revision=?",
+                        new String[]{hash, recordId, Integer.toString(revision)})) {
+                    if (!cursor.moveToFirst()) return 0;
+                    payload = cursor.getString(0);
+                }
+                if (HealthRecord.fromJson(new JSONObject(payload)).hostAccepts()) {
+                    throw new IllegalArgumentException("HOST_VALUE_IS_STORABLE");
+                }
+                int removed = db.delete("records", "account_hash=? AND record_id=? AND revision=?",
+                        new String[]{hash, recordId, Integer.toString(revision)});
+                db.setTransactionSuccessful();
+                return removed;
+            } finally {
+                db.endTransaction();
             }
-            if (HealthRecord.fromJson(new JSONObject(payload)).hostAccepts()) {
-                throw new IllegalArgumentException("HOST_VALUE_IS_STORABLE");
-            }
-            int removed = db.delete("records", "account_hash=? AND record_id=? AND revision=?",
-                    new String[]{hash, recordId, Integer.toString(revision)});
-            db.setTransactionSuccessful();
-            return removed;
-        } finally {
-            db.endTransaction();
         }
     }
 
@@ -478,32 +498,34 @@ public final class HealthRecordStore extends SQLiteOpenHelper {
         if (deviceId == null || deviceId.isBlank() || deviceId.length() > 128 || capturedAtMs < 0
                 || parseStatus == null || !parseStatus.matches("[A-Z0-9_]{1,128}") || recordCount < 0
                 || !"PARSED".equals(parseStatus) && recordCount != 0) throw new IllegalArgumentException("INVALID_HISTORY_INDEX");
-        SQLiteDatabase db = getWritableDatabase();
-        db.beginTransaction();
-        try {
-            try (Cursor old = db.rawQuery("SELECT device_id FROM files WHERE file_hash=?", new String[]{hash})) {
-                if (old.moveToFirst()) {
-                    if (!deviceId.equals(old.getString(0))) throw new SecurityException("HEALTH_ARCHIVE_IDENTITY_CONFLICT");
-                    db.setTransactionSuccessful();
-                    return; // Never transfer existing files to a new account or reset a replay cursor.
+        synchronized (WRITE_LOCK) {
+            SQLiteDatabase db = getWritableDatabase();
+            db.beginTransaction();
+            try {
+                try (Cursor old = db.rawQuery("SELECT device_id FROM files WHERE file_hash=?", new String[]{hash})) {
+                    if (old.moveToFirst()) {
+                        if (!deviceId.equals(old.getString(0))) throw new SecurityException("HEALTH_ARCHIVE_IDENTITY_CONFLICT");
+                        db.setTransactionSuccessful();
+                        return; // Never transfer existing files to a new account or reset a replay cursor.
+                    }
                 }
+                ContentValues row = new ContentValues(8);
+                row.put("file_hash", hash);
+                row.put("device_id", deviceId);
+                row.put("firmware", firmware);
+                row.put("captured_at_ms", capturedAtMs);
+                // Unsent files are claimed by the next real account. A paused binding keeps its queue.
+                try (Cursor binding = db.rawQuery("SELECT account_hash FROM binding WHERE id=1", null)) {
+                    row.put("account_hash", binding.moveToFirst() ? binding.getString(0) : null);
+                }
+                row.put("next_record_index", 0);
+                row.put("parse_status", parseStatus);
+                row.put("record_count", recordCount);
+                db.insertOrThrow("files", null, row);
+                db.setTransactionSuccessful();
+            } finally {
+                db.endTransaction();
             }
-            ContentValues row = new ContentValues(8);
-            row.put("file_hash", hash);
-            row.put("device_id", deviceId);
-            row.put("firmware", firmware);
-            row.put("captured_at_ms", capturedAtMs);
-            // Unsent files are claimed by the next real account. A paused binding keeps its queue.
-            try (Cursor binding = db.rawQuery("SELECT account_hash FROM binding WHERE id=1", null)) {
-                row.put("account_hash", binding.moveToFirst() ? binding.getString(0) : null);
-            }
-            row.put("next_record_index", 0);
-            row.put("parse_status", parseStatus);
-            row.put("record_count", recordCount);
-            db.insertOrThrow("files", null, row);
-            db.setTransactionSuccessful();
-        } finally {
-            db.endTransaction();
         }
     }
 
@@ -516,36 +538,40 @@ public final class HealthRecordStore extends SQLiteOpenHelper {
         if (recordCount < 1) return false;
         ContentValues values = new ContentValues(1);
         values.put("record_count", recordCount);
-        return getWritableDatabase().update("files", values,
-                "file_hash=? AND parse_status='PARSED' AND record_count<?",
-                new String[]{hash, Integer.toString(recordCount)}) == 1;
+        synchronized (WRITE_LOCK) {
+            return getWritableDatabase().update("files", values,
+                    "file_hash=? AND parse_status='PARSED' AND record_count<?",
+                    new String[]{hash, Integer.toString(recordCount)}) == 1;
+        }
     }
 
     /** A rejected file gained a parser. The cursor stays where it already moved. */
     synchronized boolean promoteRejectedFile(String hash, int recordCount) {
         requireHash(hash);
         if (recordCount < 1) return false;
-        SQLiteDatabase db = getWritableDatabase();
-        db.beginTransaction();
-        try {
-            try (Cursor row = db.rawQuery("SELECT parse_status, record_count, next_record_index FROM files WHERE file_hash=?",
-                    new String[]{hash})) {
-                if (!row.moveToFirst() || "PARSED".equals(row.getString(0))
-                        || row.getInt(1) != 0 || row.getInt(2) != 0) {
-                    db.setTransactionSuccessful();
-                    return false;
+        synchronized (WRITE_LOCK) {
+            SQLiteDatabase db = getWritableDatabase();
+            db.beginTransaction();
+            try {
+                try (Cursor row = db.rawQuery("SELECT parse_status, record_count, next_record_index FROM files WHERE file_hash=?",
+                        new String[]{hash})) {
+                    if (!row.moveToFirst() || "PARSED".equals(row.getString(0))
+                            || row.getInt(1) != 0 || row.getInt(2) != 0) {
+                        db.setTransactionSuccessful();
+                        return false;
+                    }
                 }
+                ContentValues values = new ContentValues(2);
+                values.put("parse_status", "PARSED");
+                values.put("record_count", recordCount);
+                int updated = db.update("files", values,
+                        "file_hash=? AND parse_status!='PARSED' AND record_count=0 AND next_record_index=0",
+                        new String[]{hash});
+                db.setTransactionSuccessful();
+                return updated == 1;
+            } finally {
+                db.endTransaction();
             }
-            ContentValues values = new ContentValues(2);
-            values.put("parse_status", "PARSED");
-            values.put("record_count", recordCount);
-            int updated = db.update("files", values,
-                    "file_hash=? AND parse_status!='PARSED' AND record_count=0 AND next_record_index=0",
-                    new String[]{hash});
-            db.setTransactionSuccessful();
-            return updated == 1;
-        } finally {
-            db.endTransaction();
         }
     }
 
@@ -563,43 +589,45 @@ public final class HealthRecordStore extends SQLiteOpenHelper {
             }
         }
         if (stages.isEmpty()) return 0;
-        SQLiteDatabase db = getWritableDatabase();
-        String account = requireConfirmedAccount(db);
-        int changed = 0;
-        db.beginTransaction();
-        try {
-            for (Measurement stage : stages) {
-                if (!SleepStageAlign.overlapsAny(stage.startMs, stage.endMs, owned)) continue;
-                if (enqueue(db, account, stage).added()) changed++;
-            }
-            for (SleepStageAlign.Interval interval : owned) {
-                List<String> keep = new ArrayList<>();
+        synchronized (WRITE_LOCK) {
+            SQLiteDatabase db = getWritableDatabase();
+            String account = requireConfirmedAccount(db);
+            int changed = 0;
+            db.beginTransaction();
+            try {
                 for (Measurement stage : stages) {
-                    if (stage.startMs < interval.endMs() && stage.endMs > interval.startMs()) keep.add(stage.recordId);
+                    if (!SleepStageAlign.overlapsAny(stage.startMs, stage.endMs, owned)) continue;
+                    if (enqueue(db, account, stage).added()) changed++;
                 }
-                if (keep.isEmpty()) continue;
-                List<String> drop = new ArrayList<>();
-                try (Cursor rows = db.rawQuery("SELECT record_id FROM measurements WHERE account_hash=? "
-                        + "AND device_id=? AND kind='sleep_stage' AND start_ms<? AND end_ms>?",
-                        new String[]{account, deviceId, Long.toString(interval.endMs()),
-                                Long.toString(interval.startMs())})) {
-                    while (rows.moveToNext()) {
-                        String id = rows.getString(0);
-                        if (!keep.contains(id)) drop.add(id);
+                for (SleepStageAlign.Interval interval : owned) {
+                    List<String> keep = new ArrayList<>();
+                    for (Measurement stage : stages) {
+                        if (stage.startMs < interval.endMs() && stage.endMs > interval.startMs()) keep.add(stage.recordId);
+                    }
+                    if (keep.isEmpty()) continue;
+                    List<String> drop = new ArrayList<>();
+                    try (Cursor rows = db.rawQuery("SELECT record_id FROM measurements WHERE account_hash=? "
+                            + "AND device_id=? AND kind='sleep_stage' AND start_ms<? AND end_ms>?",
+                            new String[]{account, deviceId, Long.toString(interval.endMs()),
+                                    Long.toString(interval.startMs())})) {
+                        while (rows.moveToNext()) {
+                            String id = rows.getString(0);
+                            if (!keep.contains(id)) drop.add(id);
+                        }
+                    }
+                    for (String id : drop) {
+                        String[] key = {account, id};
+                        db.delete("measurements", "account_hash=? AND record_id=?", key);
+                        db.delete("revisions", "account_hash=? AND record_id=?", key);
+                        changed++;
                     }
                 }
-                for (String id : drop) {
-                    String[] key = {account, id};
-                    db.delete("measurements", "account_hash=? AND record_id=?", key);
-                    db.delete("revisions", "account_hash=? AND record_id=?", key);
-                    changed++;
-                }
+                db.setTransactionSuccessful();
+            } finally {
+                db.endTransaction();
             }
-            db.setTransactionSuccessful();
-        } finally {
-            db.endTransaction();
+            return changed;
         }
-        return changed;
     }
 
     public record StressGap(String deviceId, long startMs, long endMs) {}
@@ -638,27 +666,29 @@ public final class HealthRecordStore extends SQLiteOpenHelper {
 
     public synchronized int forgetUnmeasuredStress(String account) {
         if (!authorizedAccount(account)) throw new SecurityException("HEALTH_ACCOUNT_NOT_CONFIRMED");
-        SQLiteDatabase db = getWritableDatabase();
-        String hash = hashAccount(account);
-        if (!hash.equals(requireConfirmedAccount(db))) throw new SecurityException("HEALTH_ACCOUNT_NOT_CONFIRMED");
-        db.beginTransaction();
-        try {
-            List<String> ids = new ArrayList<>();
-            try (Cursor rows = db.rawQuery("SELECT record_id FROM measurements WHERE account_hash=? AND kind='stress' "
-                    + "AND json_extract(payload,'$.measurementMode')='continuous' AND json_extract(payload,'$.value')=0",
-                    new String[]{hash})) {
-                while (rows.moveToNext()) ids.add(rows.getString(0));
+        synchronized (WRITE_LOCK) {
+            SQLiteDatabase db = getWritableDatabase();
+            String hash = hashAccount(account);
+            if (!hash.equals(requireConfirmedAccount(db))) throw new SecurityException("HEALTH_ACCOUNT_NOT_CONFIRMED");
+            db.beginTransaction();
+            try {
+                List<String> ids = new ArrayList<>();
+                try (Cursor rows = db.rawQuery("SELECT record_id FROM measurements WHERE account_hash=? AND kind='stress' "
+                        + "AND json_extract(payload,'$.measurementMode')='continuous' AND json_extract(payload,'$.value')=0",
+                        new String[]{hash})) {
+                    while (rows.moveToNext()) ids.add(rows.getString(0));
+                }
+                for (String id : ids) {
+                    String[] key = {hash, id};
+                    db.delete("records", "account_hash=? AND record_id=?", key);
+                    db.delete("revisions", "account_hash=? AND record_id=?", key);
+                    db.delete("measurements", "account_hash=? AND record_id=?", key);
+                }
+                db.setTransactionSuccessful();
+                return ids.size();
+            } finally {
+                db.endTransaction();
             }
-            for (String id : ids) {
-                String[] key = {hash, id};
-                db.delete("records", "account_hash=? AND record_id=?", key);
-                db.delete("revisions", "account_hash=? AND record_id=?", key);
-                db.delete("measurements", "account_hash=? AND record_id=?", key);
-            }
-            db.setTransactionSuccessful();
-            return ids.size();
-        } finally {
-            db.endTransaction();
         }
     }
 
@@ -705,16 +735,18 @@ public final class HealthRecordStore extends SQLiteOpenHelper {
     /** Removes the index row only. The caller deletes the raw bytes after this commits. */
     synchronized boolean dropFinishedFile(String hash) {
         requireHash(hash);
-        SQLiteDatabase db = getWritableDatabase();
-        db.beginTransaction();
-        try {
-            int removed = db.delete("files",
-                    "file_hash=? AND parse_status='PARSED' AND next_record_index>=record_count",
-                    new String[]{hash});
-            db.setTransactionSuccessful();
-            return removed == 1;
-        } finally {
-            db.endTransaction();
+        synchronized (WRITE_LOCK) {
+            SQLiteDatabase db = getWritableDatabase();
+            db.beginTransaction();
+            try {
+                int removed = db.delete("files",
+                        "file_hash=? AND parse_status='PARSED' AND next_record_index>=record_count",
+                        new String[]{hash});
+                db.setTransactionSuccessful();
+                return removed == 1;
+            } finally {
+                db.endTransaction();
+            }
         }
     }
 
